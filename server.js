@@ -5,7 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
-app.use(cors()); // Permite que la plataforma web se conecte
+app.use(cors());
 app.use(express.json({ limit: '10mb' }));
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -39,23 +39,23 @@ AVALUO TOTAL: $${datos.avaluoTotal || 0} | UF BASE: ${datos.ufBase}
 SUPERFICIES: Titulos ${datos.superfTitulos} ha, SII ${datos.superfSIITotal} ha, Google Earth ${datos.superfGoogleEarth} ha
 SUELOS: Clase I ${datos.c1} ha, II ${datos.c2} ha, III ${datos.c3} ha, IV ${datos.c4} ha
 SERIE: ${datos.seriesSuelo} | PENDIENTE: ${datos.pendiente} | DRENAJE: ${datos.drenaje}
-AGUA: ${datos.cn1} (${datos.ca1} acciones, ${datos.cq1} l/s) | ${datos.cn2} (${datos.ca2} acciones)
+AGUA: ${datos.cn1} (${datos.ca1} acciones, ${datos.cq1} l/s) | ${datos.cn2 || ''} (${datos.ca2 || ''} acciones)
 PLANTACIONES: ${datos.plantacionDesc} (${datos.plantacionHas} ha)
 CONSTRUCCIONES: ${datos.construcciones}
 COORDENADAS: ${datos.coordLat} S, ${datos.coordLon} O | DISTANCIA SANTIAGO: ${datos.distSantiago} km
 ACCESO: ${datos.acceso}
 
-Genera exactamente este JSON con 8 campos. Cada campo es un string con texto corrido profesional:
-resumen: 3 oraciones describiendo el predio, ubicacion y uso actual
-ubicacion: 2 oraciones con coordenadas, distancia a Santiago y acceso
-titulos: 1 parrafo sobre inscripcion en CBR y deslindes
-suelos: 1 parrafo sobre clasificacion de suelos segun SII
-ciren: 1 parrafo con caracteristicas de la serie de suelo segun CIREN
-clima: 2 parrafos sobre clima mediterraneo semiarido de la zona
-hidrico: 1 parrafo sobre derechos de aprovechamiento de aguas
-conclusiones: 4 parrafos de conclusiones profesionales de tasacion
+Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 8 campos de texto:
+- resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual
+- ubicacion: 1-2 oraciones con coordenadas, distancia a Santiago y acceso
+- titulos: 1 parrafo breve sobre inscripcion y deslindes
+- suelos: 1 parrafo breve sobre clasificacion de suelos segun SII
+- ciren: 1 parrafo breve con caracteristicas de la serie de suelo
+- clima: 1 parrafo sobre clima mediterraneo semiarido de la zona
+- hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas
+- conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion
 
-IMPORTANTE: Responde UNICAMENTE con el objeto JSON. Sin texto antes ni despues. Sin bloques de codigo.`;
+Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -66,27 +66,52 @@ IMPORTANTE: Responde UNICAMENTE con el objeto JSON. Sin texto antes ni despues. 
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
+        max_tokens: 2500,
         messages: [{ role: 'user', content: instruccion }]
       })
     });
 
     if (!response.ok) {
       const errText = await response.text();
-      console.error('Anthropic API error:', errText);
+      console.error('Anthropic API error:', response.status, errText);
       return res.status(502).json({ error: 'Error de la API de Claude', detail: errText });
     }
 
     const data = await response.json();
+
+    if (data.stop_reason === 'max_tokens') {
+      console.error('Respuesta truncada por max_tokens');
+    }
+
     const text = (data.content || []).map(c => c.text || '').join('').trim();
+    console.log('Respuesta cruda de Claude (primeros 500 chars):', text.substring(0, 500));
 
     let jsonStr = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
     const match = jsonStr.match(/\{[\s\S]*\}/);
+
     if (!match) {
-      return res.status(500).json({ error: 'Respuesta de IA no contenia JSON valido', raw: text });
+      console.error('No se encontro JSON en la respuesta. Texto completo:', text);
+      return res.status(500).json({ error: 'Respuesta de IA no contenia JSON valido', raw: text.substring(0, 1000) });
     }
 
-    const ia = JSON.parse(match[0]);
+    let ia;
+    try {
+      ia = JSON.parse(match[0]);
+    } catch (parseErr) {
+      console.error('Error parseando JSON:', parseErr.message);
+      console.error('JSON intentado (primeros 1000 chars):', match[0].substring(0, 1000));
+      return res.status(500).json({
+        error: 'El JSON generado por la IA estaba mal formado: ' + parseErr.message,
+        raw: match[0].substring(0, 1000)
+      });
+    }
+
+    const camposEsperados = ['resumen', 'ubicacion', 'titulos', 'suelos', 'ciren', 'clima', 'hidrico', 'conclusiones'];
+    const faltantes = camposEsperados.filter(c => !ia[c]);
+    if (faltantes.length > 0) {
+      console.warn('Campos faltantes en la respuesta:', faltantes);
+    }
+
     res.json({ ia });
 
   } catch (err) {
