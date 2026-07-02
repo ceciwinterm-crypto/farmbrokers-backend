@@ -121,22 +121,35 @@ app.post('/buscar-rol', async (req, res) => {
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
 
-  const candidatos = SIMPLEAPI_URL ? [SIMPLEAPI_URL] : [
-    'https://api.simpleapi.cl/api/v1/mapas/rol',
-    'https://api.simpleapi.cl/api/mapas/rol',
-    'https://api.simpleapi.cl/mapas/rol',
-    'https://api.simpleapi.cl/api/v1/mapas/predio'
+  // Rutas candidatas (SimpleAPI Mapas). Si SIMPLEAPI_URL esta definida, se usa solo esa.
+  const URL = SIMPLEAPI_URL || 'https://servicios.simpleapi.cl/api/mapas/buscar/rol';
+
+  // El rol suele venir como "manzana-predio". Preparamos variantes de body.
+  const partes = rolLimpio.split('-').map(s => s.trim());
+  const manzana = partes[0] || '';
+  const predio = partes[1] || '';
+
+  // Formato confirmado por SimpleAPI: comuna, manzana (antes del guion), predio (despues)
+  const bodies = [
+    { comuna: comunaLimpia, manzana, predio },
+    { comuna: comunaLimpia, manzana: Number(manzana)||manzana, predio: Number(predio)||predio },
+    { Comuna: comunaLimpia, Manzana: manzana, Predio: predio },
+    { comuna: comunaLimpia, manzana, predio, rol: rolLimpio }
   ];
 
   let resultado = null;
 
-  for (const base of candidatos) {
-    let r = await intentar(base + '?rol=' + encodeURIComponent(rolLimpio) + '&comuna=' + encodeURIComponent(comunaLimpia), { headers }, debug, 'GET ' + base);
+  // 1) POST con distintos formatos de body (lo mas probable)
+  for (const b of bodies) {
+    const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST body=' + JSON.stringify(b));
     if (r) { resultado = r; break; }
     await sleep(1300);
+  }
 
-    r = await intentar(base, { method: 'POST', headers, body: JSON.stringify({ rol: rolLimpio, comuna: comunaLimpia }) }, debug, 'POST ' + base);
-    if (r) { resultado = r; break; }
+  // 2) Si no, GET con query
+  if (!resultado) {
+    const r = await intentar(URL + '?rol=' + encodeURIComponent(rolLimpio) + '&comuna=' + encodeURIComponent(comunaLimpia), { headers }, debug, 'GET query');
+    if (r) resultado = r;
     await sleep(1300);
   }
 
@@ -144,6 +157,7 @@ app.post('/buscar-rol', async (req, res) => {
     return res.json({ ok: false, mensaje: 'Ninguna ruta respondio con datos. Revisa el detalle.', debug });
   }
 
+  // Mapeo flexible de campos (el formato exacto de SimpleAPI puede variar)
   const cand = Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado);
   const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
 
