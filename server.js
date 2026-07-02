@@ -1,4 +1,4 @@
-// Servidor backend para Farm Brokers - Plataforma de Tasaciones
+// Servidor backend para Farm Brokers - Plataforma de Tasaciones v2
 
 const express = require('express');
 const cors = require('cors');
