@@ -129,28 +129,59 @@ app.post('/buscar-rol', async (req, res) => {
   const manzana = partes[0] || '';
   const predio = partes[1] || '';
 
-  // Formato confirmado por SimpleAPI: comuna, manzana (antes del guion), predio (despues)
-  const bodies = [
-    { comuna: comunaLimpia, manzana, predio },
-    { comuna: comunaLimpia, manzana: Number(manzana)||manzana, predio: Number(predio)||predio },
-    { Comuna: comunaLimpia, Manzana: manzana, Predio: predio },
-    { comuna: comunaLimpia, manzana, predio, rol: rolLimpio }
-  ];
+  const norm = s => (s||'').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
 
-  let resultado = null;
+  // Paso 1: obtener el Id de comuna. La API lo devuelve en el error cuando mandamos un nombre invalido.
+  let comunaId = null;
+  let listaComunas = null;
+  const primer = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: comunaLimpia, manzana, predio }) }, debug, 'POST inicial (para obtener lista)');
 
-  // 1) POST con distintos formatos de body (lo mas probable)
-  for (const b of bodies) {
-    const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST body=' + JSON.stringify(b));
-    if (r) { resultado = r; break; }
+  // Si la respuesta trae data con lista de comunas, la usamos
+  const capturarLista = (raw) => {
+    if (raw && Array.isArray(raw.data) && raw.data.some(x => x.Comuna || x.comuna)) return raw.data;
+    return null;
+  };
+  listaComunas = capturarLista(primer);
+
+  // El intento anterior probablemente fallo con 400 pero incluyo su body en debug; re-parseamos ese snippet
+  if (!listaComunas) {
+    for (const d of debug) {
+      if (d.snippet && d.snippet.includes('"Comuna"')) {
+        try { const j = JSON.parse(d.snippet + (d.snippet.trim().endsWith('}') ? '' : '')); if (Array.isArray(j.data)) { listaComunas = j.data; break; } } catch(e){}
+      }
+    }
+  }
+
+  // Si aun no, pedimos explicitamente con una comuna vacia para forzar la lista
+  if (!listaComunas) {
+    const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: '__listar__', manzana, predio }) }, debug, 'POST forzar lista');
+    listaComunas = capturarLista(r);
     await sleep(1300);
   }
 
-  // 2) Si no, GET con query
-  if (!resultado) {
-    const r = await intentar(URL + '?rol=' + encodeURIComponent(rolLimpio) + '&comuna=' + encodeURIComponent(comunaLimpia), { headers }, debug, 'GET query');
-    if (r) resultado = r;
-    await sleep(1300);
+  if (Array.isArray(listaComunas)) {
+    const objetivo = norm(comunaLimpia);
+    const found = listaComunas.find(x => norm(x.Comuna || x.comuna) === objetivo);
+    if (found) comunaId = found.Id || found.id || found.ID;
+    debug.push({ label: 'comuna-resuelta', comunaId, buscado: objetivo, totalComunas: listaComunas.length });
+  }
+
+  let resultado = null;
+
+  if (comunaId) {
+    const bodies = [
+      { comuna: comunaId, manzana, predio },
+      { comuna: Number(comunaId)||comunaId, manzana: Number(manzana)||manzana, predio: Number(predio)||predio },
+      { comunaId: comunaId, manzana, predio },
+      { Comuna: comunaId, Manzana: manzana, Predio: predio }
+    ];
+    for (const b of bodies) {
+      const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST con Id=' + JSON.stringify(b));
+      if (r && !(r.mensaje && /no existe|no encontr/i.test(r.mensaje))) { resultado = r; break; }
+      await sleep(1300);
+    }
+  } else {
+    debug.push({ label: 'ERROR', mensaje: 'No se pudo resolver el Id de la comuna "' + comunaLimpia + '". Revisa que este bien escrita.' });
   }
 
   if (!resultado) {
