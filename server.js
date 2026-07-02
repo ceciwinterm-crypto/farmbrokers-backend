@@ -99,17 +99,10 @@ Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado
       ia = JSON.parse(match[0]);
     } catch (parseErr) {
       console.error('Error parseando JSON:', parseErr.message);
-      console.error('JSON intentado (primeros 1000 chars):', match[0].substring(0, 1000));
       return res.status(500).json({
         error: 'El JSON generado por la IA estaba mal formado: ' + parseErr.message,
         raw: match[0].substring(0, 1000)
       });
-    }
-
-    const camposEsperados = ['resumen', 'ubicacion', 'titulos', 'suelos', 'ciren', 'clima', 'hidrico', 'conclusiones'];
-    const faltantes = camposEsperados.filter(c => !ia[c]);
-    if (faltantes.length > 0) {
-      console.warn('Campos faltantes en la respuesta:', faltantes);
     }
 
     res.json({ ia });
@@ -118,6 +111,99 @@ Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado
     console.error('Error en /generar-informe:', err);
     res.status(500).json({ error: err.message });
   }
+});
+
+// ─── Busqueda automatica de datos por rol en SII (integracion no oficial) ───
+const normTxt = s => (s||'').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+
+async function tryFetch(url, opts, debug, label){
+  try{
+    const r = await fetch(url, opts);
+    const ct = r.headers.get('content-type')||'';
+    const body = await r.text();
+    debug.push({label, url, status: r.status, ct, snippet: body.substring(0, 250)});
+    try{ return JSON.parse(body); }catch(e){ return {__html: body, __status: r.status}; }
+  }catch(e){
+    debug.push({label, url, error: e.message});
+    return null;
+  }
+}
+
+app.post('/buscar-rol', async (req, res) => {
+  const { rol, comuna } = req.body || {};
+  if(!rol || !comuna) return res.status(400).json({ ok:false, error:'Faltan rol y comuna' });
+
+  const debug = [];
+  const base = 'https://www4.sii.cl/mapasui/services/data/mapasFacadeService/';
+  const headers = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Referer': 'https://www4.sii.cl/mapasui/internet/'
+  };
+
+  let comunasResp = await tryFetch(base + 'obtenerComunas', { headers }, debug, 'comunas-GET');
+  if(!comunasResp || comunasResp.__html){
+    comunasResp = await tryFetch(base + 'obtenerComunas', { method:'POST', headers:{...headers,'Content-Type':'application/json'}, body:'{}' }, debug, 'comunas-POST');
+  }
+  let lista = Array.isArray(comunasResp) ? comunasResp
+    : (comunasResp && (comunasResp.data || comunasResp.comunas || comunasResp.listaComunas)) || null;
+
+  let codComuna = null;
+  if(Array.isArray(lista)){
+    const target = normTxt(comuna);
+    const found = lista.find(x => normTxt(x.nombre || x.NOMBRE || x.descripcion || x.nombreComuna || x.comuna || '') === target);
+    if(found) codComuna = found.codigo ?? found.CODIGO ?? found.id ?? found.codComuna ?? found.codigoComuna ?? found.cod;
+    debug.push({label:'comuna-resuelta', codComuna, totalComunas: lista.length});
+  }
+
+  const partes = String(rol).split('-').map(s => s.trim().replace(/\D/g,''));
+  const manzana = partes[0] || '';
+  const predio = partes[1] || '';
+
+  const intentos = [];
+  if(codComuna){
+    intentos.push({label:'roles-GET', url: base + 'obtenerRoles?comuna=' + codComuna + '&manzana=' + manzana + '&predio=' + predio, opts:{ headers }});
+    intentos.push({label:'predio-GET', url: base + 'obtenerPredio?comuna=' + codComuna + '&manzana=' + manzana + '&predio=' + predio, opts:{ headers }});
+    intentos.push({label:'predioRol-POST', url: base + 'obtenerPredioPorRol', opts:{ method:'POST', headers:{...headers,'Content-Type':'application/json'}, body: JSON.stringify({ comuna: codComuna, manzana, predio }) }});
+    intentos.push({label:'buscarPredio-POST', url: base + 'buscarPredio', opts:{ method:'POST', headers:{...headers,'Content-Type':'application/json'}, body: JSON.stringify({ codigoComuna: codComuna, rol: manzana + '-' + predio }) }});
+  }
+  intentos.push({label:'buscarPredio-GET', url: base + 'buscarPredio?comuna=' + encodeURIComponent(comuna) + '&rol=' + manzana + '-' + predio, opts:{ headers }});
+
+  let datos = null;
+  for(const a of intentos){
+    const r = await tryFetch(a.url, a.opts, debug, a.label);
+    if(r && !r.__html){
+      const cand = Array.isArray(r) ? r[0] : (r.data || r.predio || r.resultado || r);
+      if(cand && typeof cand === 'object'){
+        const tiene = ['avaluo','AVALUO','avaluoTotal','superficie','SUPERFICIE','superficieTerreno','destino','DESTINO','direccion','DIRECCION']
+          .some(k => cand[k] !== undefined);
+        if(tiene){ datos = cand; break; }
+      }
+    }
+  }
+
+  if(!datos){
+    return res.json({ ok:false, codComuna, debug });
+  }
+
+  const g = (o, ...keys) => { for(const k of keys){ if(o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
+
+  let lat = g(datos,'lat','latitud','LATITUD','y','coordY');
+  let lon = g(datos,'lng','lon','longitud','LONGITUD','x','coordX');
+
+  res.json({
+    ok: true,
+    codComuna,
+    datos: {
+      avaluoFiscal: String(g(datos,'avaluo','AVALUO','avaluoTotal','avaluototal','avaluoFiscal')),
+      superficie: String(g(datos,'superficie','SUPERFICIE','superficieTerreno','supTerreno','supPredio')),
+      destino: String(g(datos,'destino','DESTINO','destinoPredio','uso')),
+      direccion: String(g(datos,'direccion','DIRECCION','direccionPredio')),
+      lat: String(lat), lon: String(lon)
+    },
+    raw: datos,
+    debug
+  });
 });
 
 app.listen(PORT, () => {
