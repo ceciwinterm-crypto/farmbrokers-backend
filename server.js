@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v7', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v8', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -193,6 +193,9 @@ app.post('/buscar-rol', async (req, res) => {
     destino: String(g(cand, 'Destino', 'destino', 'uso')),
     direccion: String(g(cand, 'Direccion', 'direccion')),
     periodo: String(g(cand, 'Periodo', 'periodo')),
+    areaHomogenea: String(g(cand, 'AreaHomogenea', 'areaHomogenea', 'AH')).trim(),
+    reavaluo: String(g(cand, 'Reavalúo', 'Reavaluo', 'reavaluo')),
+    ubicacionTipo: String(g(cand, 'Ubicación', 'Ubicacion', 'ubicacion')),
     lat: String(g(cand, 'PosicionX', 'lat', 'latitud')),
     lon: String(g(cand, 'PosicionY', 'lng', 'lon', 'longitud'))
   };
