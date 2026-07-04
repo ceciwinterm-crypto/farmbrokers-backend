@@ -1,4 +1,4 @@
-// Servidor backend para Farm Brokers - Plataforma de Tasaciones
+// Servidor backend para Farm Brokers - Plataforma de Tasaciones v5
 
 const express = require('express');
 const cors = require('cors');
@@ -9,14 +9,14 @@ app.use(express.json({ limit: '10mb' }));
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SIMPLEAPI_KEY = process.env.SIMPLEAPI_KEY;
-const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL; // opcional: fija la ruta exacta
+const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL;
 const PORT = process.env.PORT || 3000;
 
 if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v4', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v5', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -124,10 +124,8 @@ app.post('/buscar-rol', async (req, res) => {
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
 
-  // Rutas candidatas (SimpleAPI Mapas). Si SIMPLEAPI_URL esta definida, se usa solo esa.
   const URL = SIMPLEAPI_URL || 'https://servicios.simpleapi.cl/api/mapas/buscar/rol';
 
-  // El rol suele venir como "manzana-predio". Preparamos variantes de body.
   const partes = rolLimpio.split('-').map(s => s.trim());
   const manzana = partes[0] || '';
   const predio = partes[1] || '';
@@ -138,8 +136,6 @@ app.post('/buscar-rol', async (req, res) => {
   let listaComunas = cacheComunas.lista;
   let comunaId = null;
 
-  // Paso 1: si no tenemos la lista de comunas en cache, hacemos una consulta inicial.
-  // Si la comuna en texto funcionara directo (200), usamos ese resultado.
   if (!listaComunas) {
     const primer = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: comunaLimpia, manzana, predio }) }, debug, 'POST inicial');
     if (primer && primer.__status === 200) resultado = primer;
@@ -150,22 +146,24 @@ app.post('/buscar-rol', async (req, res) => {
     await sleep(1300);
   }
 
-  // Paso 2: resolver el Id de la comuna por nombre
+  let comunaNombre = null;
   if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
     const found = listaComunas.find(x => norm(x.Comuna || x.comuna) === objetivo);
-    if (found) comunaId = found.Id || found.id || found.ID;
-    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', buscado: objetivo, totalComunas: listaComunas.length });
+    if (found) {
+      comunaId = found.Id || found.id || found.ID;
+      comunaNombre = found.Comuna || found.comuna;
+    }
+    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length });
   }
 
-  // Paso 3: buscar el rol con el Id de comuna
-  if (!resultado && comunaId) {
-    const bodies = [
-      { comuna: comunaId, manzana, predio },
-      { comuna: Number(comunaId) || comunaId, manzana: Number(manzana) || manzana, predio: Number(predio) || predio }
-    ];
+  if (!resultado && (comunaNombre || comunaId)) {
+    const bodies = [];
+    if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
+    if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana: Number(manzana) || manzana, predio: Number(predio) || predio });
+    if (comunaId) bodies.push({ comuna: comunaId, manzana, predio });
     for (const b of bodies) {
-      const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST con Id=' + JSON.stringify(b));
+      const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST ' + JSON.stringify(b));
       if (r && r.__status === 200) { resultado = r; break; }
       await sleep(1300);
     }
@@ -175,19 +173,18 @@ app.post('/buscar-rol', async (req, res) => {
     return res.json({ ok: false, mensaje: 'Ninguna ruta respondio con datos. Revisa el detalle.', debug });
   }
 
-  // Mapeo flexible de campos (el formato exacto de SimpleAPI puede variar)
   const cand = Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado);
   const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
 
   res.json({
     ok: true,
     datos: {
-      avaluoFiscal: String(g(cand, 'avaluo', 'avaluoTotal', 'avaluototal', 'avaluoFiscal', 'AVALUO')),
-      superficie: String(g(cand, 'superficie', 'superficieTerreno', 'supTerreno', 'metros', 'SUPERFICIE')),
-      destino: String(g(cand, 'destino', 'destinoPredio', 'uso', 'DESTINO')),
-      direccion: String(g(cand, 'direccion', 'direccionPredio', 'DIRECCION')),
-      lat: String(g(cand, 'lat', 'latitud', 'y', 'coordY', 'LATITUD')),
-      lon: String(g(cand, 'lng', 'lon', 'longitud', 'x', 'coordX', 'LONGITUD'))
+      avaluoFiscal: String(g(cand, 'avaluo', 'avaluoTotal', 'avaluototal', 'avaluoFiscal', 'AVALUO', 'Avaluo', 'AvaluoTotal')),
+      superficie: String(g(cand, 'superficie', 'superficieTerreno', 'supTerreno', 'metros', 'SUPERFICIE', 'Superficie', 'SuperficieTerreno')),
+      destino: String(g(cand, 'destino', 'destinoPredio', 'uso', 'DESTINO', 'Destino')),
+      direccion: String(g(cand, 'direccion', 'direccionPredio', 'DIRECCION', 'Direccion')),
+      lat: String(g(cand, 'lat', 'latitud', 'y', 'coordY', 'LATITUD', 'Latitud', 'Lat')),
+      lon: String(g(cand, 'lng', 'lon', 'longitud', 'x', 'coordX', 'LONGITUD', 'Longitud', 'Lng', 'Lon'))
     },
     raw: cand,
     debug
