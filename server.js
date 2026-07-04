@@ -1,4 +1,4 @@
-// Servidor backend para Farm Brokers - Plataforma de Tasaciones v3
+// Servidor backend para Farm Brokers - Plataforma de Tasaciones
 
 const express = require('express');
 const cors = require('cors');
@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v4', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -100,16 +100,19 @@ async function intentar(url, opts, debug, label) {
   try {
     const r = await fetch(url, opts);
     const body = await r.text();
-    debug.push({ label, url, metodo: opts.method || 'GET', status: r.status, snippet: body.substring(0, r.status === 200 ? 800 : 250) });
-    if (r.status === 200) {
-      try { return JSON.parse(body); } catch (e) { return null; }
-    }
+    debug.push({ label, url, metodo: opts.method || 'GET', status: r.status, snippet: body.substring(0, 800) });
+    let json = null;
+    try { json = JSON.parse(body); } catch (e) {}
+    if (json && typeof json === 'object') { json.__status = r.status; return json; }
     return null;
   } catch (e) {
     debug.push({ label, url, error: e.message });
     return null;
   }
 }
+
+// Cache en memoria de la lista de comunas de SimpleAPI (evita gastar consultas)
+const cacheComunas = { lista: null };
 
 app.post('/buscar-rol', async (req, res) => {
   const { rol, comuna } = req.body || {};
@@ -131,57 +134,41 @@ app.post('/buscar-rol', async (req, res) => {
 
   const norm = s => (s||'').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
 
-  // Paso 1: obtener el Id de comuna. La API lo devuelve en el error cuando mandamos un nombre invalido.
+  let resultado = null;
+  let listaComunas = cacheComunas.lista;
   let comunaId = null;
-  let listaComunas = null;
-  const primer = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: comunaLimpia, manzana, predio }) }, debug, 'POST inicial (para obtener lista)');
 
-  // Si la respuesta trae data con lista de comunas, la usamos
-  const capturarLista = (raw) => {
-    if (raw && Array.isArray(raw.data) && raw.data.some(x => x.Comuna || x.comuna)) return raw.data;
-    return null;
-  };
-  listaComunas = capturarLista(primer);
-
-  // El intento anterior probablemente fallo con 400 pero incluyo su body en debug; re-parseamos ese snippet
+  // Paso 1: si no tenemos la lista de comunas en cache, hacemos una consulta inicial.
+  // Si la comuna en texto funcionara directo (200), usamos ese resultado.
   if (!listaComunas) {
-    for (const d of debug) {
-      if (d.snippet && d.snippet.includes('"Comuna"')) {
-        try { const j = JSON.parse(d.snippet + (d.snippet.trim().endsWith('}') ? '' : '')); if (Array.isArray(j.data)) { listaComunas = j.data; break; } } catch(e){}
-      }
+    const primer = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: comunaLimpia, manzana, predio }) }, debug, 'POST inicial');
+    if (primer && primer.__status === 200) resultado = primer;
+    if (primer && Array.isArray(primer.data) && primer.data.some(x => x.Comuna || x.comuna)) {
+      listaComunas = primer.data;
+      cacheComunas.lista = listaComunas;
     }
-  }
-
-  // Si aun no, pedimos explicitamente con una comuna vacia para forzar la lista
-  if (!listaComunas) {
-    const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: '__listar__', manzana, predio }) }, debug, 'POST forzar lista');
-    listaComunas = capturarLista(r);
     await sleep(1300);
   }
 
-  if (Array.isArray(listaComunas)) {
+  // Paso 2: resolver el Id de la comuna por nombre
+  if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
     const found = listaComunas.find(x => norm(x.Comuna || x.comuna) === objetivo);
     if (found) comunaId = found.Id || found.id || found.ID;
-    debug.push({ label: 'comuna-resuelta', comunaId, buscado: objetivo, totalComunas: listaComunas.length });
+    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', buscado: objetivo, totalComunas: listaComunas.length });
   }
 
-  let resultado = null;
-
-  if (comunaId) {
+  // Paso 3: buscar el rol con el Id de comuna
+  if (!resultado && comunaId) {
     const bodies = [
       { comuna: comunaId, manzana, predio },
-      { comuna: Number(comunaId)||comunaId, manzana: Number(manzana)||manzana, predio: Number(predio)||predio },
-      { comunaId: comunaId, manzana, predio },
-      { Comuna: comunaId, Manzana: manzana, Predio: predio }
+      { comuna: Number(comunaId) || comunaId, manzana: Number(manzana) || manzana, predio: Number(predio) || predio }
     ];
     for (const b of bodies) {
       const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST con Id=' + JSON.stringify(b));
-      if (r && !(r.mensaje && /no existe|no encontr/i.test(r.mensaje))) { resultado = r; break; }
+      if (r && r.__status === 200) { resultado = r; break; }
       await sleep(1300);
     }
-  } else {
-    debug.push({ label: 'ERROR', mensaje: 'No se pudo resolver el Id de la comuna "' + comunaLimpia + '". Revisa que este bien escrita.' });
   }
 
   if (!resultado) {
