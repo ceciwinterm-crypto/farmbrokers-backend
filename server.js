@@ -1,4 +1,4 @@
-// Servidor backend para Farm Brokers - Plataforma de Tasaciones
+// Servidor backend para Farm Brokers - Plataforma de Tasaciones v7
 
 const express = require('express');
 const cors = require('cors');
@@ -9,14 +9,14 @@ app.use(express.json({ limit: '10mb' }));
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SIMPLEAPI_KEY = process.env.SIMPLEAPI_KEY;
-const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL; // opcional: fija la ruta exacta
+const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL;
 const PORT = process.env.PORT || 3000;
 
 if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v6', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v7', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -124,10 +124,8 @@ app.post('/buscar-rol', async (req, res) => {
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
 
-  // Rutas candidatas (SimpleAPI Mapas). Si SIMPLEAPI_URL esta definida, se usa solo esa.
   const URL = SIMPLEAPI_URL || 'https://servicios.simpleapi.cl/api/mapas/buscar/rol';
 
-  // El rol suele venir como "manzana-predio". Preparamos variantes de body.
   const partes = rolLimpio.split('-').map(s => s.trim());
   const manzana = partes[0] || '';
   const predio = partes[1] || '';
@@ -138,8 +136,6 @@ app.post('/buscar-rol', async (req, res) => {
   let listaComunas = cacheComunas.lista;
   let comunaId = null;
 
-  // Paso 1: si no tenemos la lista de comunas en cache, hacemos una consulta inicial.
-  // Si la comuna en texto funcionara directo (200), usamos ese resultado.
   if (!listaComunas) {
     const primer = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: comunaLimpia, manzana, predio }) }, debug, 'POST inicial');
     if (primer && primer.__status === 200) resultado = primer;
@@ -150,7 +146,6 @@ app.post('/buscar-rol', async (req, res) => {
     await sleep(1300);
   }
 
-  // Paso 2: resolver la comuna por nombre (nos quedamos con el nombre EXACTO de su lista y su Id)
   let comunaNombre = null;
   if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
@@ -159,50 +154,4 @@ app.post('/buscar-rol', async (req, res) => {
       comunaId = found.Id || found.id || found.ID;
       comunaNombre = found.Comuna || found.comuna;
     }
-    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length });
-  }
-
-  // Paso 3: buscar el rol usando el nombre exacto (y el Id como respaldo)
-  if (!resultado && (comunaNombre || comunaId)) {
-    const bodies = [];
-    if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
-    if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana: Number(manzana) || manzana, predio: Number(predio) || predio });
-    if (comunaId) bodies.push({ comuna: comunaId, manzana, predio });
-    for (const b of bodies) {
-      const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST ' + JSON.stringify(b));
-      if (r && r.__status === 200) { resultado = r; break; }
-      await sleep(1300);
-    }
-  }
-
-  if (!resultado) {
-    return res.json({ ok: false, mensaje: 'Ninguna ruta respondio con datos. Revisa el detalle.', debug });
-  }
-
-  // Mapeo flexible de campos (el formato exacto de SimpleAPI puede variar)
-  const cand = Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado);
-  const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
-
-  const datosMap = {
-    avaluoFiscal: String(g(cand, 'avaluo', 'avaluoTotal', 'avaluototal', 'avaluoFiscal', 'AVALUO', 'Avaluo', 'AvaluoTotal')),
-    superficie: String(g(cand, 'superficie', 'superficieTerreno', 'supTerreno', 'metros', 'SUPERFICIE', 'Superficie', 'SuperficieTerreno')),
-    destino: String(g(cand, 'destino', 'destinoPredio', 'uso', 'DESTINO', 'Destino')),
-    direccion: String(g(cand, 'direccion', 'direccionPredio', 'DIRECCION', 'Direccion')),
-    lat: String(g(cand, 'lat', 'latitud', 'y', 'coordY', 'LATITUD', 'Latitud', 'Lat')),
-    lon: String(g(cand, 'lng', 'lon', 'longitud', 'x', 'coordX', 'LONGITUD', 'Longitud', 'Lng', 'Lon'))
-  };
-
-  console.log('SimpleAPI respuesta completa:', JSON.stringify(cand).substring(0, 2000));
-
-  const vacio = !datosMap.avaluoFiscal && !datosMap.superficie && !datosMap.destino && !datosMap.lat;
-  if (vacio) {
-    debug.push({ label: 'RESPUESTA-COMPLETA (enviar a Claude para mapear campos)', respuesta: cand });
-    return res.json({ ok: false, mensaje: 'El rol se encontro, pero los nombres de campos son distintos. Envia el detalle a Claude.', debug });
-  }
-
-  res.json({ ok: true, datos: datosMap, raw: cand, debug });
-});
-
-app.listen(PORT, () => {
-  console.log(`Servidor Farm Brokers corriendo en puerto ${PORT}`);
-});
+    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-',
