@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v10', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v11', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -373,7 +373,7 @@ app.post('/suelos-rol', async (req, res) => {
       debug.push({ paso:'muestra-suelo', propiedades: muestra });
     }
 
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, notaClases, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
