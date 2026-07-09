@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v8', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v9', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -209,6 +209,121 @@ app.post('/buscar-rol', async (req, res) => {
   }
 
   res.json({ ok: true, datos: datosMap, raw: cand, debug });
+});
+
+
+// ──────── SUELOS AUTOMATICOS: CIREN Propiedades Rurales + Estudio Agrologico ────────
+const turf = require('@turf/turf');
+
+const CIREN_BASE = 'https://esri.ciren.cl/server/rest/services';
+const CAPAS_REGION = [
+  { id: 0, kw: ['ARICA'] }, { id: 1, kw: ['TARAPAC'] }, { id: 2, kw: ['ATACAMA'] },
+  { id: 3, kw: ['COQUIMBO'] }, { id: 4, kw: ['VALPARA'] }, { id: 5, kw: ['METROPOLITANA'] },
+  { id: 6, kw: ['HIGGINS', 'LIBERTADOR'] }, { id: 7, kw: ['MAULE'] }, { id: 8, kw: ['UBLE'] },
+  { id: 9, kw: ['BIOB'] }, { id: 10, kw: ['ARAUCAN'] }, { id: 11, kw: ['RIOS', 'RÍOS'] },
+  { id: 12, kw: ['LAGOS'] }, { id: 13, kw: ['AYS'] }
+];
+const cacheSuelosCapas = { lista: null };
+
+const normU = s => (s||'').toString().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+
+function claseDesdeTexto(v){
+  const t = normU(v).trim();
+  const m = t.match(/^(VIII|VII|VI|V|IV|III|II|I)/);
+  if (m) return m[1];
+  const n = t.match(/^([1-8])/);
+  if (n) return ['I','II','III','IV','V','VI','VII','VIII'][parseInt(n[1])-1];
+  return null;
+}
+
+app.post('/suelos-rol', async (req, res) => {
+  const { rol, comuna, region } = req.body || {};
+  if (!rol || !comuna) return res.status(400).json({ ok:false, error:'Faltan rol y comuna' });
+
+  const debug = [];
+  try {
+    // 1) Capa regional de propiedades rurales
+    const regionU = normU(region || '');
+    const capa = CAPAS_REGION.find(cr => cr.kw.some(k => regionU.includes(k)));
+    if (!capa) return res.json({ ok:false, mensaje:'No pude identificar la region "' + region + '". Completa la region en el formulario.', debug });
+
+    // 2) Poligono del predio por rol + comuna
+    const rolLimpio = String(rol).trim();
+    const where = encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + normU(comuna) + "%'");
+    const urlPredio = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
+      '/query?where=' + where + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+    const rp = await fetch(urlPredio);
+    const gj = await rp.json();
+    debug.push({ paso:'predio', url: urlPredio, status: rp.status, features: (gj.features||[]).length });
+
+    if (!gj.features || !gj.features.length) {
+      // reintento sin filtro de comuna
+      const url2 = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
+        "/query?where=" + encodeURIComponent("rol='" + rolLimpio + "'") + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+      const rp2 = await fetch(url2);
+      const gj2 = await rp2.json();
+      debug.push({ paso:'predio-sin-comuna', status: rp2.status, features: (gj2.features||[]).length });
+      if (gj2.features && gj2.features.length) gj.features = gj2.features;
+      else return res.json({ ok:false, mensaje:'CIREN no tiene el rol ' + rolLimpio + ' en su capa de la region (cobertura ' + JSON.stringify(capa.kw[0]) + '). Ingresa los suelos manualmente.', debug });
+    }
+
+    const predio = gj.features[0];
+    const superficieHa = turf.area(predio) / 10000;
+
+    // 3) Capas del estudio agrologico (cache)
+    if (!cacheSuelosCapas.lista) {
+      const rs = await fetch(CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer?f=json');
+      const js = await rs.json();
+      cacheSuelosCapas.lista = js.layers || [];
+      debug.push({ paso:'capas-suelos', total: cacheSuelosCapas.lista.length, nombres: cacheSuelosCapas.lista.map(l=>l.name).slice(0,20) });
+    }
+    let capaSuelo = cacheSuelosCapas.lista.find(l => capa.kw.some(k => normU(l.name).includes(k)));
+    if (!capaSuelo && cacheSuelosCapas.lista.length === 1) capaSuelo = cacheSuelosCapas.lista[0];
+    if (!capaSuelo) return res.json({ ok:false, mensaje:'No encontre capa de suelos para la region. Superficie CIREN del predio: ' + superficieHa.toFixed(2) + ' ha.', superficieHa: superficieHa.toFixed(2), debug });
+
+    // 4) Suelos que intersectan el predio (bbox del predio como filtro espacial)
+    const bb = turf.bbox(predio);
+    const urlSuelos = CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer/' + capaSuelo.id +
+      '/query?geometry=' + bb.join(',') + '&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+    const rsu = await fetch(urlSuelos);
+    const gsu = await rsu.json();
+    debug.push({ paso:'suelos', capa: capaSuelo.name, id: capaSuelo.id, status: rsu.status, features: (gsu.features||[]).length,
+      camposEjemplo: gsu.features && gsu.features[0] ? Object.keys(gsu.features[0].properties||{}) : [] });
+
+    if (!gsu.features || !gsu.features.length) {
+      return res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases:{}, serie:'', mensaje:'Poligono encontrado (superficie CIREN) pero sin datos de suelo en la capa. Completa clases manualmente.', debug });
+    }
+
+    // 5) Detectar campo de clase y de serie
+    const props0 = gsu.features[0].properties || {};
+    const claveClase = Object.keys(props0).find(k => /capac|cus|clase|us[oe]?$/i.test(k) && claseDesdeTexto(props0[k])) ||
+                       Object.keys(props0).find(k => claseDesdeTexto(props0[k]));
+    const claveSerie = Object.keys(props0).find(k => /serie|nomserie|asociaci/i.test(k));
+    debug.push({ paso:'campos', claveClase, claveSerie });
+
+    // 6) Interseccion y hectareas por clase
+    const clases = {};
+    let serie = '';
+    for (const f of gsu.features) {
+      try {
+        const inter = turf.intersect(turf.featureCollection([predio, f]));
+        if (!inter) continue;
+        const ha = turf.area(inter) / 10000;
+        if (ha < 0.005) continue;
+        const clase = claveClase ? claseDesdeTexto(f.properties[claveClase]) : null;
+        if (clase) clases[clase] = (clases[clase] || 0) + ha;
+        if (!serie && claveSerie && f.properties[claveSerie]) serie = String(f.properties[claveSerie]);
+      } catch(e) { debug.push({ paso:'interseccion-error', error: e.message }); }
+    }
+    Object.keys(clases).forEach(k => clases[k] = Math.round(clases[k] * 100) / 100);
+
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, fuente:'CIREN - IDE Minagri (referencial)', debug });
+
+  } catch (err) {
+    console.error('Error /suelos-rol:', err);
+    debug.push({ paso:'error-general', error: err.message });
+    res.json({ ok:false, mensaje:'Error consultando CIREN: ' + err.message, debug });
+  }
 });
 
 app.listen(PORT, () => {
