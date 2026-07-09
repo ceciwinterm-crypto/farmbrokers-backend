@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v12', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v13', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -124,66 +124,91 @@ app.post('/buscar-rol', async (req, res) => {
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
 
-  // Rutas candidatas (SimpleAPI Mapas). Si SIMPLEAPI_URL esta definida, se usa solo esa.
-  const URL = SIMPLEAPI_URL || 'https://servicios.simpleapi.cl/api/mapas/buscar/rol';
+  const BASE = 'https://servicios.simpleapi.cl/api/mapas';
+  const URL = SIMPLEAPI_URL || (BASE + '/buscar/rol');
 
-  // El rol suele venir como "manzana-predio". Preparamos variantes de body.
   const partes = rolLimpio.split('-').map(s => s.trim());
   const manzana = partes[0] || '';
   const predio = partes[1] || '';
 
-  const norm = s => (s||'').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const norm = s => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Detecta el error transitorio del scraper de SimpleAPI contra el SII
+  const esErrorComunas = (r) => {
+    if (!r) return false;
+    const msg = JSON.stringify(r).toLowerCase();
+    return r.__status >= 400 && msg.includes('error al obtener comunas');
+  };
 
   let resultado = null;
   let listaComunas = cacheComunas.lista;
-  let comunaId = null;
 
-  // Paso 1: si no tenemos la lista de comunas en cache, hacemos una consulta inicial.
-  // Si la comuna en texto funcionara directo (200), usamos ese resultado.
-  if (!listaComunas) {
-    const primer = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: comunaLimpia, manzana, predio }) }, debug, 'POST inicial');
-    if (primer && primer.__status === 200) resultado = primer;
-    if (primer && Array.isArray(primer.data) && primer.data.some(x => x.Comuna || x.comuna)) {
-      listaComunas = primer.data;
-      cacheComunas.lista = listaComunas;
+  // ── Paso 1: intento directo con reintentos ──
+  // "Error al obtener comunas" = fallo transitorio del lado de SimpleAPI/SII.
+  // Reintentamos hasta 3 veces con pausa (respetando el limite de 5 consultas/min).
+  const bodyDirecto = JSON.stringify({ comuna: comunaLimpia, manzana, predio });
+  for (let intento = 1; intento <= 3 && !resultado; intento++) {
+    const r = await intentar(URL, { method: 'POST', headers, body: bodyDirecto }, debug, 'POST directo (intento ' + intento + ')');
+    if (r && r.__status === 200) { resultado = r; break; }
+    if (r && Array.isArray(r.data) && r.data.some(x => x.Comuna || x.comuna)) {
+      listaComunas = r.data; cacheComunas.lista = listaComunas;
+      break; // nos devolvio alternativas de comuna: pasamos a resolverla
     }
-    await sleep(1300);
+    if (esErrorComunas(r)) { await sleep(4000); continue; } // transitorio: esperar y reintentar
+    if (r && r.__status === 401) {
+      return res.json({ ok: false, mensaje: 'SimpleAPI rechazo la API key (401). Revisa SIMPLEAPI_KEY en Railway.', debug });
+    }
+    break; // otro tipo de error: no insistir por la misma via
   }
 
-  // Paso 2: resolver la comuna por nombre (nos quedamos con el nombre EXACTO de su lista y su Id)
-  let comunaNombre = null;
+  // ── Paso 2 (plan B): pedir el catalogo de comunas a su endpoint dedicado ──
+  if (!resultado && !listaComunas) {
+    const rutasComunas = [
+      { url: BASE + '/comunas', opts: { method: 'GET', headers }, label: 'GET comunas' },
+      { url: BASE + '/comunas', opts: { method: 'POST', headers, body: JSON.stringify({}) }, label: 'POST comunas' }
+    ];
+    for (const rc of rutasComunas) {
+      await sleep(2000);
+      const r = await intentar(rc.url, rc.opts, debug, rc.label);
+      const arr = r && (Array.isArray(r) ? r : (Array.isArray(r.data) ? r.data : null));
+      if (arr && arr.length && arr.some(x => x.Comuna || x.comuna || x.Nombre || x.nombre)) {
+        listaComunas = arr; cacheComunas.lista = arr;
+        break;
+      }
+    }
+  }
+
+  // ── Paso 3: resolver la comuna con el catalogo y buscar con el nombre/Id exacto ──
   if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
-    const found = listaComunas.find(x => norm(x.Comuna || x.comuna) === objetivo);
-    if (found) {
-      comunaId = found.Id || found.id || found.ID;
-      comunaNombre = found.Comuna || found.comuna;
-    }
+    const found = listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre) === objetivo)
+               || listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre).includes(objetivo));
+    const comunaId = found && (found.Id || found.id || found.ID || found.Codigo || found.codigo);
+    const comunaNombre = found && (found.Comuna || found.comuna || found.Nombre || found.nombre);
     debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length });
-  }
 
-  // Paso 3: buscar el rol usando el nombre exacto (y el Id como respaldo)
-  if (!resultado && (comunaNombre || comunaId)) {
     const bodies = [];
     if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
-    if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana: Number(manzana) || manzana, predio: Number(predio) || predio });
-    if (comunaId) bodies.push({ comuna: comunaId, manzana, predio });
+    if (comunaId !== undefined && comunaId !== null) bodies.push({ comuna: comunaId, manzana, predio });
     for (const b of bodies) {
+      await sleep(2000);
       const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST ' + JSON.stringify(b));
       if (r && r.__status === 200) { resultado = r; break; }
-      await sleep(1300);
     }
   }
 
   if (!resultado) {
-    return res.json({ ok: false, mensaje: 'Ninguna ruta respondio con datos. Revisa el detalle.', debug });
+    const huboTransitorio = debug.some(d => (d.snippet || '').toLowerCase().includes('error al obtener comunas'));
+    const mensaje = huboTransitorio
+      ? 'SimpleAPI no logro consultar el SII en este momento (fallo temporal de su lado). Espera 1-2 minutos y vuelve a intentar. Si persiste, usa los botones manuales.'
+      : 'Ninguna ruta respondio con datos. Revisa el detalle.';
+    return res.json({ ok: false, mensaje, debug });
   }
 
-  // Mapeo flexible de campos (el formato exacto de SimpleAPI puede variar)
+  // Mapeo flexible de campos (nombres reales confirmados de SimpleAPI Mapas)
   const cand = (resultado && (resultado.Datos || resultado.datos)) || (Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado));
   const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
 
-  // Nombres reales confirmados de SimpleAPI Mapas: Datos.ValorTotal, PosicionX (latitud), PosicionY (longitud)
   const datosMap = {
     avaluoFiscal: String(g(cand, 'ValorTotal', 'avaluo', 'avaluoTotal', 'avaluoFiscal')),
     avaluoAfecto: String(g(cand, 'ValorAfecto')),
