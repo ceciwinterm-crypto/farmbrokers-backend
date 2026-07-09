@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v13', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v15', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -249,6 +249,8 @@ const CAPAS_REGION = [
   { id: 12, kw: ['LAGOS'] }, { id: 13, kw: ['AYS'] }
 ];
 const cacheSuelosCapas = { lista: null };
+const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
+const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
 const cacheUso = { svc: null, capas: null };
 
 const normU = s => (s||'').toString().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
@@ -327,38 +329,185 @@ app.post('/suelos-rol', async (req, res) => {
     const claveSerie = Object.keys(props0).find(k => /serie|nomserie|asociaci/i.test(k));
     debug.push({ paso:'campos', claveClase, claveSerie });
 
-    // 6) Interseccion y hectareas por clase + poligono dominante
+    // 6) Interseccion y hectareas por clase + lista de poligonos ordenada por superficie
     const clases = {};
     let serie = '';
-    let dominante = null, dominanteHa = 0;
+    const intersecciones = [];
     for (const f of gsu.features) {
       try {
         const inter = turf.intersect(turf.featureCollection([predio, f]));
         if (!inter) continue;
         const ha = turf.area(inter) / 10000;
         if (ha < 0.005) continue;
-        if (ha > dominanteHa) { dominanteHa = ha; dominante = f; }
+        intersecciones.push({ f, ha });
         const clase = claveClase ? claseDesdeTexto(f.properties[claveClase]) : null;
         if (clase) clases[clase] = (clases[clase] || 0) + ha;
         if (!serie && claveSerie && f.properties[claveSerie]) serie = String(f.properties[claveSerie]);
       } catch(e) { debug.push({ paso:'interseccion-error', error: e.message }); }
     }
+    intersecciones.sort((a, b) => b.ha - a.ha);
+    const dominante = intersecciones.length ? intersecciones[0].f : null;
+    const dominanteHa = intersecciones.length ? intersecciones[0].ha : 0;
 
-    // 6b) Caracteristicas del suelo dominante (deteccion flexible de campos CIREN)
+    // 6b) Caracteristicas del suelo (v2): busca por NOMBRE y ALIAS de campo,
+    // y traduce codigos usando los dominios oficiales de la capa CIREN (sin inventar valores)
     const caracteristicas = {};
+    let camposDominante = null;
+    try {
+      if (!cacheMetaSuelos[capaSuelo.id]) {
+        const rm = await fetch(CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer/' + capaSuelo.id + '?f=json');
+        const jm = await rm.json();
+        cacheMetaSuelos[capaSuelo.id] = jm.fields || [];
+      }
+      const fields = cacheMetaSuelos[capaSuelo.id];
+      debug.push({ paso:'meta-capa', totalCampos: fields.length, campos: fields.map(f => f.name + (f.alias && f.alias !== f.name ? ' (' + f.alias + ')' : '')).slice(0, 40) });
+      const metaDe = {};
+      for (const fm of fields) metaDe[fm.name] = fm;
+
+      // Traduce codigo -> descripcion oficial si el campo tiene dominio de valores en CIREN
+      const decodificar = (nombreCampo, valor) => {
+        const fm = metaDe[nombreCampo];
+        if (fm && fm.domain && Array.isArray(fm.domain.codedValues)) {
+          const cv = fm.domain.codedValues.find(cc => String(cc.code) === String(valor));
+          if (cv) return String(cv.name);
+        }
+        return String(valor).trim();
+      };
+
+      const esValorUtil = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
+
+      const OBJETIVOS = [
+        ['textura',      /TEXTURA|TEXTTEXT/i],
+        ['profundidad',  /PROF/i],
+        ['drenaje',      /DREN/i],
+        ['pendiente',    /PEND|SLOPE/i],
+        ['erosion',      /EROS/i],
+        ['pedregosidad', /PEDRE|PIEDR|PDG|ROCOS/i],
+        ['ph',           /(^|_)PH($|_)|ACIDEZ/i],
+        ['aptitud',      /APTITUD|APT/i]
+      ];
+
+      for (const [clave, rx] of OBJETIVOS) {
+        // Campos candidatos: coinciden por nombre O por alias descriptivo
+        const candidatos = fields.filter(fm => rx.test(fm.name) || rx.test(fm.alias || '')).map(fm => fm.name);
+        // Recorre poligonos del predio del mas grande al mas chico y toma el primer valor real
+        for (const { f } of intersecciones) {
+          const dp = f.properties || {};
+          const campo = candidatos.find(k => esValorUtil(dp[k])) ||
+                        Object.keys(dp).find(k => rx.test(k) && esValorUtil(dp[k]));
+          if (campo) { caracteristicas[clave] = decodificar(campo, dp[campo]); break; }
+        }
+      }
+
+      if (!serie) {
+        const rxS = /SERIE|ASOCIA/i;
+        const candS = fields.filter(fm => rxS.test(fm.name) || rxS.test(fm.alias || '')).map(fm => fm.name);
+        for (const { f } of intersecciones) {
+          const dp = f.properties || {};
+          const campo = candS.find(k => esValorUtil(dp[k])) || Object.keys(dp).find(k => rxS.test(k) && esValorUtil(dp[k]));
+          if (campo) { serie = decodificar(campo, dp[campo]); break; }
+        }
+      }
+    } catch (e) { debug.push({ paso:'caracteristicas-error', error: e.message }); }
+
+    // 6c) SIT RURAL (visor.sitrural.cl): capa "Recursos Naturales > Suelos" de la comuna.
+    // Trae las descripciones oficiales en texto (Serie, Pendiente, Profundidad, Erosion,
+    // Pedregosidad, Drenaje, Textura, pH, Aptitud). Si existe, tiene prioridad.
+    try {
+      const SIT_WFS = 'https://visor.sitrural.cl/geoserver/ows';
+      if (!cacheSitrural.capas) {
+        const rc = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=GetCapabilities');
+        const xml = await rc.text();
+        const nombres = [];
+        const rxName = /<Name>([^<]+)<\/Name>/g;
+        let mm;
+        while ((mm = rxName.exec(xml)) !== null) {
+          if (/suelo/i.test(mm[1])) nombres.push(mm[1]);
+        }
+        cacheSitrural.capas = nombres;
+        debug.push({ paso:'sitrural-capas', status: rc.status, capasSuelos: nombres.slice(0, 30) });
+      }
+      const objetivoCom = normU(comuna).replace(/\s+/g, '_');
+      const objetivoCom2 = normU(comuna).replace(/\s+/g, '');
+      const capaSit = (cacheSitrural.capas || []).find(n => {
+        const nn = normU(n).replace(/\s+/g, '_');
+        return nn.includes(objetivoCom) || nn.replace(/_/g, '').includes(objetivoCom2);
+      });
+      debug.push({ paso:'sitrural-capa-comuna', comuna: comuna, capa: capaSit || 'NO ENCONTRADA' });
+
+      if (capaSit) {
+        const bbS = turf.bbox(predio);
+        const urlSit = SIT_WFS + '?service=WFS&version=1.0.0&request=GetFeature&typeName=' +
+          encodeURIComponent(capaSit) + '&outputFormat=application/json&srsName=EPSG:4326' +
+          '&bbox=' + bbS.join(',') + '&maxFeatures=300';
+        const rs2 = await fetch(urlSit);
+        const gj2 = await rs2.json();
+        debug.push({ paso:'sitrural-suelos', status: rs2.status, features: (gj2.features||[]).length,
+          camposEjemplo: gj2.features && gj2.features[0] ? Object.keys(gj2.features[0].properties||{}) : [] });
+
+        if (gj2.features && gj2.features.length) {
+          // Interseccion con el predio y orden por superficie
+          const interSit = [];
+          for (const f of gj2.features) {
+            try {
+              const inter = turf.intersect(turf.featureCollection([predio, f]));
+              if (!inter) continue;
+              const ha = turf.area(inter) / 10000;
+              if (ha < 0.005) continue;
+              interSit.push({ f, ha });
+            } catch(e) {}
+          }
+          interSit.sort((a, b) => b.ha - a.ha);
+          debug.push({ paso:'sitrural-interseccion', poligonos: interSit.length,
+            propsDominante: interSit.length ? interSit[0].f.properties : null });
+
+          if (interSit.length) {
+            const util = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
+            // Excluye campos que empiezan con "text" pero son otra cosa (textcaus = capacidad de uso, etc.)
+            const OBJ_SIT = [
+              ['pendiente',    /PEND/i,               null],
+              ['profundidad',  /PROF/i,               null],
+              ['erosion',      /EROS/i,               null],
+              ['pedregosidad', /PEDR|PIEDR/i,         null],
+              ['drenaje',      /DREN/i,               null],
+              ['textura',      /TEXTURA|TEXTTEXT/i,   null],
+              ['ph',           /(^|_)PH(_|\d|$)/i,    null],
+              ['aptitud',      /APT/i,                /FRUT/i]  // prefiere aptitud agricola sobre frutal
+            ];
+            const tomar = (rx, evitar) => {
+              for (const { f } of interSit) {
+                const dp = f.properties || {};
+                const claves = Object.keys(dp)
+                  .filter(k => rx.test(k) && (!evitar || !evitar.test(k)) && util(dp[k]))
+                  .sort();
+                if (claves.length) return String(dp[claves[0]]).trim();
+              }
+              // segunda pasada permitiendo el campo evitado (ej. solo hay aptitud frutal)
+              if (evitar) {
+                for (const { f } of interSit) {
+                  const dp = f.properties || {};
+                  const claves = Object.keys(dp).filter(k => rx.test(k) && util(dp[k])).sort();
+                  if (claves.length) return String(dp[claves[0]]).trim();
+                }
+              }
+              return '';
+            };
+            let algunaSit = false;
+            for (const [clave, rx, evitar] of OBJ_SIT) {
+              const v = tomar(rx, evitar);
+              if (v) { caracteristicas[clave] = v; algunaSit = true; }
+            }
+            const vSerie = tomar(/^SERIE|_SERIE|NOM.?SERIE/i, /SIMB/i);
+            if (vSerie) { serie = vSerie; algunaSit = true; }
+            if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
+          }
+        }
+      }
+    } catch (e) { debug.push({ paso:'sitrural-error', error: e.message }); }
+
     if (dominante) {
-      const dp = dominante.properties || {};
-      const buscar = (rx) => { const k = Object.keys(dp).find(k => rx.test(k) && dp[k] !== null && String(dp[k]).trim() !== '' && String(dp[k]).trim() !== '0'); return k ? String(dp[k]).trim() : ''; };
-      caracteristicas.textura = buscar(/TEXT/i);
-      caracteristicas.profundidad = buscar(/PROF/i);
-      caracteristicas.drenaje = buscar(/DREN/i);
-      caracteristicas.pendiente = buscar(/PEND/i);
-      caracteristicas.erosion = buscar(/EROS/i);
-      caracteristicas.pedregosidad = buscar(/PEDRE|PIEDR|PDG/i);
-      caracteristicas.ph = buscar(/(^|_)PH($|_)/i);
-      caracteristicas.aptitud = buscar(/APTITUD|APT_|_APT/i);
-      if (!serie) serie = buscar(/SERIE|ASOCIA/i);
-      debug.push({ paso:'dominante', ha: Math.round(dominanteHa*100)/100, propiedades: dp });
+      camposDominante = dominante.properties || {};
+      debug.push({ paso:'dominante', ha: Math.round(dominanteHa*100)/100, propiedades: camposDominante });
     }
     Object.keys(clases).forEach(k => clases[k] = Math.round(clases[k] * 100) / 100);
 
@@ -419,7 +568,7 @@ app.post('/suelos-rol', async (req, res) => {
 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, caracteristicas, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
