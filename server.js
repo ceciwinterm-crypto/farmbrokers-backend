@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v11', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v12', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -302,19 +302,38 @@ app.post('/suelos-rol', async (req, res) => {
     const claveSerie = Object.keys(props0).find(k => /serie|nomserie|asociaci/i.test(k));
     debug.push({ paso:'campos', claveClase, claveSerie });
 
-    // 6) Interseccion y hectareas por clase
+    // 6) Interseccion y hectareas por clase + poligono dominante
     const clases = {};
     let serie = '';
+    let dominante = null, dominanteHa = 0;
     for (const f of gsu.features) {
       try {
         const inter = turf.intersect(turf.featureCollection([predio, f]));
         if (!inter) continue;
         const ha = turf.area(inter) / 10000;
         if (ha < 0.005) continue;
+        if (ha > dominanteHa) { dominanteHa = ha; dominante = f; }
         const clase = claveClase ? claseDesdeTexto(f.properties[claveClase]) : null;
         if (clase) clases[clase] = (clases[clase] || 0) + ha;
         if (!serie && claveSerie && f.properties[claveSerie]) serie = String(f.properties[claveSerie]);
       } catch(e) { debug.push({ paso:'interseccion-error', error: e.message }); }
+    }
+
+    // 6b) Caracteristicas del suelo dominante (deteccion flexible de campos CIREN)
+    const caracteristicas = {};
+    if (dominante) {
+      const dp = dominante.properties || {};
+      const buscar = (rx) => { const k = Object.keys(dp).find(k => rx.test(k) && dp[k] !== null && String(dp[k]).trim() !== '' && String(dp[k]).trim() !== '0'); return k ? String(dp[k]).trim() : ''; };
+      caracteristicas.textura = buscar(/TEXT/i);
+      caracteristicas.profundidad = buscar(/PROF/i);
+      caracteristicas.drenaje = buscar(/DREN/i);
+      caracteristicas.pendiente = buscar(/PEND/i);
+      caracteristicas.erosion = buscar(/EROS/i);
+      caracteristicas.pedregosidad = buscar(/PEDRE|PIEDR|PDG/i);
+      caracteristicas.ph = buscar(/(^|_)PH($|_)/i);
+      caracteristicas.aptitud = buscar(/APTITUD|APT_|_APT/i);
+      if (!serie) serie = buscar(/SERIE|ASOCIA/i);
+      debug.push({ paso:'dominante', ha: Math.round(dominanteHa*100)/100, propiedades: dp });
     }
     Object.keys(clases).forEach(k => clases[k] = Math.round(clases[k] * 100) / 100);
 
@@ -373,7 +392,9 @@ app.post('/suelos-rol', async (req, res) => {
       debug.push({ paso:'muestra-suelo', propiedades: muestra });
     }
 
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
+    const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, caracteristicas, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
