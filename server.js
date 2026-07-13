@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v19', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v20', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -436,80 +436,114 @@ const manejadorSuelos = async (req, res) => {
 
       const objetivoCom = normU(comuna).replace(/\s+/g, '');
       const esDeLaComuna = (x) => {
-        const nn = normU(x.n).replace(/[\s_\-]/g, '');
-        const tt = normU(x.t).replace(/[\s_\-]/g, '');
+        const nn = normU(x.n).replace(/[\s_\-\.]/g, '');
+        const tt = normU(x.t).replace(/[\s_\-\.]/g, '');
         return nn.includes(objetivoCom) || tt.includes(objetivoCom);
       };
       const esSuelo = (x) => /suelo/i.test(x.t) || /suelo/i.test(x.n);
-      const capaSit = (cacheSitrural.capas || []).find(x => esSuelo(x) && esDeLaComuna(x));
-      debug.push({ paso:'sitrural-capa-comuna', comuna: comuna,
-        capa: capaSit ? (capaSit.n + ' | ' + capaSit.t) : 'NO ENCONTRADA',
-        capasDeLaComuna: (cacheSitrural.capas || []).filter(esDeLaComuna).slice(0, 15).map(x => x.n + ' | ' + x.t) });
+      // Prioridad: estudio agrologico ("Suelos <comuna>") > aptitud > cat. de uso/vegetacion
+      const puntaje = (x) => {
+        const t = normU(x.t);
+        let p = 0;
+        if (/^SUELOS?\b/.test(t)) p += 100;
+        if (/AGROLOG|SERIE/.test(t)) p += 60;
+        if (/APTITUD/.test(t)) p += 20;
+        if (/USO|VEGET|CAT\.?/.test(t)) p -= 40;
+        return p;
+      };
+      const candidatasSit = (cacheSitrural.capas || [])
+        .filter(x => esSuelo(x) && esDeLaComuna(x))
+        .sort((a, b) => puntaje(b) - puntaje(a));
+      debug.push({ paso:'sitrural-candidatas', comuna: comuna,
+        capas: candidatasSit.slice(0, 8).map(x => puntaje(x) + ' | ' + x.n + ' | ' + x.t) });
 
-      if (capaSit) {
-        const bbS = turf.bbox(predio);
-        const urlSit = SIT_WFS + '?service=WFS&version=1.0.0&request=GetFeature&typeName=' +
-          encodeURIComponent(capaSit.n) + '&outputFormat=application/json&srsName=EPSG:4326' +
-          '&bbox=' + bbS.join(',') + '&maxFeatures=300';
-        const rs2 = await fetch(urlSit);
-        const gj2 = await rs2.json();
-        debug.push({ paso:'sitrural-suelos', status: rs2.status, features: (gj2.features||[]).length,
-          camposEjemplo: gj2.features && gj2.features[0] ? Object.keys(gj2.features[0].properties||{}) : [] });
+      const bbS = turf.bbox(predio);
+      // Filtro BBOX via CQL declarando EPSG:4326 (el bbox simple de WFS 1.0.0 se
+      // interpreta en el sistema nativo de la capa, que aqui es UTM -> 0 resultados)
+      const nombresGeom = ['the_geom', 'geom', 'shape', 'wkb_geometry'];
+      let usadaSit = null, featsSit = null;
 
-        if (gj2.features && gj2.features.length) {
-          const interSit = [];
-          for (const f of gj2.features) {
-            try {
-              const inter = turf.intersect(turf.featureCollection([predio, f]));
-              if (!inter) continue;
-              const ha = turf.area(inter) / 10000;
-              if (ha < 0.005) continue;
-              interSit.push({ f, ha });
-            } catch(e) {}
+      for (const cand of candidatasSit.slice(0, 3)) {
+        for (const g of nombresGeom) {
+          const cql = "BBOX(" + g + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')";
+          const urlSit = SIT_WFS + '?service=WFS&version=1.0.0&request=GetFeature&typeName=' +
+            encodeURIComponent(cand.n) + '&outputFormat=application/json&srsName=EPSG:4326' +
+            '&maxFeatures=300&CQL_FILTER=' + encodeURIComponent(cql);
+          try {
+            const rs2 = await fetch(urlSit);
+            const txt2 = await rs2.text();
+            let gj2 = null;
+            try { gj2 = JSON.parse(txt2); } catch(e) {
+              debug.push({ paso:'sitrural-intento', capa: cand.t, geom: g, status: rs2.status,
+                respuesta: txt2.substring(0, 180).replace(/\s+/g,' ') });
+              continue; // probable nombre de geometria incorrecto -> probar el siguiente
+            }
+            debug.push({ paso:'sitrural-intento', capa: cand.t, geom: g, status: rs2.status,
+              features: (gj2.features || []).length });
+            if (gj2.features && gj2.features.length) { usadaSit = cand; featsSit = gj2.features; break; }
+            break; // JSON valido con 0 features: la capa no cubre el predio -> siguiente capa
+          } catch (e) {
+            debug.push({ paso:'sitrural-intento', capa: cand.t, geom: g, error: e.message });
           }
-          interSit.sort((a, b) => b.ha - a.ha);
-          debug.push({ paso:'sitrural-interseccion', poligonos: interSit.length,
-            propsDominante: interSit.length ? interSit[0].f.properties : null });
+        }
+        if (featsSit) break;
+      }
 
-          if (interSit.length) {
-            const util = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
-            // Cubre nombres descriptivos (pendiente) y nombres CIREN de shapefile (textpend1, textph2, textapag1...)
-            const OBJ_SIT = [
-              ['pendiente',    /PEND/i,                    null],
-              ['profundidad',  /PROF/i,                    null],
-              ['erosion',      /EROS/i,                    null],
-              ['pedregosidad', /PEDR|PIEDR/i,              null],
-              ['drenaje',      /DREN/i,                    null],
-              ['textura',      /TEXTURA|TEXTTEXT/i,        null],
-              ['ph',           /(^|_)PH(_|\d|$)|TEXTPH/i,  null],
-              ['aptitud',      /APT|APAG|AGRICOLA/i,       /FRUT|APTF/i]
-            ];
-            const tomar = (rx, evitar) => {
+      if (featsSit) {
+        debug.push({ paso:'sitrural-suelos', capa: usadaSit.t, features: featsSit.length,
+          camposEjemplo: Object.keys(featsSit[0].properties || {}) });
+        const interSit = [];
+        for (const f of featsSit) {
+          try {
+            const inter = turf.intersect(turf.featureCollection([predio, f]));
+            if (!inter) continue;
+            const ha = turf.area(inter) / 10000;
+            if (ha < 0.005) continue;
+            interSit.push({ f, ha });
+          } catch(e) {}
+        }
+        interSit.sort((a, b) => b.ha - a.ha);
+        debug.push({ paso:'sitrural-interseccion', poligonos: interSit.length,
+          propsDominante: interSit.length ? interSit[0].f.properties : null });
+
+        if (interSit.length) {
+          const util = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
+          // Cubre nombres descriptivos (pendiente) y nombres CIREN de shapefile (textpend1, textph2, textapag1...)
+          const OBJ_SIT = [
+            ['pendiente',    /PEND/i,                    null],
+            ['profundidad',  /PROF/i,                    null],
+            ['erosion',      /EROS/i,                    null],
+            ['pedregosidad', /PEDR|PIEDR/i,              null],
+            ['drenaje',      /DREN/i,                    null],
+            ['textura',      /TEXTURA|TEXTTEXT/i,        null],
+            ['ph',           /(^|_)PH(_|\d|$)|TEXTPH/i,  null],
+            ['aptitud',      /APT|APAG|AGRICOLA/i,       /FRUT|APTF/i]
+          ];
+          const tomar = (rx, evitar) => {
+            for (const { f } of interSit) {
+              const dp = f.properties || {};
+              const claves = Object.keys(dp)
+                .filter(k => rx.test(k) && (!evitar || !evitar.test(k)) && util(dp[k]))
+                .sort();
+              if (claves.length) return String(dp[claves[0]]).trim();
+            }
+            if (evitar) {
               for (const { f } of interSit) {
                 const dp = f.properties || {};
-                const claves = Object.keys(dp)
-                  .filter(k => rx.test(k) && (!evitar || !evitar.test(k)) && util(dp[k]))
-                  .sort();
+                const claves = Object.keys(dp).filter(k => rx.test(k) && util(dp[k])).sort();
                 if (claves.length) return String(dp[claves[0]]).trim();
               }
-              if (evitar) {
-                for (const { f } of interSit) {
-                  const dp = f.properties || {};
-                  const claves = Object.keys(dp).filter(k => rx.test(k) && util(dp[k])).sort();
-                  if (claves.length) return String(dp[claves[0]]).trim();
-                }
-              }
-              return '';
-            };
-            let algunaSit = false;
-            for (const [clave, rx, evitar] of OBJ_SIT) {
-              const v = tomar(rx, evitar);
-              if (v) { caracteristicas[clave] = v; algunaSit = true; }
             }
-            const vSerie = tomar(/^SERIE|_SERIE|NOM.?SERIE/i, /SIMB/i);
-            if (vSerie) serie = vSerie;
-            if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
+            return '';
+          };
+          let algunaSit = false;
+          for (const [clave, rx, evitar] of OBJ_SIT) {
+            const v = tomar(rx, evitar);
+            if (v) { caracteristicas[clave] = v; algunaSit = true; }
           }
+          const vSerie = tomar(/^SERIE|_SERIE|NOM.?SERIE|TEXTSERIE/i, /SIMB/i);
+          if (vSerie) serie = vSerie;
+          if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
         }
       }
     } catch (e) { debug.push({ paso:'sitrural-error', error: e.message }); }
