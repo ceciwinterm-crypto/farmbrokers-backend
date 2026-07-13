@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v20', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v21', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -156,26 +156,13 @@ app.post('/buscar-rol', async (req, res) => {
     }
     if (esErrorComunas(r)) { await sleep(4000); continue; } // transitorio: esperar y reintentar
     if (r && r.__status === 401) {
-      return res.json({ ok: false, mensaje: 'SimpleAPI rechazo la API key (401). Revisa SIMPLEAPI_KEY en Railway.', debug });
+      const cuerpo = JSON.stringify(r).toLowerCase();
+      const esCuota = cuerpo.includes('l\u00edmite') || cuerpo.includes('limite');
+      return res.json({ ok: false, mensaje: esCuota
+        ? 'SimpleAPI: limite de consultas alcanzado en tu plan (modulo Mapas). Espera unos minutos y reintenta; si persiste, revisa el saldo/plan de tu cuenta en simpleapi.cl. Mientras, usa los botones manuales Avaluo SII / Mapa SII.'
+        : 'SimpleAPI rechazo la API key (401). Revisa SIMPLEAPI_KEY en Railway.', debug });
     }
     break; // otro tipo de error: no insistir por la misma via
-  }
-
-  // ── Paso 2 (plan B): pedir el catalogo de comunas a su endpoint dedicado ──
-  if (!resultado && !listaComunas) {
-    const rutasComunas = [
-      { url: BASE + '/comunas', opts: { method: 'GET', headers }, label: 'GET comunas' },
-      { url: BASE + '/comunas', opts: { method: 'POST', headers, body: JSON.stringify({}) }, label: 'POST comunas' }
-    ];
-    for (const rc of rutasComunas) {
-      await sleep(2000);
-      const r = await intentar(rc.url, rc.opts, debug, rc.label);
-      const arr = r && (Array.isArray(r) ? r : (Array.isArray(r.data) ? r.data : null));
-      if (arr && arr.length && arr.some(x => x.Comuna || x.comuna || x.Nombre || x.nombre)) {
-        listaComunas = arr; cacheComunas.lista = arr;
-        break;
-      }
-    }
   }
 
   // ── Paso 3: resolver la comuna con el catalogo y buscar con el nombre/Id exacto ──
