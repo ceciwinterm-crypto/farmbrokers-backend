@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v15', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v16', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -577,6 +577,43 @@ app.post('/suelos-rol', async (req, res) => {
   }
 });
 
+// ──────── DIAGNOSTICO SIT RURAL (abrir en el navegador: /diag-sitrural) ────────
+app.get('/diag-sitrural', async (req, res) => {
+  const candidatas = [
+    'https://visor.sitrural.cl/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
+    'https://visor.sitrural.cl/geoserver/wms?service=WMS&request=GetCapabilities',
+    'https://visor.sitrural.cl/geoserver/web/',
+    'https://geoserver.sitrural.cl/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
+    'https://idesitrural.ciren.cl/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
+    'https://visor.sitrural.cl/config/obtener_capas',
+    'https://visor.sitrural.cl/capas/obtener_capas',
+    'https://visor.sitrural.cl/capa/obtener_capas',
+    'https://visor.sitrural.cl/mapa/obtener_capas',
+    'https://visor.sitrural.cl/config/obtener_configuracion'
+  ];
+  const resultados = [];
+  for (const url of candidatas) {
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 15000);
+      const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': '*/*' } });
+      clearTimeout(t);
+      const texto = await r.text();
+      resultados.push({
+        url,
+        status: r.status,
+        tipo: r.headers.get('content-type') || '',
+        largo: texto.length,
+        capasSuelos: (texto.match(/[\w:]*[Ss]uelo[\w]*/g) || []).slice(0, 15),
+        inicio: texto.substring(0, 300)
+      });
+    } catch (e) {
+      resultados.push({ url, error: e.message });
+    }
+  }
+  res.json({ version: 'v16', resultados });
+});
+
 app.listen(PORT, () => {
   console.log(`Servidor Farm Brokers corriendo en puerto ${PORT}`);
-});
+}); 
