@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v16', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v18', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -410,35 +410,46 @@ app.post('/suelos-rol', async (req, res) => {
       }
     } catch (e) { debug.push({ paso:'caracteristicas-error', error: e.message }); }
 
-    // 6c) SIT RURAL (visor.sitrural.cl): capa "Recursos Naturales > Suelos" de la comuna.
-    // Trae las descripciones oficiales en texto (Serie, Pendiente, Profundidad, Erosion,
-    // Pedregosidad, Drenaje, Textura, pH, Aptitud). Si existe, tiene prioridad.
+    // 6c) SIT RURAL (visor.sitrural.cl/geoserver): capa "Suelos" de la comuna.
+    // El GetCapabilities trae ~miles de capas organizadas por comuna (workspace tipo
+    // "galvarino-sigcra"). El nombre tecnico es un codigo; la palabra "Suelos" va en
+    // el <Title>. Se busca por titulo Y nombre, y la comuna por el prefijo/titulo.
     try {
       const SIT_WFS = 'https://visor.sitrural.cl/geoserver/ows';
       if (!cacheSitrural.capas) {
         const rc = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=GetCapabilities');
         const xml = await rc.text();
-        const nombres = [];
-        const rxName = /<Name>([^<]+)<\/Name>/g;
-        let mm;
-        while ((mm = rxName.exec(xml)) !== null) {
-          if (/suelo/i.test(mm[1])) nombres.push(mm[1]);
+        const capas = [];
+        const rxFT = /<FeatureType[^>]*>([\s\S]*?)<\/FeatureType>/g;
+        let mft;
+        while ((mft = rxFT.exec(xml)) !== null) {
+          const bloque = mft[1];
+          const n = (bloque.match(/<Name>([^<]+)<\/Name>/) || [])[1] || '';
+          const t = (bloque.match(/<Title>([^<]*)<\/Title>/) || [])[1] || '';
+          if (n) capas.push({ n, t });
         }
-        cacheSitrural.capas = nombres;
-        debug.push({ paso:'sitrural-capas', status: rc.status, capasSuelos: nombres.slice(0, 30) });
+        cacheSitrural.capas = capas;
+        const soloSuelos = capas.filter(x => /suelo/i.test(x.t) || /suelo/i.test(x.n));
+        debug.push({ paso:'sitrural-capas', status: rc.status, totalCapas: capas.length,
+          capasSuelos: soloSuelos.length, ejemplos: soloSuelos.slice(0, 10).map(x => x.n + ' | ' + x.t) });
       }
-      const objetivoCom = normU(comuna).replace(/\s+/g, '_');
-      const objetivoCom2 = normU(comuna).replace(/\s+/g, '');
-      const capaSit = (cacheSitrural.capas || []).find(n => {
-        const nn = normU(n).replace(/\s+/g, '_');
-        return nn.includes(objetivoCom) || nn.replace(/_/g, '').includes(objetivoCom2);
-      });
-      debug.push({ paso:'sitrural-capa-comuna', comuna: comuna, capa: capaSit || 'NO ENCONTRADA' });
+
+      const objetivoCom = normU(comuna).replace(/\s+/g, '');
+      const esDeLaComuna = (x) => {
+        const nn = normU(x.n).replace(/[\s_\-]/g, '');
+        const tt = normU(x.t).replace(/[\s_\-]/g, '');
+        return nn.includes(objetivoCom) || tt.includes(objetivoCom);
+      };
+      const esSuelo = (x) => /suelo/i.test(x.t) || /suelo/i.test(x.n);
+      const capaSit = (cacheSitrural.capas || []).find(x => esSuelo(x) && esDeLaComuna(x));
+      debug.push({ paso:'sitrural-capa-comuna', comuna: comuna,
+        capa: capaSit ? (capaSit.n + ' | ' + capaSit.t) : 'NO ENCONTRADA',
+        capasDeLaComuna: (cacheSitrural.capas || []).filter(esDeLaComuna).slice(0, 15).map(x => x.n + ' | ' + x.t) });
 
       if (capaSit) {
         const bbS = turf.bbox(predio);
         const urlSit = SIT_WFS + '?service=WFS&version=1.0.0&request=GetFeature&typeName=' +
-          encodeURIComponent(capaSit) + '&outputFormat=application/json&srsName=EPSG:4326' +
+          encodeURIComponent(capaSit.n) + '&outputFormat=application/json&srsName=EPSG:4326' +
           '&bbox=' + bbS.join(',') + '&maxFeatures=300';
         const rs2 = await fetch(urlSit);
         const gj2 = await rs2.json();
@@ -446,7 +457,6 @@ app.post('/suelos-rol', async (req, res) => {
           camposEjemplo: gj2.features && gj2.features[0] ? Object.keys(gj2.features[0].properties||{}) : [] });
 
         if (gj2.features && gj2.features.length) {
-          // Interseccion con el predio y orden por superficie
           const interSit = [];
           for (const f of gj2.features) {
             try {
@@ -463,16 +473,16 @@ app.post('/suelos-rol', async (req, res) => {
 
           if (interSit.length) {
             const util = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
-            // Excluye campos que empiezan con "text" pero son otra cosa (textcaus = capacidad de uso, etc.)
+            // Cubre nombres descriptivos (pendiente) y nombres CIREN de shapefile (textpend1, textph2, textapag1...)
             const OBJ_SIT = [
-              ['pendiente',    /PEND/i,               null],
-              ['profundidad',  /PROF/i,               null],
-              ['erosion',      /EROS/i,               null],
-              ['pedregosidad', /PEDR|PIEDR/i,         null],
-              ['drenaje',      /DREN/i,               null],
-              ['textura',      /TEXTURA|TEXTTEXT/i,   null],
-              ['ph',           /(^|_)PH(_|\d|$)/i,    null],
-              ['aptitud',      /APT/i,                /FRUT/i]  // prefiere aptitud agricola sobre frutal
+              ['pendiente',    /PEND/i,                    null],
+              ['profundidad',  /PROF/i,                    null],
+              ['erosion',      /EROS/i,                    null],
+              ['pedregosidad', /PEDR|PIEDR/i,              null],
+              ['drenaje',      /DREN/i,                    null],
+              ['textura',      /TEXTURA|TEXTTEXT/i,        null],
+              ['ph',           /(^|_)PH(_|\d|$)|TEXTPH/i,  null],
+              ['aptitud',      /APT|APAG|AGRICOLA/i,       /FRUT|APTF/i]
             ];
             const tomar = (rx, evitar) => {
               for (const { f } of interSit) {
@@ -482,7 +492,6 @@ app.post('/suelos-rol', async (req, res) => {
                   .sort();
                 if (claves.length) return String(dp[claves[0]]).trim();
               }
-              // segunda pasada permitiendo el campo evitado (ej. solo hay aptitud frutal)
               if (evitar) {
                 for (const { f } of interSit) {
                   const dp = f.properties || {};
@@ -498,7 +507,7 @@ app.post('/suelos-rol', async (req, res) => {
               if (v) { caracteristicas[clave] = v; algunaSit = true; }
             }
             const vSerie = tomar(/^SERIE|_SERIE|NOM.?SERIE/i, /SIMB/i);
-            if (vSerie) { serie = vSerie; algunaSit = true; }
+            if (vSerie) serie = vSerie;
             if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
           }
         }
@@ -577,43 +586,74 @@ app.post('/suelos-rol', async (req, res) => {
   }
 });
 
-// ──────── DIAGNOSTICO SIT RURAL (abrir en el navegador: /diag-sitrural) ────────
+// ──────── DIAGNOSTICO SIT RURAL v2 (abrir en el navegador: /diag-sitrural) ────────
+// Lee el codigo de la pagina del visor SIT Rural y extrae las direcciones reales
+// (API y geoservidor) que usa internamente, ademas de probar rutas candidatas.
 app.get('/diag-sitrural', async (req, res) => {
-  const candidatas = [
-    'https://visor.sitrural.cl/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
-    'https://visor.sitrural.cl/geoserver/wms?service=WMS&request=GetCapabilities',
-    'https://visor.sitrural.cl/geoserver/web/',
-    'https://geoserver.sitrural.cl/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
-    'https://idesitrural.ciren.cl/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
-    'https://visor.sitrural.cl/config/obtener_capas',
-    'https://visor.sitrural.cl/capas/obtener_capas',
-    'https://visor.sitrural.cl/capa/obtener_capas',
-    'https://visor.sitrural.cl/mapa/obtener_capas',
-    'https://visor.sitrural.cl/config/obtener_configuracion'
-  ];
-  const resultados = [];
-  for (const url of candidatas) {
+  const salida = { version: 'v17' };
+  const traer = async (url, comoTexto = true) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 20000);
     try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 15000);
-      const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': '*/*' } });
+      const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': '*/*', 'User-Agent': 'Mozilla/5.0' } });
       clearTimeout(t);
-      const texto = await r.text();
-      resultados.push({
-        url,
-        status: r.status,
-        tipo: r.headers.get('content-type') || '',
-        largo: texto.length,
-        capasSuelos: (texto.match(/[\w:]*[Ss]uelo[\w]*/g) || []).slice(0, 15),
-        inicio: texto.substring(0, 300)
-      });
-    } catch (e) {
-      resultados.push({ url, error: e.message });
+      const texto = comoTexto ? await r.text() : '';
+      return { status: r.status, tipo: r.headers.get('content-type') || '', texto };
+    } catch (e) { clearTimeout(t); return { error: e.message, texto: '' }; }
+  };
+
+  // 1) Pagina principal del visor
+  const base = 'https://visor.sitrural.cl';
+  const pag = await traer(base + '/mapa');
+  salida.mapa = { status: pag.status, tipo: pag.tipo, largo: pag.texto.length };
+
+  const urlsAbs = [...new Set((pag.texto.match(/https?:\/\/[^"'\s<>\\)]+/g) || []))].slice(0, 40);
+  salida.urlsEnPagina = urlsAbs;
+
+  const scripts = [...new Set((pag.texto.match(/src\s*=\s*["']([^"']+\.js[^"']*)["']/g) || [])
+    .map(s => s.replace(/src\s*=\s*["']/, '').replace(/["']$/, '')))].slice(0, 6);
+  salida.scripts = scripts;
+
+  // 2) Leer los archivos JS del visor y extraer pistas
+  salida.pistas = [];
+  for (const s of scripts) {
+    const urlS = s.startsWith('http') ? s : base + (s.startsWith('/') ? s : '/' + s);
+    const js = await traer(urlS);
+    if (js.error || !js.texto) { salida.pistas.push({ script: urlS, error: js.error || 'vacio' }); continue; }
+    const urls = [...new Set((js.texto.match(/https?:\/\/[^"'\s\\)]+/g) || []))].slice(0, 30);
+    const rutas = [...new Set((js.texto.match(/["'`]\/[a-zA-Z0-9_\-]{2,40}\/[a-zA-Z0-9_\-]{2,50}["'`]/g) || [])
+      .map(x => x.slice(1, -1)))].slice(0, 60);
+    const geo = [];
+    const rxGeo = /geoserver|GetCapabilities|typeName|GetFeatureInfo|wms|wfs/gi;
+    let m, cont = 0;
+    while ((m = rxGeo.exec(js.texto)) !== null && cont < 12) {
+      geo.push(js.texto.substring(Math.max(0, m.index - 60), m.index + 90).replace(/\s+/g, ' '));
+      cont++;
+      rxGeo.lastIndex = m.index + 200;
     }
+    salida.pistas.push({ script: urlS, largo: js.texto.length, urls, rutasApi: rutas, contextoGeo: geo });
   }
-  res.json({ version: 'v16', resultados });
+
+  // 3) Rutas candidatas directas
+  const candidatas = [
+    base + '/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
+    base + '/config/obtener_capas',
+    base + '/config/obtener_arbol',
+    base + '/capas/obtener_capas',
+    base + '/buscador/buscar_capa?nombre=suelos'
+  ];
+  salida.candidatas = [];
+  for (const url of candidatas) {
+    const r = await traer(url);
+    salida.candidatas.push({
+      url, status: r.status, tipo: r.tipo, largo: r.texto.length,
+      menciones: (r.texto.match(/[\w:]*[Ss]uelo[\w]*/g) || []).slice(0, 10),
+      inicio: r.texto.substring(0, 250)
+    });
+  }
+  res.json(salida);
 });
 
 app.listen(PORT, () => {
   console.log(`Servidor Farm Brokers corriendo en puerto ${PORT}`);
-}); 
+});
