@@ -1,32 +1,15 @@
-// Servidor backend para Farm Brokers - Plataforma de Tasaciones
-
-const express = require('express');
-const cors = require('cors');
-const app = express();
-
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const SIMPLEAPI_KEY = process.env.SIMPLEAPI_KEY;
-const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL; // opcional: fija la ruta exacta
-const PORT = process.env.PORT || 3000;
-
-if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
-if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
-
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v18', simpleapi: !!SIMPLEAPI_KEY });
+es) => {
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v19', simpleapi: !!SIMPLEAPI_KEY });
 });
-
+ 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
 app.post('/generar-informe', async (req, res) => {
   try {
     const datos = req.body;
     if (!datos.predioNombre) return res.status(400).json({ error: 'Falta el nombre del predio' });
-
+ 
     const instruccion = `Eres tasador agricola experto de Farm Brokers Chile. Con los datos del predio a continuacion, redacta textos profesionales en espanol para un Informe de Tasacion.
-
+ 
 DATOS DEL PREDIO:
 PREDIO: ${datos.predioNombre}
 ROLES SII: ${(datos.roles || []).map(r => r.rol).join(', ')}
@@ -42,7 +25,7 @@ PLANTACIONES: ${datos.plantacionDesc} (${datos.plantacionHas} ha)
 CONSTRUCCIONES: ${datos.construcciones}
 COORDENADAS: ${datos.coordLat} S, ${datos.coordLon} O | DISTANCIA SANTIAGO: ${datos.distSantiago} km
 ACCESO: ${datos.acceso}
-
+ 
 Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 8 campos de texto:
 - resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual
 - ubicacion: 1-2 oraciones con coordenadas, distancia a Santiago y acceso
@@ -52,9 +35,9 @@ Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codi
 - clima: 1 parrafo sobre clima mediterraneo semiarido de la zona
 - hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas
 - conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion
-
+ 
 Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado.`;
-
+ 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -68,34 +51,34 @@ Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado
         messages: [{ role: 'user', content: instruccion }]
       })
     });
-
+ 
     if (!response.ok) {
       const errText = await response.text();
       console.error('Anthropic API error:', response.status, errText);
       return res.status(502).json({ error: 'Error de la API de Claude', detail: errText });
     }
-
+ 
     const data = await response.json();
     const text = (data.content || []).map(c => c.text || '').join('').trim();
     console.log('Respuesta IA (500 chars):', text.substring(0, 500));
-
+ 
     const match = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
     if (!match) return res.status(500).json({ error: 'Respuesta de IA no contenia JSON valido', raw: text.substring(0, 1000) });
-
+ 
     let ia;
     try { ia = JSON.parse(match[0]); }
     catch (e) { return res.status(500).json({ error: 'JSON de IA mal formado: ' + e.message, raw: match[0].substring(0, 1000) }); }
-
+ 
     res.json({ ia });
   } catch (err) {
     console.error('Error en /generar-informe:', err);
     res.status(500).json({ error: err.message });
   }
 });
-
+ 
 // ──────────────── BUSQUEDA POR ROL VIA SIMPLEAPI (Mapas SII) ────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
+ 
 async function intentar(url, opts, debug, label) {
   try {
     const r = await fetch(url, opts);
@@ -110,39 +93,39 @@ async function intentar(url, opts, debug, label) {
     return null;
   }
 }
-
+ 
 // Cache en memoria de la lista de comunas de SimpleAPI (evita gastar consultas)
 const cacheComunas = { lista: null };
-
+ 
 app.post('/buscar-rol', async (req, res) => {
   const { rol, comuna } = req.body || {};
   if (!rol || !comuna) return res.status(400).json({ ok: false, error: 'Faltan rol y comuna' });
   if (!SIMPLEAPI_KEY) return res.json({ ok: false, error: 'Falta configurar SIMPLEAPI_KEY en Railway (Variables)' });
-
+ 
   const debug = [];
   const headers = { 'Authorization': SIMPLEAPI_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' };
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
-
+ 
   const BASE = 'https://servicios.simpleapi.cl/api/mapas';
   const URL = SIMPLEAPI_URL || (BASE + '/buscar/rol');
-
+ 
   const partes = rolLimpio.split('-').map(s => s.trim());
   const manzana = partes[0] || '';
   const predio = partes[1] || '';
-
+ 
   const norm = s => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
+ 
   // Detecta el error transitorio del scraper de SimpleAPI contra el SII
   const esErrorComunas = (r) => {
     if (!r) return false;
     const msg = JSON.stringify(r).toLowerCase();
     return r.__status >= 400 && msg.includes('error al obtener comunas');
   };
-
+ 
   let resultado = null;
   let listaComunas = cacheComunas.lista;
-
+ 
   // ── Paso 1: intento directo con reintentos ──
   // "Error al obtener comunas" = fallo transitorio del lado de SimpleAPI/SII.
   // Reintentamos hasta 3 veces con pausa (respetando el limite de 5 consultas/min).
@@ -160,7 +143,7 @@ app.post('/buscar-rol', async (req, res) => {
     }
     break; // otro tipo de error: no insistir por la misma via
   }
-
+ 
   // ── Paso 2 (plan B): pedir el catalogo de comunas a su endpoint dedicado ──
   if (!resultado && !listaComunas) {
     const rutasComunas = [
@@ -177,7 +160,7 @@ app.post('/buscar-rol', async (req, res) => {
       }
     }
   }
-
+ 
   // ── Paso 3: resolver la comuna con el catalogo y buscar con el nombre/Id exacto ──
   if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
@@ -186,7 +169,7 @@ app.post('/buscar-rol', async (req, res) => {
     const comunaId = found && (found.Id || found.id || found.ID || found.Codigo || found.codigo);
     const comunaNombre = found && (found.Comuna || found.comuna || found.Nombre || found.nombre);
     debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length });
-
+ 
     const bodies = [];
     if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
     if (comunaId !== undefined && comunaId !== null) bodies.push({ comuna: comunaId, manzana, predio });
@@ -196,7 +179,7 @@ app.post('/buscar-rol', async (req, res) => {
       if (r && r.__status === 200) { resultado = r; break; }
     }
   }
-
+ 
   if (!resultado) {
     const huboTransitorio = debug.some(d => (d.snippet || '').toLowerCase().includes('error al obtener comunas'));
     const mensaje = huboTransitorio
@@ -204,11 +187,11 @@ app.post('/buscar-rol', async (req, res) => {
       : 'Ninguna ruta respondio con datos. Revisa el detalle.';
     return res.json({ ok: false, mensaje, debug });
   }
-
+ 
   // Mapeo flexible de campos (nombres reales confirmados de SimpleAPI Mapas)
   const cand = (resultado && (resultado.Datos || resultado.datos)) || (Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado));
   const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
-
+ 
   const datosMap = {
     avaluoFiscal: String(g(cand, 'ValorTotal', 'avaluo', 'avaluoTotal', 'avaluoFiscal')),
     avaluoAfecto: String(g(cand, 'ValorAfecto')),
@@ -224,22 +207,22 @@ app.post('/buscar-rol', async (req, res) => {
     lat: String(g(cand, 'PosicionX', 'lat', 'latitud')),
     lon: String(g(cand, 'PosicionY', 'lng', 'lon', 'longitud'))
   };
-
+ 
   console.log('SimpleAPI respuesta completa:', JSON.stringify(cand).substring(0, 2000));
-
+ 
   const vacio = !datosMap.avaluoFiscal && !datosMap.superficie && !datosMap.destino && !datosMap.lat;
   if (vacio) {
     debug.push({ label: 'RESPUESTA-COMPLETA (enviar a Claude para mapear campos)', respuesta: cand });
     return res.json({ ok: false, mensaje: 'El rol se encontro, pero los nombres de campos son distintos. Envia el detalle a Claude.', debug });
   }
-
+ 
   res.json({ ok: true, datos: datosMap, raw: cand, debug });
 });
-
-
+ 
+ 
 // ──────── SUELOS AUTOMATICOS: CIREN Propiedades Rurales + Estudio Agrologico ────────
 const turf = require('@turf/turf');
-
+ 
 const CIREN_BASE = 'https://esri.ciren.cl/server/rest/services';
 const CAPAS_REGION = [
   { id: 0, kw: ['ARICA'] }, { id: 1, kw: ['TARAPAC'] }, { id: 2, kw: ['ATACAMA'] },
@@ -252,9 +235,9 @@ const cacheSuelosCapas = { lista: null };
 const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
 const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
 const cacheUso = { svc: null, capas: null };
-
+ 
 const normU = s => (s||'').toString().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
-
+ 
 function claseDesdeTexto(v){
   const t = normU(v).trim();
   const m = t.match(/^(VIII|VII|VI|V|IV|III|II|I)/);
@@ -263,18 +246,18 @@ function claseDesdeTexto(v){
   if (n) return ['I','II','III','IV','V','VI','VII','VIII'][parseInt(n[1])-1];
   return null;
 }
-
-app.post('/suelos-rol', async (req, res) => {
-  const { rol, comuna, region } = req.body || {};
+ 
+const manejadorSuelos = async (req, res) => {
+  const { rol, comuna, region } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
   if (!rol || !comuna) return res.status(400).json({ ok:false, error:'Faltan rol y comuna' });
-
+ 
   const debug = [];
   try {
     // 1) Capa regional de propiedades rurales
     const regionU = normU(region || '');
     const capa = CAPAS_REGION.find(cr => cr.kw.some(k => regionU.includes(k)));
     if (!capa) return res.json({ ok:false, mensaje:'No pude identificar la region "' + region + '". Completa la region en el formulario.', debug });
-
+ 
     // 2) Poligono del predio por rol + comuna
     const rolLimpio = String(rol).trim();
     const where = encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + normU(comuna) + "%'");
@@ -283,7 +266,7 @@ app.post('/suelos-rol', async (req, res) => {
     const rp = await fetch(urlPredio);
     const gj = await rp.json();
     debug.push({ paso:'predio', url: urlPredio, status: rp.status, features: (gj.features||[]).length });
-
+ 
     if (!gj.features || !gj.features.length) {
       // reintento sin filtro de comuna
       const url2 = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
@@ -294,10 +277,10 @@ app.post('/suelos-rol', async (req, res) => {
       if (gj2.features && gj2.features.length) gj.features = gj2.features;
       else return res.json({ ok:false, mensaje:'CIREN no tiene el rol ' + rolLimpio + ' en su capa de la region (cobertura ' + JSON.stringify(capa.kw[0]) + '). Ingresa los suelos manualmente.', debug });
     }
-
+ 
     const predio = gj.features[0];
     const superficieHa = turf.area(predio) / 10000;
-
+ 
     // 3) Capas del estudio agrologico (cache)
     if (!cacheSuelosCapas.lista) {
       const rs = await fetch(CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer?f=json');
@@ -308,7 +291,7 @@ app.post('/suelos-rol', async (req, res) => {
     let capaSuelo = cacheSuelosCapas.lista.find(l => capa.kw.some(k => normU(l.name).includes(k)));
     if (!capaSuelo && cacheSuelosCapas.lista.length === 1) capaSuelo = cacheSuelosCapas.lista[0];
     if (!capaSuelo) return res.json({ ok:false, mensaje:'No encontre capa de suelos para la region. Superficie CIREN del predio: ' + superficieHa.toFixed(2) + ' ha.', superficieHa: superficieHa.toFixed(2), debug });
-
+ 
     // 4) Suelos que intersectan el predio (bbox del predio como filtro espacial)
     const bb = turf.bbox(predio);
     const urlSuelos = CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer/' + capaSuelo.id +
@@ -317,18 +300,18 @@ app.post('/suelos-rol', async (req, res) => {
     const gsu = await rsu.json();
     debug.push({ paso:'suelos', capa: capaSuelo.name, id: capaSuelo.id, status: rsu.status, features: (gsu.features||[]).length,
       camposEjemplo: gsu.features && gsu.features[0] ? Object.keys(gsu.features[0].properties||{}) : [] });
-
+ 
     if (!gsu.features || !gsu.features.length) {
       return res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases:{}, serie:'', mensaje:'Poligono encontrado (superficie CIREN) pero sin datos de suelo en la capa. Completa clases manualmente.', debug });
     }
-
+ 
     // 5) Detectar campo de clase y de serie
     const props0 = gsu.features[0].properties || {};
     const claveClase = Object.keys(props0).find(k => /capac|cus|clase|us[oe]?$/i.test(k) && claseDesdeTexto(props0[k])) ||
                        Object.keys(props0).find(k => claseDesdeTexto(props0[k]));
     const claveSerie = Object.keys(props0).find(k => /serie|nomserie|asociaci/i.test(k));
     debug.push({ paso:'campos', claveClase, claveSerie });
-
+ 
     // 6) Interseccion y hectareas por clase + lista de poligonos ordenada por superficie
     const clases = {};
     let serie = '';
@@ -348,7 +331,7 @@ app.post('/suelos-rol', async (req, res) => {
     intersecciones.sort((a, b) => b.ha - a.ha);
     const dominante = intersecciones.length ? intersecciones[0].f : null;
     const dominanteHa = intersecciones.length ? intersecciones[0].ha : 0;
-
+ 
     // 6b) Caracteristicas del suelo (v2): busca por NOMBRE y ALIAS de campo,
     // y traduce codigos usando los dominios oficiales de la capa CIREN (sin inventar valores)
     const caracteristicas = {};
@@ -363,7 +346,7 @@ app.post('/suelos-rol', async (req, res) => {
       debug.push({ paso:'meta-capa', totalCampos: fields.length, campos: fields.map(f => f.name + (f.alias && f.alias !== f.name ? ' (' + f.alias + ')' : '')).slice(0, 40) });
       const metaDe = {};
       for (const fm of fields) metaDe[fm.name] = fm;
-
+ 
       // Traduce codigo -> descripcion oficial si el campo tiene dominio de valores en CIREN
       const decodificar = (nombreCampo, valor) => {
         const fm = metaDe[nombreCampo];
@@ -373,9 +356,9 @@ app.post('/suelos-rol', async (req, res) => {
         }
         return String(valor).trim();
       };
-
+ 
       const esValorUtil = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
-
+ 
       const OBJETIVOS = [
         ['textura',      /TEXTURA|TEXTTEXT/i],
         ['profundidad',  /PROF/i],
@@ -386,7 +369,7 @@ app.post('/suelos-rol', async (req, res) => {
         ['ph',           /(^|_)PH($|_)|ACIDEZ/i],
         ['aptitud',      /APTITUD|APT/i]
       ];
-
+ 
       for (const [clave, rx] of OBJETIVOS) {
         // Campos candidatos: coinciden por nombre O por alias descriptivo
         const candidatos = fields.filter(fm => rx.test(fm.name) || rx.test(fm.alias || '')).map(fm => fm.name);
@@ -398,7 +381,7 @@ app.post('/suelos-rol', async (req, res) => {
           if (campo) { caracteristicas[clave] = decodificar(campo, dp[campo]); break; }
         }
       }
-
+ 
       if (!serie) {
         const rxS = /SERIE|ASOCIA/i;
         const candS = fields.filter(fm => rxS.test(fm.name) || rxS.test(fm.alias || '')).map(fm => fm.name);
@@ -409,7 +392,7 @@ app.post('/suelos-rol', async (req, res) => {
         }
       }
     } catch (e) { debug.push({ paso:'caracteristicas-error', error: e.message }); }
-
+ 
     // 6c) SIT RURAL (visor.sitrural.cl/geoserver): capa "Suelos" de la comuna.
     // El GetCapabilities trae ~miles de capas organizadas por comuna (workspace tipo
     // "galvarino-sigcra"). El nombre tecnico es un codigo; la palabra "Suelos" va en
@@ -433,7 +416,7 @@ app.post('/suelos-rol', async (req, res) => {
         debug.push({ paso:'sitrural-capas', status: rc.status, totalCapas: capas.length,
           capasSuelos: soloSuelos.length, ejemplos: soloSuelos.slice(0, 10).map(x => x.n + ' | ' + x.t) });
       }
-
+ 
       const objetivoCom = normU(comuna).replace(/\s+/g, '');
       const esDeLaComuna = (x) => {
         const nn = normU(x.n).replace(/[\s_\-]/g, '');
@@ -445,7 +428,7 @@ app.post('/suelos-rol', async (req, res) => {
       debug.push({ paso:'sitrural-capa-comuna', comuna: comuna,
         capa: capaSit ? (capaSit.n + ' | ' + capaSit.t) : 'NO ENCONTRADA',
         capasDeLaComuna: (cacheSitrural.capas || []).filter(esDeLaComuna).slice(0, 15).map(x => x.n + ' | ' + x.t) });
-
+ 
       if (capaSit) {
         const bbS = turf.bbox(predio);
         const urlSit = SIT_WFS + '?service=WFS&version=1.0.0&request=GetFeature&typeName=' +
@@ -455,7 +438,7 @@ app.post('/suelos-rol', async (req, res) => {
         const gj2 = await rs2.json();
         debug.push({ paso:'sitrural-suelos', status: rs2.status, features: (gj2.features||[]).length,
           camposEjemplo: gj2.features && gj2.features[0] ? Object.keys(gj2.features[0].properties||{}) : [] });
-
+ 
         if (gj2.features && gj2.features.length) {
           const interSit = [];
           for (const f of gj2.features) {
@@ -470,7 +453,7 @@ app.post('/suelos-rol', async (req, res) => {
           interSit.sort((a, b) => b.ha - a.ha);
           debug.push({ paso:'sitrural-interseccion', poligonos: interSit.length,
             propsDominante: interSit.length ? interSit[0].f.properties : null });
-
+ 
           if (interSit.length) {
             const util = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
             // Cubre nombres descriptivos (pendiente) y nombres CIREN de shapefile (textpend1, textph2, textapag1...)
@@ -513,13 +496,13 @@ app.post('/suelos-rol', async (req, res) => {
         }
       }
     } catch (e) { debug.push({ paso:'sitrural-error', error: e.message }); }
-
+ 
     if (dominante) {
       camposDominante = dominante.properties || {};
       debug.push({ paso:'dominante', ha: Math.round(dominanteHa*100)/100, propiedades: camposDominante });
     }
     Object.keys(clases).forEach(k => clases[k] = Math.round(clases[k] * 100) / 100);
-
+ 
     // 7) Uso actual del suelo y vegetacion (catastro CONAF/IDE) - descubrimiento automatico del servicio
     const usos = {};
     try {
@@ -566,7 +549,7 @@ app.post('/suelos-rol', async (req, res) => {
         }
       }
     } catch(e) { debug.push({ paso:'uso-error', error: e.message }); }
-
+ 
     // Diagnostico claro cuando las clases vienen vacias
     let notaClases = '';
     if (!Object.keys(clases).length && gsu.features && gsu.features.length) {
@@ -574,18 +557,20 @@ app.post('/suelos-rol', async (req, res) => {
       notaClases = 'ATENCION: encontre ' + gsu.features.length + ' poligonos de suelo pero no pude leer la clase. Propiedades de muestra: ' + JSON.stringify(muestra).substring(0, 400);
       debug.push({ paso:'muestra-suelo', propiedades: muestra });
     }
-
+ 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
     res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
-
+ 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
     debug.push({ paso:'error-general', error: err.message });
     res.json({ ok:false, mensaje:'Error consultando CIREN: ' + err.message, debug });
   }
-});
-
+};
+app.post('/suelos-rol', manejadorSuelos);
+app.get('/suelos-rol', manejadorSuelos); // permite probar por link: /suelos-rol?rol=75-32&comuna=galvarino
+ 
 // ──────── DIAGNOSTICO SIT RURAL v2 (abrir en el navegador: /diag-sitrural) ────────
 // Lee el codigo de la pagina del visor SIT Rural y extrae las direcciones reales
 // (API y geoservidor) que usa internamente, ademas de probar rutas candidatas.
@@ -601,19 +586,19 @@ app.get('/diag-sitrural', async (req, res) => {
       return { status: r.status, tipo: r.headers.get('content-type') || '', texto };
     } catch (e) { clearTimeout(t); return { error: e.message, texto: '' }; }
   };
-
+ 
   // 1) Pagina principal del visor
   const base = 'https://visor.sitrural.cl';
   const pag = await traer(base + '/mapa');
   salida.mapa = { status: pag.status, tipo: pag.tipo, largo: pag.texto.length };
-
+ 
   const urlsAbs = [...new Set((pag.texto.match(/https?:\/\/[^"'\s<>\\)]+/g) || []))].slice(0, 40);
   salida.urlsEnPagina = urlsAbs;
-
+ 
   const scripts = [...new Set((pag.texto.match(/src\s*=\s*["']([^"']+\.js[^"']*)["']/g) || [])
     .map(s => s.replace(/src\s*=\s*["']/, '').replace(/["']$/, '')))].slice(0, 6);
   salida.scripts = scripts;
-
+ 
   // 2) Leer los archivos JS del visor y extraer pistas
   salida.pistas = [];
   for (const s of scripts) {
@@ -633,7 +618,7 @@ app.get('/diag-sitrural', async (req, res) => {
     }
     salida.pistas.push({ script: urlS, largo: js.texto.length, urls, rutasApi: rutas, contextoGeo: geo });
   }
-
+ 
   // 3) Rutas candidatas directas
   const candidatas = [
     base + '/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
@@ -653,7 +638,8 @@ app.get('/diag-sitrural', async (req, res) => {
   }
   res.json(salida);
 });
-
+ 
 app.listen(PORT, () => {
   console.log(`Servidor Farm Brokers corriendo en puerto ${PORT}`);
 });
+ 
