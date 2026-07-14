@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v14', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v24', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -113,6 +113,7 @@ async function intentar(url, opts, debug, label) {
 
 // Cache en memoria de la lista de comunas de SimpleAPI (evita gastar consultas)
 const cacheComunas = { lista: null };
+const cacheBusquedas = {}; // resultados de buscar-rol por rol+comuna (24 h) para ahorrar cuota SimpleAPI
 
 app.post('/buscar-rol', async (req, res) => {
   const { rol, comuna } = req.body || {};
@@ -124,76 +125,85 @@ app.post('/buscar-rol', async (req, res) => {
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
 
-  // Rutas candidatas (SimpleAPI Mapas). Si SIMPLEAPI_URL esta definida, se usa solo esa.
-  const URL = SIMPLEAPI_URL || 'https://servicios.simpleapi.cl/api/mapas/buscar/rol';
+  // Cache: si este rol+comuna ya se consulto con exito en las ultimas 24 h, no gastar cuota
+  const claveCache = (rolLimpio + '|' + comunaLimpia).toLowerCase();
+  const enCache = cacheBusquedas[claveCache];
+  if (enCache && (Date.now() - enCache.t) < 24 * 3600 * 1000) {
+    return res.json({ ...enCache.respuesta, cache: true });
+  }
 
-  // El rol suele venir como "manzana-predio". Preparamos variantes de body.
+  const BASE = 'https://servicios.simpleapi.cl/api/mapas';
+  const URL = SIMPLEAPI_URL || (BASE + '/buscar/rol');
+
   const partes = rolLimpio.split('-').map(s => s.trim());
   const manzana = partes[0] || '';
   const predio = partes[1] || '';
 
-  const norm = s => (s||'').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const norm = s => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Detecta el error transitorio del scraper de SimpleAPI contra el SII
+  const esErrorComunas = (r) => {
+    if (!r) return false;
+    const msg = JSON.stringify(r).toLowerCase();
+    return r.__status >= 400 && msg.includes('error al obtener comunas');
+  };
 
   let resultado = null;
   let listaComunas = cacheComunas.lista;
-  let comunaId = null;
 
-  // Paso 1: si no tenemos la lista de comunas en cache, hacemos una consulta inicial.
-  // Si la comuna en texto funcionara directo (200), usamos ese resultado.
-  if (!listaComunas) {
-    for (let intento = 1; intento <= 3; intento++) {
-      const primer = await intentar(URL, { method: 'POST', headers, body: JSON.stringify({ comuna: comunaLimpia, manzana, predio }) }, debug, 'POST inicial (intento ' + intento + ')');
-      if (primer && primer.__status === 200) { resultado = primer; break; }
-      if (primer && Array.isArray(primer.data) && primer.data.some(x => x.Comuna || x.comuna)) {
-        listaComunas = primer.data;
-        cacheComunas.lista = listaComunas;
-        break;
-      }
-      // "Error al obtener comunas" u otro fallo temporal de SimpleAPI: esperar y reintentar
-      await sleep(2500);
+  // ── Paso 1: intento directo con reintentos ──
+  // "Error al obtener comunas" = fallo transitorio del lado de SimpleAPI/SII.
+  // Reintentamos hasta 3 veces con pausa (respetando el limite de 5 consultas/min).
+  const bodyDirecto = JSON.stringify({ comuna: comunaLimpia, manzana, predio });
+  for (let intento = 1; intento <= 2 && !resultado; intento++) {
+    const r = await intentar(URL, { method: 'POST', headers, body: bodyDirecto }, debug, 'POST directo (intento ' + intento + ')');
+    if (r && r.__status === 200) { resultado = r; break; }
+    if (r && Array.isArray(r.data) && r.data.some(x => x.Comuna || x.comuna)) {
+      listaComunas = r.data; cacheComunas.lista = listaComunas;
+      break; // nos devolvio alternativas de comuna: pasamos a resolverla
     }
-    await sleep(1300);
+    if (esErrorComunas(r)) { await sleep(4000); continue; } // transitorio: esperar y reintentar
+    if (r && r.__status === 401) {
+      const cuerpo = JSON.stringify(r).toLowerCase();
+      const esCuota = cuerpo.includes('l\u00edmite') || cuerpo.includes('limite');
+      return res.json({ ok: false, mensaje: esCuota
+        ? 'SimpleAPI: limite de consultas alcanzado en tu plan (modulo Mapas). Espera unos minutos y reintenta; si persiste, revisa el saldo/plan de tu cuenta en simpleapi.cl. Mientras, usa los botones manuales Avaluo SII / Mapa SII.'
+        : 'SimpleAPI rechazo la API key (401). Revisa SIMPLEAPI_KEY en Railway.', debug });
+    }
+    break; // otro tipo de error: no insistir por la misma via
   }
 
-  // Paso 2: resolver la comuna por nombre (nos quedamos con el nombre EXACTO de su lista y su Id)
-  let comunaNombre = null;
-  if (!resultado && !Array.isArray(listaComunas)) {
-    // Plan B sin lista: el formato oficial suele ser el nombre en mayusculas
-    comunaNombre = comunaLimpia.toUpperCase();
-    debug.push({ paso: 'plan-b', nota: 'SimpleAPI no entrego la lista de comunas; probando nombre en mayusculas: ' + comunaNombre });
-  }
+  // ── Paso 3: resolver la comuna con el catalogo y buscar con el nombre/Id exacto ──
   if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
-    const found = listaComunas.find(x => norm(x.Comuna || x.comuna) === objetivo);
-    if (found) {
-      comunaId = found.Id || found.id || found.ID;
-      comunaNombre = found.Comuna || found.comuna;
-    }
+    const found = listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre) === objetivo)
+               || listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre).includes(objetivo));
+    const comunaId = found && (found.Id || found.id || found.ID || found.Codigo || found.codigo);
+    const comunaNombre = found && (found.Comuna || found.comuna || found.Nombre || found.nombre);
     debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length });
-  }
 
-  // Paso 3: buscar el rol usando el nombre exacto (y el Id como respaldo)
-  if (!resultado && (comunaNombre || comunaId)) {
     const bodies = [];
     if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
-    if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana: Number(manzana) || manzana, predio: Number(predio) || predio });
-    if (comunaId) bodies.push({ comuna: comunaId, manzana, predio });
+    if (comunaId !== undefined && comunaId !== null) bodies.push({ comuna: comunaId, manzana, predio });
     for (const b of bodies) {
+      await sleep(2000);
       const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST ' + JSON.stringify(b));
       if (r && r.__status === 200) { resultado = r; break; }
-      await sleep(1300);
     }
   }
 
   if (!resultado) {
-    return res.json({ ok: false, mensaje: 'Ninguna ruta respondio con datos. Revisa el detalle.', debug });
+    const huboTransitorio = debug.some(d => (d.snippet || '').toLowerCase().includes('error al obtener comunas'));
+    const mensaje = huboTransitorio
+      ? 'SimpleAPI no logro consultar el SII en este momento (fallo temporal de su lado). Espera 1-2 minutos y vuelve a intentar. Si persiste, usa los botones manuales.'
+      : 'Ninguna ruta respondio con datos. Revisa el detalle.';
+    return res.json({ ok: false, mensaje, debug });
   }
 
-  // Mapeo flexible de campos (el formato exacto de SimpleAPI puede variar)
+  // Mapeo flexible de campos (nombres reales confirmados de SimpleAPI Mapas)
   const cand = (resultado && (resultado.Datos || resultado.datos)) || (Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado));
   const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
 
-  // Nombres reales confirmados de SimpleAPI Mapas: Datos.ValorTotal, PosicionX (latitud), PosicionY (longitud)
   const datosMap = {
     avaluoFiscal: String(g(cand, 'ValorTotal', 'avaluo', 'avaluoTotal', 'avaluoFiscal')),
     avaluoAfecto: String(g(cand, 'ValorAfecto')),
@@ -218,7 +228,9 @@ app.post('/buscar-rol', async (req, res) => {
     return res.json({ ok: false, mensaje: 'El rol se encontro, pero los nombres de campos son distintos. Envia el detalle a Claude.', debug });
   }
 
-  res.json({ ok: true, datos: datosMap, raw: cand, debug });
+  const respuestaOk = { ok: true, datos: datosMap, raw: cand, debug };
+  cacheBusquedas[claveCache] = { t: Date.now(), respuesta: respuestaOk };
+  res.json(respuestaOk);
 });
 
 
@@ -234,6 +246,8 @@ const CAPAS_REGION = [
   { id: 12, kw: ['LAGOS'] }, { id: 13, kw: ['AYS'] }
 ];
 const cacheSuelosCapas = { lista: null };
+const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
+const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
 const cacheUso = { svc: null, capas: null };
 
 const normU = s => (s||'').toString().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
@@ -247,8 +261,8 @@ function claseDesdeTexto(v){
   return null;
 }
 
-app.post('/suelos-rol', async (req, res) => {
-  const { rol, comuna, region } = req.body || {};
+const manejadorSuelos = async (req, res) => {
+  const { rol, comuna, region } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
   if (!rol || !comuna) return res.status(400).json({ ok:false, error:'Faltan rol y comuna' });
 
   const debug = [];
@@ -312,38 +326,254 @@ app.post('/suelos-rol', async (req, res) => {
     const claveSerie = Object.keys(props0).find(k => /serie|nomserie|asociaci/i.test(k));
     debug.push({ paso:'campos', claveClase, claveSerie });
 
-    // 6) Interseccion y hectareas por clase + poligono dominante
+    // 6) Interseccion y hectareas por clase + lista de poligonos ordenada por superficie
     const clases = {};
     let serie = '';
-    let dominante = null, dominanteHa = 0;
+    const intersecciones = [];
     for (const f of gsu.features) {
       try {
         const inter = turf.intersect(turf.featureCollection([predio, f]));
         if (!inter) continue;
         const ha = turf.area(inter) / 10000;
         if (ha < 0.005) continue;
-        if (ha > dominanteHa) { dominanteHa = ha; dominante = f; }
+        intersecciones.push({ f, ha });
         const clase = claveClase ? claseDesdeTexto(f.properties[claveClase]) : null;
         if (clase) clases[clase] = (clases[clase] || 0) + ha;
         if (!serie && claveSerie && f.properties[claveSerie]) serie = String(f.properties[claveSerie]);
       } catch(e) { debug.push({ paso:'interseccion-error', error: e.message }); }
     }
+    intersecciones.sort((a, b) => b.ha - a.ha);
+    const dominante = intersecciones.length ? intersecciones[0].f : null;
+    const dominanteHa = intersecciones.length ? intersecciones[0].ha : 0;
 
-    // 6b) Caracteristicas del suelo dominante (deteccion flexible de campos CIREN)
+    // 6b) Caracteristicas del suelo (v2): busca por NOMBRE y ALIAS de campo,
+    // y traduce codigos usando los dominios oficiales de la capa CIREN (sin inventar valores)
     const caracteristicas = {};
+    let camposDominante = null;
+    try {
+      if (!cacheMetaSuelos[capaSuelo.id]) {
+        const rm = await fetch(CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer/' + capaSuelo.id + '?f=json');
+        const jm = await rm.json();
+        cacheMetaSuelos[capaSuelo.id] = jm.fields || [];
+      }
+      const fields = cacheMetaSuelos[capaSuelo.id];
+      debug.push({ paso:'meta-capa', totalCampos: fields.length, campos: fields.map(f => f.name + (f.alias && f.alias !== f.name ? ' (' + f.alias + ')' : '')).slice(0, 40) });
+      const metaDe = {};
+      for (const fm of fields) metaDe[fm.name] = fm;
+
+      // Traduce codigo -> descripcion oficial si el campo tiene dominio de valores en CIREN
+      const decodificar = (nombreCampo, valor) => {
+        const fm = metaDe[nombreCampo];
+        if (fm && fm.domain && Array.isArray(fm.domain.codedValues)) {
+          const cv = fm.domain.codedValues.find(cc => String(cc.code) === String(valor));
+          if (cv) return String(cv.name);
+        }
+        return String(valor).trim();
+      };
+
+      const esValorUtil = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
+
+      const OBJETIVOS = [
+        ['textura',      /TEXTURA|TEXTTEXT/i],
+        ['profundidad',  /PROF/i],
+        ['drenaje',      /DREN/i],
+        ['pendiente',    /PEND|SLOPE/i],
+        ['erosion',      /EROS/i],
+        ['pedregosidad', /PEDRE|PIEDR|PDG|ROCOS/i],
+        ['ph',           /(^|_)PH($|_)|ACIDEZ/i],
+        ['aptitud',      /APTITUD|APT/i]
+      ];
+
+      for (const [clave, rx] of OBJETIVOS) {
+        // Campos candidatos: coinciden por nombre O por alias descriptivo
+        const candidatos = fields.filter(fm => rx.test(fm.name) || rx.test(fm.alias || '')).map(fm => fm.name);
+        // Recorre poligonos del predio del mas grande al mas chico y toma el primer valor real
+        for (const { f } of intersecciones) {
+          const dp = f.properties || {};
+          const campo = candidatos.find(k => esValorUtil(dp[k])) ||
+                        Object.keys(dp).find(k => rx.test(k) && esValorUtil(dp[k]));
+          if (campo) { caracteristicas[clave] = decodificar(campo, dp[campo]); break; }
+        }
+      }
+
+      if (!serie) {
+        const rxS = /SERIE|ASOCIA/i;
+        const candS = fields.filter(fm => rxS.test(fm.name) || rxS.test(fm.alias || '')).map(fm => fm.name);
+        for (const { f } of intersecciones) {
+          const dp = f.properties || {};
+          const campo = candS.find(k => esValorUtil(dp[k])) || Object.keys(dp).find(k => rxS.test(k) && esValorUtil(dp[k]));
+          if (campo) { serie = decodificar(campo, dp[campo]); break; }
+        }
+      }
+    } catch (e) { debug.push({ paso:'caracteristicas-error', error: e.message }); }
+
+    // 6c) SIT RURAL (visor.sitrural.cl/geoserver): capa "Suelos" de la comuna.
+    // El GetCapabilities trae ~miles de capas organizadas por comuna (workspace tipo
+    // "galvarino-sigcra"). El nombre tecnico es un codigo; la palabra "Suelos" va en
+    // el <Title>. Se busca por titulo Y nombre, y la comuna por el prefijo/titulo.
+    try {
+      const SIT_WFS = 'https://visor.sitrural.cl/geoserver/ows';
+      if (!cacheSitrural.capas) {
+        const rc = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=GetCapabilities');
+        const xml = await rc.text();
+        const capas = [];
+        const rxFT = /<FeatureType[^>]*>([\s\S]*?)<\/FeatureType>/g;
+        let mft;
+        while ((mft = rxFT.exec(xml)) !== null) {
+          const bloque = mft[1];
+          const n = (bloque.match(/<Name>([^<]+)<\/Name>/) || [])[1] || '';
+          const t = (bloque.match(/<Title>([^<]*)<\/Title>/) || [])[1] || '';
+          if (n) capas.push({ n, t });
+        }
+        cacheSitrural.capas = capas;
+        const soloSuelos = capas.filter(x => /suelo/i.test(x.t) || /suelo/i.test(x.n));
+        debug.push({ paso:'sitrural-capas', status: rc.status, totalCapas: capas.length,
+          capasSuelos: soloSuelos.length, ejemplos: soloSuelos.slice(0, 10).map(x => x.n + ' | ' + x.t) });
+      }
+
+      const objetivoCom = normU(comuna).replace(/\s+/g, '');
+      const esDeLaComuna = (x) => {
+        const nn = normU(x.n).replace(/[\s_\-\.]/g, '');
+        const tt = normU(x.t).replace(/[\s_\-\.]/g, '');
+        return nn.includes(objetivoCom) || tt.includes(objetivoCom);
+      };
+      const esSuelo = (x) => /suelo/i.test(x.t) || /suelo/i.test(x.n);
+      // Prioridad: estudio agrologico ("Suelos <comuna>") > aptitud > cat. de uso/vegetacion
+      const puntaje = (x) => {
+        const t = normU(x.t);
+        let p = 0;
+        if (/^SUELOS?\b/.test(t)) p += 100;
+        if (/AGROLOG|SERIE/.test(t)) p += 60;
+        if (/APTITUD/.test(t)) p += 20;
+        if (/USO|VEGET|CAT\.?/.test(t)) p -= 40;
+        return p;
+      };
+      const candidatasSit = (cacheSitrural.capas || [])
+        .filter(x => esSuelo(x) && esDeLaComuna(x))
+        .sort((a, b) => puntaje(b) - puntaje(a));
+      debug.push({ paso:'sitrural-candidatas', comuna: comuna,
+        capas: candidatasSit.slice(0, 8).map(x => puntaje(x) + ' | ' + x.n + ' | ' + x.t) });
+
+      const bbS = turf.bbox(predio);
+      const centro = turf.centroid(predio).geometry.coordinates; // [lon, lat]
+      let usadaSit = null, featsSit = null;
+
+      const traerJson = async (url, etiqueta) => {
+        try {
+          const r = await fetch(url);
+          const txt = await r.text();
+          try {
+            const j = JSON.parse(txt);
+            debug.push({ paso:'sitrural-intento', intento: etiqueta, status: r.status, features: (j.features||[]).length });
+            return j;
+          } catch(e) {
+            debug.push({ paso:'sitrural-intento', intento: etiqueta, status: r.status,
+              respuesta: txt.substring(0, 400).replace(/\s+/g,' ') });
+            return null;
+          }
+        } catch (e) {
+          debug.push({ paso:'sitrural-intento', intento: etiqueta, error: e.message });
+          return null;
+        }
+      };
+
+      for (const cand of candidatasSit.slice(0, 2)) {
+        // 1) Preguntar al servidor el nombre real del campo de geometria y los atributos
+        let geomName = 'the_geom';
+        try {
+          const rd = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=DescribeFeatureType&typeName=' + encodeURIComponent(cand.n));
+          const xsd = await rd.text();
+          const campos = [];
+          const rxEl = /<xsd:element[^>]*name="([^"]+)"[^>]*type="([^"]+)"[^>]*>/g;
+          let me;
+          while ((me = rxEl.exec(xsd)) !== null) {
+            campos.push(me[1] + ':' + me[2]);
+            if (/gml:/.test(me[2]) && /Geometry|Point|Polygon|Line|Surface|Curve/i.test(me[2])) geomName = me[1];
+          }
+          debug.push({ paso:'sitrural-describe', capa: cand.t, geometria: geomName, atributos: campos.slice(0, 40) });
+        } catch (e) { debug.push({ paso:'sitrural-describe', capa: cand.t, error: e.message }); }
+
+        const base = SIT_WFS + '?service=WFS&request=GetFeature&typeName=' + encodeURIComponent(cand.n) +
+          '&outputFormat=application/json&maxFeatures=300';
+
+        // 2) Metodos de filtro espacial en cascada hasta que uno funcione
+        const intentos = [
+          ['1.0 BBOX+CRS',   base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+            encodeURIComponent("BBOX(" + geomName + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')")],
+          ['1.0 INTERSECTS punto', base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+            encodeURIComponent("INTERSECTS(" + geomName + ", SRID=4326;POINT(" + centro[0] + " " + centro[1] + "))")],
+          ['1.1 bbox lon-lat', base + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[0], bbS[1], bbS[2], bbS[3], 'EPSG:4326'].join(',')],
+          ['1.1 bbox lat-lon', base + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[1], bbS[0], bbS[3], bbS[2], 'urn:x-ogc:def:crs:EPSG:4326'].join(',')]
+        ];
+        for (const [etiqueta, url] of intentos) {
+          const j = await traerJson(url, cand.t + ' | ' + etiqueta);
+          if (j && j.features && j.features.length) { usadaSit = cand; featsSit = j.features; break; }
+        }
+        if (featsSit) break;
+      }
+
+      if (featsSit) {
+        debug.push({ paso:'sitrural-suelos', capa: usadaSit.t, features: featsSit.length,
+          camposEjemplo: Object.keys(featsSit[0].properties || {}) });
+        const interSit = [];
+        for (const f of featsSit) {
+          try {
+            const inter = turf.intersect(turf.featureCollection([predio, f]));
+            if (!inter) continue;
+            const ha = turf.area(inter) / 10000;
+            if (ha < 0.005) continue;
+            interSit.push({ f, ha });
+          } catch(e) {}
+        }
+        interSit.sort((a, b) => b.ha - a.ha);
+        debug.push({ paso:'sitrural-interseccion', poligonos: interSit.length,
+          propsDominante: interSit.length ? interSit[0].f.properties : null });
+
+        if (interSit.length) {
+          const util = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
+          // Cubre nombres descriptivos (pendiente) y nombres CIREN de shapefile (textpend1, textph2, textapag1...)
+          const OBJ_SIT = [
+            ['pendiente',    /PEND/i,                    null],
+            ['profundidad',  /PROF/i,                    null],
+            ['erosion',      /EROS/i,                    null],
+            ['pedregosidad', /PEDR|PIEDR/i,              null],
+            ['drenaje',      /DREN/i,                    null],
+            ['textura',      /TEXTURA|TEXTTEXT/i,        null],
+            ['ph',           /(^|_)PH(_|\d|$)|TEXTPH/i,  null],
+            ['aptitud',      /APT|APAG|AGRICOLA/i,       /FRUT|APTF/i]
+          ];
+          const tomar = (rx, evitar) => {
+            for (const { f } of interSit) {
+              const dp = f.properties || {};
+              const claves = Object.keys(dp)
+                .filter(k => rx.test(k) && (!evitar || !evitar.test(k)) && util(dp[k]))
+                .sort();
+              if (claves.length) return String(dp[claves[0]]).trim();
+            }
+            if (evitar) {
+              for (const { f } of interSit) {
+                const dp = f.properties || {};
+                const claves = Object.keys(dp).filter(k => rx.test(k) && util(dp[k])).sort();
+                if (claves.length) return String(dp[claves[0]]).trim();
+              }
+            }
+            return '';
+          };
+          let algunaSit = false;
+          for (const [clave, rx, evitar] of OBJ_SIT) {
+            const v = tomar(rx, evitar);
+            if (v) { caracteristicas[clave] = v; algunaSit = true; }
+          }
+          const vSerie = tomar(/^SERIE|_SERIE|NOM.?SERIE|TEXTSERIE/i, /SIMB/i);
+          if (vSerie) serie = vSerie;
+          if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
+        }
+      }
+    } catch (e) { debug.push({ paso:'sitrural-error', error: e.message }); }
+
     if (dominante) {
-      const dp = dominante.properties || {};
-      const buscar = (rx) => { const k = Object.keys(dp).find(k => rx.test(k) && dp[k] !== null && String(dp[k]).trim() !== '' && String(dp[k]).trim() !== '0'); return k ? String(dp[k]).trim() : ''; };
-      caracteristicas.textura = buscar(/TEXT/i);
-      caracteristicas.profundidad = buscar(/PROF/i);
-      caracteristicas.drenaje = buscar(/DREN/i);
-      caracteristicas.pendiente = buscar(/PEND/i);
-      caracteristicas.erosion = buscar(/EROS/i);
-      caracteristicas.pedregosidad = buscar(/PEDRE|PIEDR|PDG/i);
-      caracteristicas.ph = buscar(/(^|_)PH($|_)/i);
-      caracteristicas.aptitud = buscar(/APTITUD|APT_|_APT/i);
-      if (!serie) serie = buscar(/SERIE|ASOCIA/i);
-      debug.push({ paso:'dominante', ha: Math.round(dominanteHa*100)/100, propiedades: dp });
+      camposDominante = dominante.properties || {};
+      debug.push({ paso:'dominante', ha: Math.round(dominanteHa*100)/100, propiedades: camposDominante });
     }
     Object.keys(clases).forEach(k => clases[k] = Math.round(clases[k] * 100) / 100);
 
@@ -404,17 +634,85 @@ app.post('/suelos-rol', async (req, res) => {
 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, caracteristicas, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
     debug.push({ paso:'error-general', error: err.message });
     res.json({ ok:false, mensaje:'Error consultando CIREN: ' + err.message, debug });
   }
+};
+app.post('/suelos-rol', manejadorSuelos);
+app.get('/suelos-rol', manejadorSuelos); // permite probar por link: /suelos-rol?rol=75-32&comuna=galvarino
+
+// ──────── DIAGNOSTICO SIT RURAL v2 (abrir en el navegador: /diag-sitrural) ────────
+// Lee el codigo de la pagina del visor SIT Rural y extrae las direcciones reales
+// (API y geoservidor) que usa internamente, ademas de probar rutas candidatas.
+app.get('/diag-sitrural', async (req, res) => {
+  const salida = { version: 'v17' };
+  const traer = async (url, comoTexto = true) => {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 20000);
+    try {
+      const r = await fetch(url, { signal: ctrl.signal, headers: { 'Accept': '*/*', 'User-Agent': 'Mozilla/5.0' } });
+      clearTimeout(t);
+      const texto = comoTexto ? await r.text() : '';
+      return { status: r.status, tipo: r.headers.get('content-type') || '', texto };
+    } catch (e) { clearTimeout(t); return { error: e.message, texto: '' }; }
+  };
+
+  // 1) Pagina principal del visor
+  const base = 'https://visor.sitrural.cl';
+  const pag = await traer(base + '/mapa');
+  salida.mapa = { status: pag.status, tipo: pag.tipo, largo: pag.texto.length };
+
+  const urlsAbs = [...new Set((pag.texto.match(/https?:\/\/[^"'\s<>\\)]+/g) || []))].slice(0, 40);
+  salida.urlsEnPagina = urlsAbs;
+
+  const scripts = [...new Set((pag.texto.match(/src\s*=\s*["']([^"']+\.js[^"']*)["']/g) || [])
+    .map(s => s.replace(/src\s*=\s*["']/, '').replace(/["']$/, '')))].slice(0, 6);
+  salida.scripts = scripts;
+
+  // 2) Leer los archivos JS del visor y extraer pistas
+  salida.pistas = [];
+  for (const s of scripts) {
+    const urlS = s.startsWith('http') ? s : base + (s.startsWith('/') ? s : '/' + s);
+    const js = await traer(urlS);
+    if (js.error || !js.texto) { salida.pistas.push({ script: urlS, error: js.error || 'vacio' }); continue; }
+    const urls = [...new Set((js.texto.match(/https?:\/\/[^"'\s\\)]+/g) || []))].slice(0, 30);
+    const rutas = [...new Set((js.texto.match(/["'`]\/[a-zA-Z0-9_\-]{2,40}\/[a-zA-Z0-9_\-]{2,50}["'`]/g) || [])
+      .map(x => x.slice(1, -1)))].slice(0, 60);
+    const geo = [];
+    const rxGeo = /geoserver|GetCapabilities|typeName|GetFeatureInfo|wms|wfs/gi;
+    let m, cont = 0;
+    while ((m = rxGeo.exec(js.texto)) !== null && cont < 12) {
+      geo.push(js.texto.substring(Math.max(0, m.index - 60), m.index + 90).replace(/\s+/g, ' '));
+      cont++;
+      rxGeo.lastIndex = m.index + 200;
+    }
+    salida.pistas.push({ script: urlS, largo: js.texto.length, urls, rutasApi: rutas, contextoGeo: geo });
+  }
+
+  // 3) Rutas candidatas directas
+  const candidatas = [
+    base + '/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
+    base + '/config/obtener_capas',
+    base + '/config/obtener_arbol',
+    base + '/capas/obtener_capas',
+    base + '/buscador/buscar_capa?nombre=suelos'
+  ];
+  salida.candidatas = [];
+  for (const url of candidatas) {
+    const r = await traer(url);
+    salida.candidatas.push({
+      url, status: r.status, tipo: r.tipo, largo: r.texto.length,
+      menciones: (r.texto.match(/[\w:]*[Ss]uelo[\w]*/g) || []).slice(0, 10),
+      inicio: r.texto.substring(0, 250)
+    });
+  }
+  res.json(salida);
 });
 
-
-// ──────── DISTANCIAS AUTOMATICAS (OSRM/OpenStreetMap - gratis, sin API key) ────────
 app.post('/distancias', async (req, res) => {
   const { lat, lon, comuna } = req.body || {};
   if (!lat || !lon) return res.status(400).json({ ok:false, error:'Faltan coordenadas' });
