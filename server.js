@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v21', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v22', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -113,6 +113,7 @@ async function intentar(url, opts, debug, label) {
 
 // Cache en memoria de la lista de comunas de SimpleAPI (evita gastar consultas)
 const cacheComunas = { lista: null };
+const cacheBusquedas = {}; // resultados de buscar-rol por rol+comuna (24 h) para ahorrar cuota SimpleAPI
 
 app.post('/buscar-rol', async (req, res) => {
   const { rol, comuna } = req.body || {};
@@ -123,6 +124,13 @@ app.post('/buscar-rol', async (req, res) => {
   const headers = { 'Authorization': SIMPLEAPI_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' };
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
+
+  // Cache: si este rol+comuna ya se consulto con exito en las ultimas 24 h, no gastar cuota
+  const claveCache = (rolLimpio + '|' + comunaLimpia).toLowerCase();
+  const enCache = cacheBusquedas[claveCache];
+  if (enCache && (Date.now() - enCache.t) < 24 * 3600 * 1000) {
+    return res.json({ ...enCache.respuesta, cache: true });
+  }
 
   const BASE = 'https://servicios.simpleapi.cl/api/mapas';
   const URL = SIMPLEAPI_URL || (BASE + '/buscar/rol');
@@ -147,7 +155,7 @@ app.post('/buscar-rol', async (req, res) => {
   // "Error al obtener comunas" = fallo transitorio del lado de SimpleAPI/SII.
   // Reintentamos hasta 3 veces con pausa (respetando el limite de 5 consultas/min).
   const bodyDirecto = JSON.stringify({ comuna: comunaLimpia, manzana, predio });
-  for (let intento = 1; intento <= 3 && !resultado; intento++) {
+  for (let intento = 1; intento <= 2 && !resultado; intento++) {
     const r = await intentar(URL, { method: 'POST', headers, body: bodyDirecto }, debug, 'POST directo (intento ' + intento + ')');
     if (r && r.__status === 200) { resultado = r; break; }
     if (r && Array.isArray(r.data) && r.data.some(x => x.Comuna || x.comuna)) {
@@ -220,7 +228,9 @@ app.post('/buscar-rol', async (req, res) => {
     return res.json({ ok: false, mensaje: 'El rol se encontro, pero los nombres de campos son distintos. Envia el detalle a Claude.', debug });
   }
 
-  res.json({ ok: true, datos: datosMap, raw: cand, debug });
+  const respuestaOk = { ok: true, datos: datosMap, raw: cand, debug };
+  cacheBusquedas[claveCache] = { t: Date.now(), respuesta: respuestaOk };
+  res.json(respuestaOk);
 });
 
 
