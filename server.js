@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v22', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v23', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -455,33 +455,59 @@ const manejadorSuelos = async (req, res) => {
         capas: candidatasSit.slice(0, 8).map(x => puntaje(x) + ' | ' + x.n + ' | ' + x.t) });
 
       const bbS = turf.bbox(predio);
-      // Filtro BBOX via CQL declarando EPSG:4326 (el bbox simple de WFS 1.0.0 se
-      // interpreta en el sistema nativo de la capa, que aqui es UTM -> 0 resultados)
-      const nombresGeom = ['the_geom', 'geom', 'shape', 'wkb_geometry'];
+      const centro = turf.centroid(predio).geometry.coordinates; // [lon, lat]
       let usadaSit = null, featsSit = null;
 
-      for (const cand of candidatasSit.slice(0, 3)) {
-        for (const g of nombresGeom) {
-          const cql = "BBOX(" + g + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')";
-          const urlSit = SIT_WFS + '?service=WFS&version=1.0.0&request=GetFeature&typeName=' +
-            encodeURIComponent(cand.n) + '&outputFormat=application/json&srsName=EPSG:4326' +
-            '&maxFeatures=300&CQL_FILTER=' + encodeURIComponent(cql);
+      const traerJson = async (url, etiqueta) => {
+        try {
+          const r = await fetch(url);
+          const txt = await r.text();
           try {
-            const rs2 = await fetch(urlSit);
-            const txt2 = await rs2.text();
-            let gj2 = null;
-            try { gj2 = JSON.parse(txt2); } catch(e) {
-              debug.push({ paso:'sitrural-intento', capa: cand.t, geom: g, status: rs2.status,
-                respuesta: txt2.substring(0, 180).replace(/\s+/g,' ') });
-              continue; // probable nombre de geometria incorrecto -> probar el siguiente
-            }
-            debug.push({ paso:'sitrural-intento', capa: cand.t, geom: g, status: rs2.status,
-              features: (gj2.features || []).length });
-            if (gj2.features && gj2.features.length) { usadaSit = cand; featsSit = gj2.features; break; }
-            break; // JSON valido con 0 features: la capa no cubre el predio -> siguiente capa
-          } catch (e) {
-            debug.push({ paso:'sitrural-intento', capa: cand.t, geom: g, error: e.message });
+            const j = JSON.parse(txt);
+            debug.push({ paso:'sitrural-intento', intento: etiqueta, status: r.status, features: (j.features||[]).length });
+            return j;
+          } catch(e) {
+            debug.push({ paso:'sitrural-intento', intento: etiqueta, status: r.status,
+              respuesta: txt.substring(0, 400).replace(/\s+/g,' ') });
+            return null;
           }
+        } catch (e) {
+          debug.push({ paso:'sitrural-intento', intento: etiqueta, error: e.message });
+          return null;
+        }
+      };
+
+      for (const cand of candidatasSit.slice(0, 2)) {
+        // 1) Preguntar al servidor el nombre real del campo de geometria y los atributos
+        let geomName = 'the_geom';
+        try {
+          const rd = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=DescribeFeatureType&typeName=' + encodeURIComponent(cand.n));
+          const xsd = await rd.text();
+          const campos = [];
+          const rxEl = /<xsd:element[^>]*name="([^"]+)"[^>]*type="([^"]+)"[^>]*>/g;
+          let me;
+          while ((me = rxEl.exec(xsd)) !== null) {
+            campos.push(me[1] + ':' + me[2]);
+            if (/gml:/.test(me[2]) && /Geometry|Point|Polygon|Line|Surface|Curve/i.test(me[2])) geomName = me[1];
+          }
+          debug.push({ paso:'sitrural-describe', capa: cand.t, geometria: geomName, atributos: campos.slice(0, 40) });
+        } catch (e) { debug.push({ paso:'sitrural-describe', capa: cand.t, error: e.message }); }
+
+        const base = SIT_WFS + '?service=WFS&request=GetFeature&typeName=' + encodeURIComponent(cand.n) +
+          '&outputFormat=application/json&maxFeatures=300';
+
+        // 2) Metodos de filtro espacial en cascada hasta que uno funcione
+        const intentos = [
+          ['1.0 BBOX+CRS',   base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+            encodeURIComponent("BBOX(" + geomName + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')")],
+          ['1.0 INTERSECTS punto', base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+            encodeURIComponent("INTERSECTS(" + geomName + ", SRID=4326;POINT(" + centro[0] + " " + centro[1] + "))")],
+          ['1.1 bbox lon-lat', base + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[0], bbS[1], bbS[2], bbS[3], 'EPSG:4326'].join(',')],
+          ['1.1 bbox lat-lon', base + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[1], bbS[0], bbS[3], bbS[2], 'urn:x-ogc:def:crs:EPSG:4326'].join(',')]
+        ];
+        for (const [etiqueta, url] of intentos) {
+          const j = await traerJson(url, cand.t + ' | ' + etiqueta);
+          if (j && j.features && j.features.length) { usadaSit = cand; featsSit = j.features; break; }
         }
         if (featsSit) break;
       }
