@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v24', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v25', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -542,22 +542,31 @@ const manejadorSuelos = async (req, res) => {
             ['ph',           /(^|_)PH(_|\d|$)|TEXTPH/i,  null],
             ['aptitud',      /APT|APAG|AGRICOLA/i,       /FRUT|APTF/i]
           ];
-          const tomar = (rx, evitar) => {
-            for (const { f } of interSit) {
-              const dp = f.properties || {};
-              const claves = Object.keys(dp)
-                .filter(k => rx.test(k) && (!evitar || !evitar.test(k)) && util(dp[k]))
-                .sort();
-              if (claves.length) return String(dp[claves[0]]).trim();
+          // "Casi plana (1 a 3 %)": combina los campos dobles _1/_2 de SIT Rural
+          // y convierte MAYUSCULAS SOSTENIDAS a formato de oracion
+          const fmtVal = (v) => {
+            v = String(v).trim();
+            if (v.length > 2 && v === v.toUpperCase() && /[A-ZÁÉÍÓÚÑ]/.test(v)) {
+              v = v.charAt(0).toUpperCase() + v.slice(1).toLowerCase();
             }
-            if (evitar) {
+            return v;
+          };
+          const tomar = (rx, evitar) => {
+            const buscarEn = (permitirEvitado) => {
               for (const { f } of interSit) {
                 const dp = f.properties || {};
-                const claves = Object.keys(dp).filter(k => rx.test(k) && util(dp[k])).sort();
-                if (claves.length) return String(dp[claves[0]]).trim();
+                const claves = Object.keys(dp)
+                  .filter(k => rx.test(k) && (permitirEvitado || !evitar || !evitar.test(k)) && util(dp[k]))
+                  .sort();
+                if (claves.length) {
+                  const v1 = fmtVal(dp[claves[0]]);
+                  const v2 = claves[1] && util(dp[claves[1]]) ? fmtVal(dp[claves[1]]) : '';
+                  return (v2 && v2.toLowerCase() !== v1.toLowerCase()) ? (v1 + ' (' + v2 + ')') : v1;
+                }
               }
-            }
-            return '';
+              return '';
+            };
+            return buscarEn(false) || (evitar ? buscarEn(true) : '');
           };
           let algunaSit = false;
           for (const [clave, rx, evitar] of OBJ_SIT) {
