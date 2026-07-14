@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v25', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v26', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -573,8 +573,27 @@ const manejadorSuelos = async (req, res) => {
             const v = tomar(rx, evitar);
             if (v) { caracteristicas[clave] = v; algunaSit = true; }
           }
-          const vSerie = tomar(/^SERIE|_SERIE|NOM.?SERIE|TEXTSERIE/i, /SIMB/i);
-          if (vSerie) serie = vSerie;
+          // Series de suelo del predio: puede haber varias (ej. "Perquenco, Metrenco 1, Metrenco 5").
+          // Se recorren TODOS los poligonos que tocan el predio, se agrupan por serie+variacion
+          // y se ordenan por superficie (la dominante primero).
+          const rxSerie = /SERIE|(^|_)N?SER(_|$|IE)|NOMSER|TEXTSER/i;
+          const seriesHa = {};
+          for (const { f, ha } of interSit) {
+            const dp = f.properties || {};
+            const kSerie = Object.keys(dp).filter(k => rxSerie.test(k) && !/SIMB/i.test(k) && util(dp[k])).sort()[0];
+            if (!kSerie) continue;
+            let nombre = fmtVal(dp[kSerie]);
+            // Variacion de la serie (ej. simbolo "PQC-1" -> "Perquenco 1")
+            const kVari = Object.keys(dp).filter(k => /VARI/i.test(k) && util(dp[k])).sort()[0];
+            if (kVari) {
+              const suf = String(dp[kVari]).trim().split('-')[1];
+              if (suf) nombre += ' ' + suf;
+            }
+            seriesHa[nombre] = (seriesHa[nombre] || 0) + ha;
+          }
+          const listaSeries = Object.entries(seriesHa).sort((x, y) => y[1] - x[1]).map(e => e[0]);
+          if (listaSeries.length) serie = listaSeries.join(', ');
+          debug.push({ paso:'sitrural-series', series: Object.entries(seriesHa).map(e => e[0] + ' (' + (Math.round(e[1]*10)/10) + ' ha)') });
           if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
         }
       }
