@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v26', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v27', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -538,9 +538,9 @@ const manejadorSuelos = async (req, res) => {
             ['erosion',      /EROS/i,                    null],
             ['pedregosidad', /PEDR|PIEDR/i,              null],
             ['drenaje',      /DREN/i,                    null],
-            ['textura',      /TEXTURA|TEXTTEXT/i,        null],
+            ['textura',      /TEXTURA|TEXTTEXT|DESCTEXT/i, null],
             ['ph',           /(^|_)PH(_|\d|$)|TEXTPH/i,  null],
-            ['aptitud',      /APT|APAG|AGRICOLA/i,       /FRUT|APTF/i]
+            ['aptitud',      /DESCAPAG|APTITUD|APT|APAG|AGRICOLA/i, /FRUT|APTF|DESRAPAG/i]
           ];
           // "Casi plana (1 a 3 %)": combina los campos dobles _1/_2 de SIT Rural
           // y convierte MAYUSCULAS SOSTENIDAS a formato de oracion
@@ -561,6 +561,8 @@ const manejadorSuelos = async (req, res) => {
                 if (claves.length) {
                   const v1 = fmtVal(dp[claves[0]]);
                   const v2 = claves[1] && util(dp[claves[1]]) ? fmtVal(dp[claves[1]]) : '';
+                  // No combinar cuando el primer valor ya es una oracion completa
+                  if (v1.length > 60 || /\. /.test(v1)) return v1;
                   return (v2 && v2.toLowerCase() !== v1.toLowerCase()) ? (v1 + ' (' + v2 + ')') : v1;
                 }
               }
@@ -576,7 +578,7 @@ const manejadorSuelos = async (req, res) => {
           // Series de suelo del predio: puede haber varias (ej. "Perquenco, Metrenco 1, Metrenco 5").
           // Se recorren TODOS los poligonos que tocan el predio, se agrupan por serie+variacion
           // y se ordenan por superficie (la dominante primero).
-          const rxSerie = /SERIE|(^|_)N?SER(_|$|IE)|NOMSER|TEXTSER/i;
+          const rxSerie = /SERI/i; // cubre nombseri, serie, nom_serie, textserie
           const seriesHa = {};
           for (const { f, ha } of interSit) {
             const dp = f.properties || {};
