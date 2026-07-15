@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v31', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v32', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -849,7 +849,7 @@ app.post('/distancias', async (req, res) => {
   const santiago = await ruta(la, lo, SCL.lat, SCL.lon, 'ruta-santiago');
 
   // Centro comunal via Nominatim (geocodificador OpenStreetMap, gratis)
-  let comunaDist = null, comunaNombre = null;
+  let comunaDist = null, comunaNombre = null, accesoTxt = null;
   if (comuna) {
     try {
       const gu = 'https://nominatim.openstreetmap.org/search?q=' + encodeURIComponent(comuna + ', Chile') + '&format=json&limit=1';
@@ -859,11 +859,79 @@ app.post('/distancias', async (req, res) => {
       if (gj[0]) {
         comunaNombre = comuna;
         comunaDist = await ruta(la, lo, parseFloat(gj[0].lat), parseFloat(gj[0].lon), 'ruta-comuna');
+        // Acceso: nombres de las vias principales de la ruta centro comunal -> predio
+        try {
+          const us = 'https://router.project-osrm.org/route/v1/driving/' + gj[0].lon + ',' + gj[0].lat + ';' + lo + ',' + la + '?overview=false&steps=true';
+          const rs = await fetch(us, { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0' } });
+          const js = await rs.json();
+          if (js.routes && js.routes[0] && js.routes[0].legs && js.routes[0].legs[0]) {
+            const porVia = {};
+            for (const st of (js.routes[0].legs[0].steps || [])) {
+              const nom = (st.name || '').trim();
+              if (!nom) continue;
+              porVia[nom] = (porVia[nom] || 0) + (st.distance || 0);
+            }
+            const vias = Object.entries(porVia).sort((x, y) => y[1] - x[1]).slice(0, 3)
+              .map(e => e[0] + ' (' + (Math.round(e[1] / 100) / 10) + ' km)');
+            if (vias.length) {
+              accesoTxt = 'Desde el centro de ' + comuna + ', el acceso se realiza principalmente por ' + vias.join(', luego ') + '.';
+              debug.push({ paso: 'acceso-vias', vias });
+            }
+          }
+        } catch (e) { debug.push({ paso: 'acceso-error', error: e.message }); }
       }
     } catch(e) { debug.push({ paso: 'geocodificar-error', error: e.message }); }
   }
 
-  res.json({ ok:true, santiago, comuna: comunaDist, comunaNombre, debug });
+  res.json({ ok:true, santiago, comuna: comunaDist, comunaNombre, acceso: accesoTxt, debug });
+});
+
+// ──────── DESLINDES REFERENCIALES: roles vecinos CIREN + vias OpenStreetMap ────────
+app.post('/deslindes', async (req, res) => {
+  const { bbox, capaPredioId, rol } = req.body || {};
+  if (!bbox || !Array.isArray(bbox) || bbox.length !== 4 || capaPredioId === undefined) {
+    return res.status(400).json({ ok:false, error:'Faltan bbox y capaPredioId (usa primero Suelos Auto)' });
+  }
+  const debug = [];
+  const [minx, miny, maxx, maxy] = bbox.map(Number);
+  const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
+  const margen = 0.0012; // ~130 m fuera del borde
+  const puntos = {
+    norte:    { lon: cx, lat: maxy + margen },
+    sur:      { lon: cx, lat: miny - margen },
+    oriente:  { lon: maxx + margen, lat: cy },
+    poniente: { lon: minx - margen, lat: cy }
+  };
+  const CIREN_Q = 'https://esri.ciren.cl/server/rest/services/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capaPredioId + '/query';
+  const resultado = {};
+  for (const [lado, p] of Object.entries(puntos)) {
+    let texto = '';
+    // 1) Rol vecino segun catastro CIREN
+    try {
+      const u = CIREN_Q + '?geometry=' + p.lon + ',' + p.lat + '&geometryType=esriGeometryPoint&inSR=4326' +
+        '&spatialRel=esriSpatialRelIntersects&outFields=rol,desccomu&returnGeometry=false&f=json';
+      const r = await fetch(u);
+      const j = await r.json();
+      const feat = j.features && j.features[0];
+      if (feat && feat.attributes && feat.attributes.rol) {
+        const rv = String(feat.attributes.rol);
+        texto = (rol && rv === String(rol)) ? 'Con resto del mismo predio' : ('Con predio Rol ' + rv);
+      }
+      debug.push({ lado, paso:'rol-vecino', encontrado: feat ? (feat.attributes||{}).rol : null });
+    } catch (e) { debug.push({ lado, paso:'rol-vecino-error', error: e.message }); }
+    // 2) Via o hito geografico segun OpenStreetMap
+    try {
+      await sleep(1100); // limite de cortesia de Nominatim: 1 consulta/segundo
+      const un = 'https://nominatim.openstreetmap.org/reverse?lat=' + p.lat + '&lon=' + p.lon + '&format=json&zoom=16&accept-language=es';
+      const rn = await fetch(un, { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0 (contacto@farmbrokers.cl)' } });
+      const jn = await rn.json();
+      const via = jn.address && (jn.address.road || jn.address.river || jn.address.hamlet || jn.address.village);
+      if (via) texto = texto ? (texto + ', ' + via + ' de por medio') : ('Con ' + via);
+      debug.push({ lado, paso:'osm', via: via || null });
+    } catch (e) { debug.push({ lado, paso:'osm-error', error: e.message }); }
+    resultado[lado] = texto || 'Sin informacion referencial disponible';
+  }
+  res.json({ ok:true, ...resultado, nota:'Deslindes referenciales (catastro CIREN + OpenStreetMap). Validar con titulos de dominio.', debug });
 });
 
 app.listen(PORT, () => {
