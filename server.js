@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v33', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v34', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -665,9 +665,9 @@ const manejadorSuelos = async (req, res) => {
               }
               if (!dentro) { nFuera++; continue; }
               const dp = f.properties || {};
-              const especie = buscarF(dp, /ESPEC/i);
+              const especie = buscarF(dp, /ESPE/i);
               if (!especie) continue;
-              const variedad = buscarF(dp, /VARIE/i);
+              const variedad = buscarF(dp, /VARI/i);
               const anio = buscarF(dp, /ANO|AGNO|PLANT/i).replace(/[^0-9]/g, '').substring(0, 4);
               const arboles = parseFloat(buscarF(dp, /ARBO|N_?ARB/i)) || 0;
               const clave = especie + '|' + variedad + '|' + anio;
@@ -691,9 +691,9 @@ const manejadorSuelos = async (req, res) => {
                   try {
                     if (!turf.booleanPointInPolygon(turf.centroid(f), zona)) continue;
                     const dp = f.properties || {};
-                    const esp = buscarF(dp, /ESPEC/i);
+                    const esp = buscarF(dp, /ESPE/i);
                     if (!esp) continue;
-                    const k = (esp + ' ' + (buscarF(dp, /VARIE/i) || '')).trim();
+                    const k = (esp + ' ' + (buscarF(dp, /VARI/i) || '')).trim();
                     cercanos[k] = (cercanos[k] || 0) + (haOficial(f) || 0);
                   } catch (e2) {}
                 }
