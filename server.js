@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v29', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v31', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -38,7 +38,7 @@ SUPERFICIES: Titulos ${datos.superfTitulos} ha, SII ${datos.superfSIITotal} ha, 
 SUELOS: ${datos.suelosDetalle || ("Clase I " + datos.c1 + " ha, II " + datos.c2 + " ha, III " + datos.c3 + " ha, IV " + datos.c4 + " ha")}
 SERIE: ${datos.seriesSuelo} | PENDIENTE: ${datos.pendiente} | DRENAJE: ${datos.drenaje}
 PLANTACIONES FRUTALES (catastro CIREN): ${datos.plantacionesTxt || "sin plantaciones registradas en el catastro fruticola"}
-AGUA: ${datos.cn1} (${datos.ca1} acciones, ${datos.cq1} l/s) | ${datos.cn2 || ''} (${datos.ca2 || ''} acciones)
+AGUA: ${datos.recursosHidricosTxt || (datos.cn1 ? datos.cn1 + ' (' + datos.ca1 + ' acciones, ' + datos.cq1 + ' l/s)' : 'sin derechos de agua informados')}
 PLANTACIONES: ${datos.plantacionDesc} (${datos.plantacionHas} ha)
 CONSTRUCCIONES: ${datos.construcciones}
 COORDENADAS: ${datos.coordLat} S, ${datos.coordLon} O | DISTANCIA SANTIAGO: ${datos.distSantiago} km | DISTANCIA CENTRO COMUNAL: ${datos.distComuna || "no informada"}
@@ -627,20 +627,33 @@ const manejadorSuelos = async (req, res) => {
             const utilF = v => v !== null && v !== undefined && String(v).trim() !== '';
             const buscarF = (dp, rx) => { const k = Object.keys(dp).filter(x => rx.test(x) && utilF(dp[x])).sort()[0]; return k ? String(dp[k]).trim() : ''; };
             const grupos = {};
+            let nInter = 0, nCentro = 0, nFuera = 0, nError = 0;
+            const haOficial = (f) => {
+              const dp = f.properties || {};
+              const k = Object.keys(dp).find(x => /SUP/i.test(x) && String(dp[x]).trim() !== '');
+              return (k ? parseFloat(String(dp[k]).replace(',', '.')) : 0) || 0;
+            };
             for (const f of jf.features) {
               let ha = 0;
+              let dentro = false;
+              // 1) Interseccion geometrica exacta
               try {
                 const inter = turf.intersect(turf.featureCollection([predio, f]));
-                if (!inter) continue;
-                ha = turf.area(inter) / 10000;
-                if (ha < 0.01) continue;
-              } catch (e) {
-                // Geometria conflictiva: verificar si el centro del cuartel cae dentro del predio
+                if (inter) {
+                  ha = turf.area(inter) / 10000;
+                  if (ha >= 0.005) { dentro = true; nInter++; }
+                }
+              } catch (e) { nError++; }
+              // 2) Respaldo: el centro del cuartel cae dentro del predio
+              if (!dentro) {
                 try {
-                  if (!turf.booleanPointInPolygon(turf.centroid(f), predio)) continue;
-                  ha = parseFloat(String((f.properties || {}).supbloq_ha || '').replace(',', '.')) || (turf.area(f) / 10000);
-                } catch (e2) { continue; }
+                  if (turf.booleanPointInPolygon(turf.centroid(f), predio)) {
+                    ha = haOficial(f) || (turf.area(f) / 10000);
+                    dentro = true; nCentro++;
+                  }
+                } catch (e2) {}
               }
+              if (!dentro) { nFuera++; continue; }
               const dp = f.properties || {};
               const especie = buscarF(dp, /ESPEC/i);
               if (!especie) continue;
@@ -652,6 +665,7 @@ const manejadorSuelos = async (req, res) => {
               grupos[clave].arboles += arboles;
               grupos[clave].has += ha;
             }
+            debug.push({ paso:'fruticola-cruce', porInterseccion: nInter, porCentro: nCentro, fuera: nFuera, erroresGeometria: nError });
             const plantaciones = Object.values(grupos)
               .sort((x, y) => y.has - x.has)
               .map(p => ({ ...p, arboles: Math.round(p.arboles), has: Math.round(p.has * 100) / 100 }));
