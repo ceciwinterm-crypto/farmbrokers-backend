@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v27', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v28', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -37,6 +37,7 @@ AVALUO TOTAL: $${datos.avaluoTotal || 0} | UF BASE: ${datos.ufBase}
 SUPERFICIES: Titulos ${datos.superfTitulos} ha, SII ${datos.superfSIITotal} ha, Google Earth ${datos.superfGoogleEarth} ha
 SUELOS: ${datos.suelosDetalle || ("Clase I " + datos.c1 + " ha, II " + datos.c2 + " ha, III " + datos.c3 + " ha, IV " + datos.c4 + " ha")}
 SERIE: ${datos.seriesSuelo} | PENDIENTE: ${datos.pendiente} | DRENAJE: ${datos.drenaje}
+PLANTACIONES FRUTALES (catastro CIREN): ${datos.plantacionesTxt || "sin plantaciones registradas en el catastro fruticola"}
 AGUA: ${datos.cn1} (${datos.ca1} acciones, ${datos.cq1} l/s) | ${datos.cn2 || ''} (${datos.ca2 || ''} acciones)
 PLANTACIONES: ${datos.plantacionDesc} (${datos.plantacionHas} ha)
 CONSTRUCCIONES: ${datos.construcciones}
@@ -407,6 +408,7 @@ const manejadorSuelos = async (req, res) => {
       }
     } catch (e) { debug.push({ paso:'caracteristicas-error', error: e.message }); }
 
+    let respPlantaciones = null;
     // 6c) SIT RURAL (visor.sitrural.cl/geoserver): capa "Suelos" de la comuna.
     // El GetCapabilities trae ~miles de capas organizadas por comuna (workspace tipo
     // "galvarino-sigcra"). El nombre tecnico es un codigo; la palabra "Suelos" va en
@@ -599,6 +601,62 @@ const manejadorSuelos = async (req, res) => {
           if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
         }
       }
+
+      // 6d) Catastro Fruticola CIREN (SIT Rural): cuarteles frutales dentro del predio
+      try {
+        const capaFrut = (cacheSitrural.capas || []).find(x => /FRUT/i.test(x.t) && esDeLaComuna(x));
+        debug.push({ paso:'fruticola-capa', capa: capaFrut ? (capaFrut.n + ' | ' + capaFrut.t) : 'SIN CATASTRO FRUTICOLA PARA LA COMUNA' });
+        if (capaFrut) {
+          let geomF = 'thegeom';
+          try {
+            const rdf = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=DescribeFeatureType&typeName=' + encodeURIComponent(capaFrut.n));
+            const xsdf = await rdf.text();
+            const rxElF = /<xsd:element[^>]*name="([^"]+)"[^>]*type="([^"]+)"[^>]*>/g;
+            let mf;
+            while ((mf = rxElF.exec(xsdf)) !== null) {
+              if (/gml:/.test(mf[2]) && /Geometry|Point|Polygon|Line|Surface|Curve/i.test(mf[2])) geomF = mf[1];
+            }
+          } catch (e) {}
+          const baseF = SIT_WFS + '?service=WFS&request=GetFeature&typeName=' + encodeURIComponent(capaFrut.n) +
+            '&outputFormat=application/json&maxFeatures=500';
+          const cqlF = "BBOX(" + geomF + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')";
+          const jf = await traerJson(baseF + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' + encodeURIComponent(cqlF), 'fruticola ' + capaFrut.t);
+          if (jf && jf.features && jf.features.length) {
+            debug.push({ paso:'fruticola-campos', campos: Object.keys(jf.features[0].properties || {}) });
+            const utilF = v => v !== null && v !== undefined && String(v).trim() !== '';
+            const buscarF = (dp, rx) => { const k = Object.keys(dp).filter(x => rx.test(x) && utilF(dp[x])).sort()[0]; return k ? String(dp[k]).trim() : ''; };
+            const grupos = {};
+            for (const f of jf.features) {
+              let ha = 0;
+              try {
+                const inter = turf.intersect(turf.featureCollection([predio, f]));
+                if (!inter) continue;
+                ha = turf.area(inter) / 10000;
+                if (ha < 0.01) continue;
+              } catch (e) { continue; }
+              const dp = f.properties || {};
+              const especie = buscarF(dp, /ESPEC/i);
+              if (!especie) continue;
+              const variedad = buscarF(dp, /VARIE/i);
+              const anio = buscarF(dp, /ANO|AGNO|PLANT/i).replace(/[^0-9]/g, '').substring(0, 4);
+              const arboles = parseFloat(buscarF(dp, /ARBOL|N_ARB|NARB|(^|_)ARB/i)) || 0;
+              const clave = especie + '|' + variedad + '|' + anio;
+              if (!grupos[clave]) grupos[clave] = { especie, variedad, anio, arboles: 0, has: 0 };
+              grupos[clave].arboles += arboles;
+              grupos[clave].has += ha;
+            }
+            const plantaciones = Object.values(grupos)
+              .sort((x, y) => y.has - x.has)
+              .map(p => ({ ...p, arboles: Math.round(p.arboles), has: Math.round(p.has * 100) / 100 }));
+            if (plantaciones.length) {
+              respPlantaciones = plantaciones;
+              debug.push({ paso:'fruticola-ok', grupos: plantaciones.length, plantaciones });
+            } else {
+              debug.push({ paso:'fruticola-ok', grupos: 0, nota: 'Hay catastro en la comuna pero ningun cuartel cae dentro del predio' });
+            }
+          }
+        }
+      } catch (e) { debug.push({ paso:'fruticola-error', error: e.message }); }
     } catch (e) { debug.push({ paso:'sitrural-error', error: e.message }); }
 
     if (dominante) {
@@ -664,7 +722,7 @@ const manejadorSuelos = async (req, res) => {
 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, plantaciones: respPlantaciones, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
