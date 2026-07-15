@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v32', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v33', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -251,7 +251,7 @@ const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
 const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
 const cacheUso = { svc: null, capas: null };
 
-const normU = s => (s||'').toString().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+const normU = s => (s || '').toString().replace(/[\u00a0\u2007\u202f]/g, ' ').trim().replace(/\s+/g, ' ').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
 function claseDesdeTexto(v){
   const t = normU(v).trim();
@@ -293,7 +293,17 @@ const manejadorSuelos = async (req, res) => {
       else return res.json({ ok:false, mensaje:'CIREN no tiene el rol ' + rolLimpio + ' en su capa de la region (cobertura ' + JSON.stringify(capa.kw[0]) + '). Ingresa los suelos manualmente.', debug });
     }
 
-    const predio = gj.features[0];
+    let predio = gj.features[0];
+    if (gj.features.length > 1) {
+      // El rol puede venir en varias partes (paños separados): se unen todas para el analisis
+      try {
+        for (let fi = 1; fi < gj.features.length; fi++) {
+          const u = turf.union(turf.featureCollection([predio, gj.features[fi]]));
+          if (u) predio = u;
+        }
+        debug.push({ paso:'predio-multipartes', partes: gj.features.length, nota:'El rol viene en varias partes; se analizan todas unidas.' });
+      } catch (e) { debug.push({ paso:'predio-union-error', error: e.message }); }
+    }
     const superficieHa = turf.area(predio) / 10000;
 
     // 3) Capas del estudio agrologico (cache)
@@ -673,7 +683,27 @@ const manejadorSuelos = async (req, res) => {
               respPlantaciones = plantaciones;
               debug.push({ paso:'fruticola-ok', grupos: plantaciones.length, plantaciones });
             } else {
-              respFruticolaNota = 'La comuna tiene catastro fruticola CIREN, pero el predio no registra cuarteles frutales.';
+              // Buscar cuarteles COLINDANTES (a <250 m del predio): suelen ser de otro rol del mismo campo
+              try {
+                const zona = turf.buffer(predio, 0.25, { units: 'kilometers' });
+                const cercanos = {};
+                for (const f of jf.features) {
+                  try {
+                    if (!turf.booleanPointInPolygon(turf.centroid(f), zona)) continue;
+                    const dp = f.properties || {};
+                    const esp = buscarF(dp, /ESPEC/i);
+                    if (!esp) continue;
+                    const k = (esp + ' ' + (buscarF(dp, /VARIE/i) || '')).trim();
+                    cercanos[k] = (cercanos[k] || 0) + (haOficial(f) || 0);
+                  } catch (e2) {}
+                }
+                const lista = Object.entries(cercanos).map(e => e[0] + ' (' + (Math.round(e[1] * 10) / 10) + ' ha)');
+                respFruticolaNota = lista.length
+                  ? ('El rol no contiene cuarteles frutales, pero hay plantaciones COLINDANTES a menos de 250 m: ' + lista.join(', ') + '. Suelen pertenecer a otro rol del mismo campo: en el visor SIT Rural haz clic sobre el cuartel con la capa Propiedades activa para ver su rol y agregalo como Rol 2, o ingresalas manualmente.')
+                  : 'La comuna tiene catastro fruticola CIREN, pero el predio no registra cuarteles frutales.';
+              } catch (e) {
+                respFruticolaNota = 'La comuna tiene catastro fruticola CIREN, pero el predio no registra cuarteles frutales.';
+              }
               debug.push({ paso:'fruticola-ok', grupos: 0, nota: respFruticolaNota });
             }
           }
