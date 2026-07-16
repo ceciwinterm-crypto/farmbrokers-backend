@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v35', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v36', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -237,6 +237,8 @@ app.post('/buscar-rol', async (req, res) => {
 
 // ──────── SUELOS AUTOMATICOS: CIREN Propiedades Rurales + Estudio Agrologico ────────
 const turf = require('@turf/turf');
+const XLSX = require('xlsx');
+const proj4 = require('proj4');
 
 const CIREN_BASE = 'https://esri.ciren.cl/server/rest/services';
 const CAPAS_REGION = [
@@ -969,6 +971,153 @@ app.post('/deslindes', async (req, res) => {
     resultado[lado] = texto || 'Sin informacion referencial disponible';
   }
   res.json({ ok:true, ...resultado, nota:'Deslindes referenciales (catastro CIREN + OpenStreetMap). Validar con titulos de dominio.', debug });
+});
+
+// ──────── DERECHOS DE AGUA (DGA - Catastro Publico de Aguas) ────────
+// La DGA publica un Excel por region con los derechos concedidos (actualizacion mensual).
+// Se descarga una vez, se cachea en memoria y se cruza con el predio por coordenadas UTM.
+const DGA_BASE = 'https://dga.mop.gob.cl/uploads/sites/13/2026/05/';
+const DGA_REGIONES = {
+  'ARICA Y PARINACOTA': 'Derechos_Concedidos_XV_Region.xls',
+  'TARAPACA': 'Derechos_Concedidos_I_Region.xls',
+  'ANTOFAGASTA': 'Derechos_Concedidos_II_Region.xls',
+  'ATACAMA': 'Derechos_Concedidos_III_Region.xls',
+  'COQUIMBO': 'Derechos_Concedidos_IV_Region.xls',
+  'VALPARAISO': 'Derechos_Concedidos_V_Region.xls',
+  'METROPOLITANA': 'Derechos_Concedidos_XIII_Region.xls',
+  'OHIGGINS': 'Derechos_Concedidos_VI_Region.xls',
+  'MAULE': 'Derechos_Concedidos_VII_Region.xls',
+  'BIOBIO': 'Derechos_Concedidos_VIII_Region.xls',
+  'NUBLE': 'Derechos_Concedidos_XVI_Region.xls',
+  'ARAUCANIA': 'Derechos_Concedidos_IX_Region.xls',
+  'LOS LAGOS': 'Derechos_Concedidos_X_Region.xls',
+  'LOS RIOS': 'Derechos_Concedidos_XIV_Region.xls',
+  'AYSEN': 'Derechos_Concedidos_XI_Region.xls',
+  'MAGALLANES': 'Derechos_Concedidos_XII_Region.xls'
+};
+const cacheDGA = {}; // filas por region
+
+const archivoRegion = (region) => {
+  const r = normU(region);
+  const k = Object.keys(DGA_REGIONES).find(x => r.includes(x) || x.includes(r));
+  return k ? { clave: k, archivo: DGA_REGIONES[k] } : null;
+};
+
+const cargarDGA = async (region, debug) => {
+  const info = archivoRegion(region);
+  if (!info) return { error: 'Region no reconocida: ' + region };
+  if (cacheDGA[info.clave]) { debug.push({ paso:'dga-cache', region: info.clave, filas: cacheDGA[info.clave].length }); return { filas: cacheDGA[info.clave], region: info.clave }; }
+  try {
+    const url = DGA_BASE + info.archivo;
+    const r = await fetch(url, { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0' } });
+    if (!r.ok) return { error: 'No se pudo descargar el Excel DGA (status ' + r.status + ')' };
+    const buf = Buffer.from(await r.arrayBuffer());
+    const wb = XLSX.read(buf, { type: 'buffer' });
+    const hoja = wb.SheetNames[0];
+    const filas = XLSX.utils.sheet_to_json(wb.Sheets[hoja], { defval: '' });
+    cacheDGA[info.clave] = filas;
+    debug.push({ paso:'dga-descarga', region: info.clave, archivo: info.archivo, hoja, filas: filas.length });
+    return { filas, region: info.clave };
+  } catch (e) { return { error: 'Error leyendo Excel DGA: ' + e.message }; }
+};
+
+// Diagnostico: muestra los nombres reales de columnas del Excel de la DGA
+app.get('/diag-dga', async (req, res) => {
+  const region = req.query.region || 'ohiggins';
+  const debug = [];
+  const { filas, error } = await cargarDGA(region, debug);
+  if (error) return res.json({ ok:false, error, debug });
+  res.json({
+    ok: true, region, totalFilas: filas.length,
+    columnas: Object.keys(filas[0] || {}),
+    ejemplo1: filas[0] || null,
+    ejemplo2: filas[1] || null,
+    debug
+  });
+});
+
+// Busqueda de derechos: por comuna, por titular y por punto de captacion dentro del predio
+app.post('/derechos-agua', async (req, res) => {
+  const { region, comuna, titular, bbox } = req.body || {};
+  if (!region) return res.status(400).json({ ok:false, error:'Falta la region' });
+  const debug = [];
+  const { filas, error } = await cargarDGA(region, debug);
+  if (error) return res.json({ ok:false, error, debug });
+  if (!filas.length) return res.json({ ok:false, error:'El Excel de la DGA vino vacio', debug });
+
+  const cols = Object.keys(filas[0]);
+  const col = (rx) => cols.find(k => rx.test(normU(k)));
+  const C = {
+    comuna:   col(/COMUNA/),
+    titular:  col(/NOMBRE|TITULAR|SOLICITANTE|PROPIETARIO/),
+    caudal:   col(/CAUDAL.*ANUAL|CAUDAL/),
+    unidad:   col(/UNIDAD/),
+    tipoDer:  col(/TIPO.*DERECHO/),
+    natur:    col(/NATURALEZA/),
+    fuente:   col(/FUENTE|CAUCE/),
+    ejercicio:col(/EJERCICIO/),
+    utmNorte: col(/UTM.*NORTE|NORTE.*CAPTACION|^UTM_NORTE/),
+    utmEste:  col(/UTM.*ESTE|ESTE.*CAPTACION|^UTM_ESTE/),
+    huso:     col(/HUSO|DATUM/),
+    fecha:    col(/FECHA.*RESOL|FECHA/),
+    nroRes:   col(/N.*RESOL|RESOLUCION/)
+  };
+  debug.push({ paso:'dga-columnas', detectadas: C, totalColumnas: cols.length });
+
+  const objComuna = normU(comuna || '');
+  const objTitular = normU(titular || '');
+  let candidatas = filas;
+  if (objComuna && C.comuna) candidatas = candidatas.filter(f => normU(f[C.comuna]).includes(objComuna));
+  debug.push({ paso:'dga-filtro-comuna', comuna: objComuna, resultado: candidatas.length });
+
+  const num = v => parseFloat(String(v).replace(/\./g, '').replace(',', '.')) || 0;
+  const mapear = (f, motivo) => ({
+    titular: C.titular ? String(f[C.titular]).trim() : '',
+    tipo: C.natur ? String(f[C.natur]).trim() : (C.tipoDer ? String(f[C.tipoDer]).trim() : ''),
+    fuente: C.fuente ? String(f[C.fuente]).trim() : '',
+    caudal: C.caudal ? String(f[C.caudal]).trim() : '',
+    unidad: C.unidad ? String(f[C.unidad]).trim() : '',
+    ejercicio: C.ejercicio ? String(f[C.ejercicio]).trim() : '',
+    resolucion: C.nroRes ? String(f[C.nroRes]).trim() : '',
+    fecha: C.fecha ? String(f[C.fecha]).trim() : '',
+    comuna: C.comuna ? String(f[C.comuna]).trim() : '',
+    motivo
+  });
+
+  const encontrados = [];
+  // 1) Por punto de captacion dentro del predio (UTM -> lat/lon)
+  if (bbox && Array.isArray(bbox) && C.utmNorte && C.utmEste) {
+    const zona = turf.bboxPolygon(bbox.map(Number));
+    let convertidos = 0;
+    for (const f of candidatas) {
+      const N = num(f[C.utmNorte]), E = num(f[C.utmEste]);
+      if (!N || !E) continue;
+      const husoTxt = C.huso ? String(f[C.huso]) : '19';
+      const huso = /18/.test(husoTxt) ? 18 : 19;
+      try {
+        const [lon, lat] = proj4('+proj=utm +zone=' + huso + ' +south +datum=WGS84 +units=m +no_defs', '+proj=longlat +datum=WGS84 +no_defs', [E, N]);
+        convertidos++;
+        if (turf.booleanPointInPolygon(turf.point([lon, lat]), zona)) encontrados.push({ ...mapear(f, 'Punto de captacion dentro del predio'), lat, lon });
+      } catch (e) {}
+    }
+    debug.push({ paso:'dga-por-coordenadas', convertidos, encontrados: encontrados.length });
+  }
+  // 2) Por titular
+  if (objTitular && C.titular) {
+    const porTit = candidatas.filter(f => normU(f[C.titular]).includes(objTitular))
+      .filter(f => !encontrados.some(e => e.resolucion && e.resolucion === (C.nroRes ? String(f[C.nroRes]).trim() : '')))
+      .slice(0, 40).map(f => mapear(f, 'Coincide con el titular'));
+    encontrados.push(...porTit);
+    debug.push({ paso:'dga-por-titular', titular: objTitular, encontrados: porTit.length });
+  }
+
+  res.json({
+    ok: true,
+    derechos: encontrados.slice(0, 60),
+    totalComuna: candidatas.length,
+    nota: 'Fuente: DGA - Catastro Publico de Aguas (actualizacion mensual). Los datos NO acreditan vigencia del dominio: validar con el Registro de Propiedad de Aguas del CBR.',
+    debug
+  });
 });
 
 app.listen(PORT, () => {
