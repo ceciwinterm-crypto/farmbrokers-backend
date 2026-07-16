@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v39', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v40', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -1003,9 +1003,10 @@ const archivoRegion = (region) => {
   return k ? { clave: k, archivo: DGA_REGIONES[k] } : null;
 };
 
-const cargarDGA = async (region, debug) => {
+const cargarDGA = async (region, debug, fresh) => {
   const info = archivoRegion(region);
   if (!info) return { error: 'Region no reconocida: ' + region };
+  if (fresh) delete cacheDGA[info.clave];
   if (cacheDGA[info.clave]) { debug.push({ paso:'dga-cache', region: info.clave, filas: cacheDGA[info.clave].filas.length }); return { ...cacheDGA[info.clave], region: info.clave }; }
   try {
     const url = DGA_BASE + info.archivo;
@@ -1047,7 +1048,7 @@ const cargarDGA = async (region, debug) => {
 app.get('/diag-dga', async (req, res) => {
   const region = req.query.region || 'ohiggins';
   const debug = [];
-  const { filas, error, headers, muestraCruda } = await cargarDGA(region, debug);
+  const { filas, error, headers, muestraCruda } = await cargarDGA(region, debug, req.query.fresh);
   if (error) return res.json({ ok:false, error, debug });
   res.json({
     ok: true, region, totalFilas: filas.length, encabezadosDetectados: headers, primerasFilasCrudas: muestraCruda,
@@ -1064,7 +1065,7 @@ const manejadorDerechos = async (req, res) => {
   const { region, comuna, titular, bbox } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
   if (!region) return res.status(400).json({ ok:false, error:'Falta la region' });
   const debug = [];
-  const { filas, error } = await cargarDGA(region, debug);
+  const { filas, error } = await cargarDGA(region, debug, (req.query||{}).fresh);
   if (error) return res.json({ ok:false, error, debug });
   if (!filas.length) return res.json({ ok:false, error:'El Excel de la DGA vino vacio', debug });
 
@@ -1085,7 +1086,7 @@ const manejadorDerechos = async (req, res) => {
     fecha:    col(/FECHA.*RESOL/) || col(/FECHA/),
     nroRes:   col(/N.*RESOL|RESOLUCION|CODIGO.*EXPEDIENTE/)
   };
-  debug.push({ paso:'dga-columnas', detectadas: C, totalColumnas: cols.length });
+  debug.push({ paso:'dga-columnas', version:'v40', detectadas: C, totalColumnas: cols.length, primeros10Encabezados: cols.slice(0, 10) });
 
   const objComuna = normU(comuna || '');
   const objTitular = normU(titular || '');
