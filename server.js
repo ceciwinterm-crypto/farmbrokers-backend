@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v37', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v39', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -1006,7 +1006,7 @@ const archivoRegion = (region) => {
 const cargarDGA = async (region, debug) => {
   const info = archivoRegion(region);
   if (!info) return { error: 'Region no reconocida: ' + region };
-  if (cacheDGA[info.clave]) { debug.push({ paso:'dga-cache', region: info.clave, filas: cacheDGA[info.clave].length }); return { filas: cacheDGA[info.clave], region: info.clave }; }
+  if (cacheDGA[info.clave]) { debug.push({ paso:'dga-cache', region: info.clave, filas: cacheDGA[info.clave].filas.length }); return { ...cacheDGA[info.clave], region: info.clave }; }
   try {
     const url = DGA_BASE + info.archivo;
     const r = await fetch(url, { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0' } });
@@ -1014,10 +1014,32 @@ const cargarDGA = async (region, debug) => {
     const buf = Buffer.from(await r.arrayBuffer());
     const wb = XLSX.read(buf, { type: 'buffer' });
     const hoja = wb.SheetNames[0];
-    const filas = XLSX.utils.sheet_to_json(wb.Sheets[hoja], { defval: '' });
-    cacheDGA[info.clave] = filas;
-    debug.push({ paso:'dga-descarga', region: info.clave, archivo: info.archivo, hoja, filas: filas.length });
-    return { filas, region: info.clave };
+    // Los Excel de la DGA traen filas de titulo antes de los encabezados:
+    // se busca la fila que realmente contiene los nombres de las columnas.
+    const aoa = XLSX.utils.sheet_to_json(wb.Sheets[hoja], { header: 1, defval: '', blankrows: false });
+    const CLAVES = /COMUNA|CAUDAL|NOMBRE|SOLICITANTE|UTM|REGION|PROVINCIA|NATURALEZA|FUENTE|EJERCICIO|RESOLUCION/i;
+    let idx = 0, mejor = -1;
+    for (let i = 0; i < Math.min(aoa.length, 20); i++) {
+      const puntos = (aoa[i] || []).filter(cell => CLAVES.test(String(cell))).length;
+      if (puntos > mejor) { mejor = puntos; idx = i; }
+    }
+    const fila1 = aoa[idx] || [], fila2 = aoa[idx + 1] || [];
+    // Encabezados en dos lineas (celdas combinadas): se unen ambas
+    const dosLineas = (fila2.filter(x => String(x).trim()).length > fila1.length * 0.4) &&
+                      (fila2.filter(x => CLAVES.test(String(x))).length > 0);
+    const headers = fila1.map((h, j) => {
+      let n = String(h || '').trim();
+      if (dosLineas && String(fila2[j] || '').trim()) n = (n + ' ' + String(fila2[j]).trim()).trim();
+      return n || ('COL_' + j);
+    });
+    const inicio = idx + (dosLineas ? 2 : 1);
+    const filas = aoa.slice(inicio)
+      .filter(row => (row || []).some(x => String(x).trim()))
+      .map(row => { const o = {}; headers.forEach((h, j) => { o[h] = row[j] !== undefined ? row[j] : ''; }); return o; });
+    const paquete = { filas, headers, filaEncabezado: idx, dosLineas, muestraCruda: aoa.slice(0, Math.min(idx + 3, 8)) };
+    cacheDGA[info.clave] = paquete;
+    debug.push({ paso:'dga-descarga', region: info.clave, archivo: info.archivo, hoja, filaEncabezadoDetectada: idx, dosLineas, filas: filas.length });
+    return { ...paquete, region: info.clave };
   } catch (e) { return { error: 'Error leyendo Excel DGA: ' + e.message }; }
 };
 
@@ -1025,16 +1047,17 @@ const cargarDGA = async (region, debug) => {
 app.get('/diag-dga', async (req, res) => {
   const region = req.query.region || 'ohiggins';
   const debug = [];
-  const { filas, error } = await cargarDGA(region, debug);
+  const { filas, error, headers, muestraCruda } = await cargarDGA(region, debug);
   if (error) return res.json({ ok:false, error, debug });
   res.json({
-    ok: true, region, totalFilas: filas.length,
+    ok: true, region, totalFilas: filas.length, encabezadosDetectados: headers, primerasFilasCrudas: muestraCruda,
     columnas: Object.keys(filas[0] || {}),
     ejemplo1: filas[0] || null,
     ejemplo2: filas[1] || null,
     debug
   });
 });
+
 
 // Busqueda de derechos: por comuna, por titular y por punto de captacion dentro del predio
 const manejadorDerechos = async (req, res) => {
@@ -1049,18 +1072,18 @@ const manejadorDerechos = async (req, res) => {
   const col = (rx) => cols.find(k => rx.test(normU(k)));
   const C = {
     comuna:   col(/COMUNA/),
-    titular:  col(/NOMBRE|TITULAR|SOLICITANTE|PROPIETARIO/),
-    caudal:   col(/CAUDAL.*ANUAL|CAUDAL/),
-    unidad:   col(/UNIDAD/),
+    titular:  col(/NOMBRE.*SOLICITANTE|TITULAR|SOLICITANTE|PROPIETARIO|NOMBRE/),
+    caudal:   col(/CAUDAL.*ANUAL.*PROMEDIO/) || col(/CAUDAL/),
+    unidad:   col(/UNIDAD.*CAUDAL|UNIDAD/),
     tipoDer:  col(/TIPO.*DERECHO/),
-    natur:    col(/NATURALEZA/),
+    natur:    col(/NATURALEZA.*AGUA|NATURALEZA/),
     fuente:   col(/FUENTE|CAUCE/),
     ejercicio:col(/EJERCICIO/),
-    utmNorte: col(/UTM.*NORTE|NORTE.*CAPTACION|^UTM_NORTE/),
-    utmEste:  col(/UTM.*ESTE|ESTE.*CAPTACION|^UTM_ESTE/),
-    huso:     col(/HUSO|DATUM/),
-    fecha:    col(/FECHA.*RESOL|FECHA/),
-    nroRes:   col(/N.*RESOL|RESOLUCION/)
+    utmNorte: col(/UTM.*NORTE.*CAPTACION/) || col(/UTM.*NORTE/) || col(/NORTE/),
+    utmEste:  col(/UTM.*ESTE.*CAPTACION/) || col(/UTM.*ESTE/) || col(/ESTE/),
+    huso:     col(/HUSO/) || col(/DATUM/),
+    fecha:    col(/FECHA.*RESOL/) || col(/FECHA/),
+    nroRes:   col(/N.*RESOL|RESOLUCION|CODIGO.*EXPEDIENTE/)
   };
   debug.push({ paso:'dga-columnas', detectadas: C, totalColumnas: cols.length });
 
@@ -1071,36 +1094,65 @@ const manejadorDerechos = async (req, res) => {
   debug.push({ paso:'dga-filtro-comuna', comuna: objComuna, resultado: candidatas.length });
 
   const num = v => parseFloat(String(v).replace(/\./g, '').replace(',', '.')) || 0;
-  const mapear = (f, motivo) => ({
-    titular: C.titular ? String(f[C.titular]).trim() : '',
-    tipo: C.natur ? String(f[C.natur]).trim() : (C.tipoDer ? String(f[C.tipoDer]).trim() : ''),
-    fuente: C.fuente ? String(f[C.fuente]).trim() : '',
-    caudal: C.caudal ? String(f[C.caudal]).trim() : '',
-    unidad: C.unidad ? String(f[C.unidad]).trim() : '',
-    ejercicio: C.ejercicio ? String(f[C.ejercicio]).trim() : '',
-    resolucion: C.nroRes ? String(f[C.nroRes]).trim() : '',
-    fecha: C.fecha ? String(f[C.fecha]).trim() : '',
-    comuna: C.comuna ? String(f[C.comuna]).trim() : '',
-    motivo
-  });
+  const mapear = (f, motivo) => {
+    const g = (k) => (k && f[k] !== undefined && f[k] !== null) ? String(f[k]).replace(/\s+/g, ' ').trim() : '';
+    const natur = g(C.natur), clas = g(C.clasFuente);
+    return {
+      titular: g(C.titular),
+      tipo: [natur, clas].filter(Boolean).join(' - ') || g(C.tipoDer),
+      naturaleza: natur,
+      fuente: g(C.fuente),
+      uso: g(C.uso),
+      caudal: g(C.caudal),
+      unidad: g(C.unidad),
+      acciones: g(C.accCauce) || g(C.accFuente),
+      ejercicio: g(C.ejercicio),
+      profundidad: g(C.profundidad),
+      resolucion: g(C.nroRes),
+      fecha: g(C.fecha),
+      cbr: g(C.cbr),
+      fojas: g(C.fojas),
+      nroCBR: g(C.nroCBR),
+      anioCBR: g(C.anioCBR),
+      comuna: g(C.comuna),
+      motivo
+    };
+  };
 
+  // Conversion UTM -> lat/lon respetando el Datum del registro.
+  // Critico: un punto PSAD56 leido como WGS84 se desvia ~200 m y caeria fuera del predio.
+  const WGS84 = '+proj=longlat +datum=WGS84 +no_defs';
+  const defUTM = (huso, datumTxt) => {
+    const d = normU(datumTxt || '');
+    const base = '+proj=utm +zone=' + huso + ' +south +units=m +no_defs ';
+    if (d.includes('PSAD')) return base + '+ellps=intl +towgs84=-302,272,-360,0,0,0,0';
+    if (d.includes('SAD69') || d.includes('SAD 69')) return base + '+ellps=GRS67 +towgs84=-59,-11,-52,0,0,0,0';
+    return base + '+datum=WGS84';
+  };
   const encontrados = [];
-  // 1) Por punto de captacion dentro del predio (UTM -> lat/lon)
-  if (bbox && Array.isArray(bbox) && C.utmNorte && C.utmEste) {
-    const zona = turf.bboxPolygon(bbox.map(Number));
-    let convertidos = 0;
+  if (bbox) {
+    const bb = (typeof bbox === 'string' ? JSON.parse(bbox) : bbox).map(Number);
+    const zona = turf.buffer(turf.bboxPolygon(bb), 0.3, { units: 'kilometers' }); // margen 300 m
+    let convertidos = 0, sinCoords = 0;
+    const datums = {};
     for (const f of candidatas) {
-      const N = num(f[C.utmNorte]), E = num(f[C.utmEste]);
-      if (!N || !E) continue;
+      const N = C.utmNorte ? num(f[C.utmNorte]) : 0, E = C.utmEste ? num(f[C.utmEste]) : 0;
+      if (!N || !E) { sinCoords++; continue; }
       const husoTxt = C.huso ? String(f[C.huso]) : '19';
       const huso = /18/.test(husoTxt) ? 18 : 19;
+      const dTxt = C.datum ? String(f[C.datum]).trim() : '';
+      datums[dTxt || '(vacio)'] = (datums[dTxt || '(vacio)'] || 0) + 1;
+      let lat = null, lon = null;
+      try { const p = proj4(defUTM(huso, dTxt), WGS84, [E, N]); lon = p[0]; lat = p[1]; convertidos++; } catch (e) { continue; }
+      if (lat === null || !isFinite(lat) || !isFinite(lon)) continue;
+      if (lat > 0 || lat < -60 || lon > -60 || lon < -80) continue; // coordenada fuera de Chile
       try {
-        const [lon, lat] = proj4('+proj=utm +zone=' + huso + ' +south +datum=WGS84 +units=m +no_defs', '+proj=longlat +datum=WGS84 +no_defs', [E, N]);
-        convertidos++;
-        if (turf.booleanPointInPolygon(turf.point([lon, lat]), zona)) encontrados.push({ ...mapear(f, 'Punto de captacion dentro del predio'), lat, lon });
+        if (turf.booleanPointInPolygon(turf.point([lon, lat]), zona)) {
+          encontrados.push({ ...mapear(f, 'Punto de captacion en el predio o a menos de 300 m'), lat: Math.round(lat*1e6)/1e6, lon: Math.round(lon*1e6)/1e6 });
+        }
       } catch (e) {}
     }
-    debug.push({ paso:'dga-por-coordenadas', convertidos, encontrados: encontrados.length });
+    debug.push({ paso:'dga-por-coordenadas', convertidos, sinCoordenadas: sinCoords, datums, encontrados: encontrados.length });
   }
   // 2) Por titular
   if (objTitular && C.titular) {
