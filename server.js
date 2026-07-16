@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v34', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v35', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -445,10 +445,17 @@ const manejadorSuelos = async (req, res) => {
       }
 
       const objetivoCom = normU(comuna).replace(/\s+/g, '');
+      // SIT Rural abrevia nombres de comuna ("Q.de Tilcoco", "Sn.Gregorio", "Pto.Natales"):
+      // ademas del nombre completo, se calza por la palabra distintiva de la comuna.
+      const GENERICAS = ['SAN','SANTA','SANTO','PUERTO','VILLA','ALTO','ALTA','BAJO','NUEVA','NUEVO','LA','EL','LOS','LAS','DE','DEL','RIO'];
+      const palabraClave = (normU(comuna).split(' ').filter(w => w && !GENERICAS.includes(w))
+        .sort((x, y) => y.length - x.length)[0]) || '';
       const esDeLaComuna = (x) => {
         const nn = normU(x.n).replace(/[\s_\-\.]/g, '');
         const tt = normU(x.t).replace(/[\s_\-\.]/g, '');
-        return nn.includes(objetivoCom) || tt.includes(objetivoCom);
+        if (nn.includes(objetivoCom) || tt.includes(objetivoCom)) return true;
+        if (palabraClave.length >= 4 && (nn.includes(palabraClave) || tt.includes(palabraClave))) return true;
+        return false;
       };
       const esSuelo = (x) => /suelo/i.test(x.t) || /suelo/i.test(x.n);
       // Prioridad: estudio agrologico ("Suelos <comuna>") > aptitud > cat. de uso/vegetacion
