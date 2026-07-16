@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v36', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v37', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -1037,8 +1037,8 @@ app.get('/diag-dga', async (req, res) => {
 });
 
 // Busqueda de derechos: por comuna, por titular y por punto de captacion dentro del predio
-app.post('/derechos-agua', async (req, res) => {
-  const { region, comuna, titular, bbox } = req.body || {};
+const manejadorDerechos = async (req, res) => {
+  const { region, comuna, titular, bbox } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
   if (!region) return res.status(400).json({ ok:false, error:'Falta la region' });
   const debug = [];
   const { filas, error } = await cargarDGA(region, debug);
@@ -1118,7 +1118,9 @@ app.post('/derechos-agua', async (req, res) => {
     nota: 'Fuente: DGA - Catastro Publico de Aguas (actualizacion mensual). Los datos NO acreditan vigencia del dominio: validar con el Registro de Propiedad de Aguas del CBR.',
     debug
   });
-});
+};
+app.post('/derechos-agua', manejadorDerechos);
+app.get('/derechos-agua', manejadorDerechos); // prueba por link: /derechos-agua?region=ohiggins&comuna=quinta de tilcoco
 
 app.listen(PORT, () => {
   console.log(`Servidor Farm Brokers corriendo en puerto ${PORT}`);
