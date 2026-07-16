@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v41', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v43', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -291,8 +291,19 @@ const manejadorSuelos = async (req, res) => {
       const rp2 = await fetch(url2);
       const gj2 = await rp2.json();
       debug.push({ paso:'predio-sin-comuna', status: rp2.status, features: (gj2.features||[]).length });
-      if (gj2.features && gj2.features.length) gj.features = gj2.features;
-      else return res.json({ ok:false, mensaje:'CIREN no tiene el rol ' + rolLimpio + ' en su capa de la region (cobertura ' + JSON.stringify(capa.kw[0]) + '). Ingresa los suelos manualmente.', debug });
+      if (gj2.features && gj2.features.length) {
+        // Seguridad: verificar que el rol encontrado sea realmente de la comuna solicitada.
+        // Los numeros de rol se repiten entre comunas: analizar otro campo en silencio es inaceptable.
+        const comEncontrada = String((gj2.features[0].properties || {}).desccomu || '').trim();
+        const calza = normU(comEncontrada).includes(normU(comuna)) || normU(comuna).includes(normU(comEncontrada));
+        if (!calza) {
+          return res.json({ ok:false,
+            mensaje:'⚠ El rol ' + rolLimpio + ' NO aparece en el catastro RURAL de ' + comuna + ' (existe un rol ' + rolLimpio + ' rural, pero en la comuna de ' + comEncontrada + '). Posibles causas: (1) el rol es URBANO — verifica en SII Mapas si dice Ubicacion: Urbana, en cuyo caso no corresponde a esta plataforma de predios agricolas; (2) el numero de rol o la comuna estan mal escritos.',
+            comunaEncontrada: comEncontrada, debug });
+        }
+        gj.features = gj2.features;
+      }
+      else return res.json({ ok:false, mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN de la region. Si en SII Mapas figura como Ubicacion: Urbana, es una propiedad urbana y no corresponde a esta plataforma de predios agricolas. Si es rural, ingresa los suelos manualmente.', debug });
     }
 
     let predio = gj.features[0];
@@ -522,8 +533,8 @@ const manejadorSuelos = async (req, res) => {
         const intentos = [
           ['1.0 BBOX+CRS',   base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
             encodeURIComponent("BBOX(" + geomName + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')")],
-          ['1.0 INTERSECTS punto', base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
-            encodeURIComponent("INTERSECTS(" + geomName + ", SRID=4326;POINT(" + centro[0] + " " + centro[1] + "))")],
+          ['1.0 BBOX ampliado', base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+            encodeURIComponent("BBOX(" + geomName + "," + (bbS[0]-0.002) + "," + (bbS[1]-0.002) + "," + (bbS[2]+0.002) + "," + (bbS[3]+0.002) + ",'EPSG:4326')")],
           ['1.1 bbox lon-lat', base + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[0], bbS[1], bbS[2], bbS[3], 'EPSG:4326'].join(',')],
           ['1.1 bbox lat-lon', base + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[1], bbS[0], bbS[3], bbS[2], 'urn:x-ogc:def:crs:EPSG:4326'].join(',')]
         ];
