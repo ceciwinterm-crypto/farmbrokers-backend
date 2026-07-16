@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v40', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v41', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -1009,10 +1009,22 @@ const cargarDGA = async (region, debug, fresh) => {
   if (fresh) delete cacheDGA[info.clave];
   if (cacheDGA[info.clave]) { debug.push({ paso:'dga-cache', region: info.clave, filas: cacheDGA[info.clave].filas.length }); return { ...cacheDGA[info.clave], region: info.clave }; }
   try {
-    const url = DGA_BASE + info.archivo;
-    const r = await fetch(url, { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0' } });
-    if (!r.ok) return { error: 'No se pudo descargar el Excel DGA (status ' + r.status + ')' };
-    const buf = Buffer.from(await r.arrayBuffer());
+    const candidatosURL = [
+      DGA_BASE + info.archivo,
+      'https://dga.mop.gob.cl/DGADocumentos/' + info.archivo,
+      'http://www.dga.cl/DGADocumentos/' + info.archivo,
+      DGA_BASE + info.archivo.replace('.xls', '-1.xls'),
+      'https://dga.mop.gob.cl/uploads/sites/13/2025/01/' + info.archivo.replace('.xls', '-1.xls')
+    ];
+    let buf = null, urlOk = null;
+    for (const url of candidatosURL) {
+      try {
+        const r = await fetch(url, { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0' } });
+        if (r.ok) { buf = Buffer.from(await r.arrayBuffer()); urlOk = url; break; }
+      } catch (e) {}
+    }
+    if (!buf) return { error: 'No se pudo descargar el Excel DGA desde ninguna de las rutas conocidas' };
+    debug.push({ paso:'dga-url', url: urlOk });
     const wb = XLSX.read(buf, { type: 'buffer' });
     const hoja = wb.SheetNames[0];
     // Los Excel de la DGA traen filas de titulo antes de los encabezados:
@@ -1028,10 +1040,15 @@ const cargarDGA = async (region, debug, fresh) => {
     // Encabezados en dos lineas (celdas combinadas): se unen ambas
     const dosLineas = (fila2.filter(x => String(x).trim()).length > fila1.length * 0.4) &&
                       (fila2.filter(x => CLAVES.test(String(x))).length > 0);
+    const usados = {};
     const headers = fila1.map((h, j) => {
       let n = String(h || '').trim();
       if (dosLineas && String(fila2[j] || '').trim()) n = (n + ' ' + String(fila2[j]).trim()).trim();
-      return n || ('COL_' + j);
+      n = n || ('COL_' + j);
+      // El Excel DGA repite nombres (ej. "Datum" para captacion y restitucion):
+      // se renombra el duplicado para que no pise al primero
+      if (usados[n]) { usados[n]++; n = n + '_' + usados[n]; } else { usados[n] = 1; }
+      return n;
     });
     const inicio = idx + (dosLineas ? 2 : 1);
     const filas = aoa.slice(inicio)
