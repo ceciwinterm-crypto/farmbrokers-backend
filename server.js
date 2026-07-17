@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v44', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v45', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -44,16 +44,20 @@ CONSTRUCCIONES: ${datos.construcciones}
 COORDENADAS: ${datos.coordLat} S, ${datos.coordLon} O | DISTANCIA SANTIAGO: ${datos.distSantiago} km | DISTANCIA CENTRO COMUNAL: ${datos.distComuna || "no informada"}
 ACCESO: ${datos.acceso}
 ALTITUD: ${datos.altitud || "no informada"} m.s.n.m. | DATOS CLIMATICOS MEDIDOS: ${datos.climaTxt || "sin datos medidos"}
+USO ACTUAL DEL SUELO (CONAF): ${datos.usosResumen || "sin datos"}
+INSTRUCCIONES DEL TASADOR PARA LAS CONCLUSIONES: ${datos.guiaConclusion || "ninguna"}
 
-Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 8 campos de texto:
+Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 10 campos de texto:
 - resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual
 - ubicacion: 1-2 oraciones con coordenadas, distancia a Santiago y acceso
 - titulos: 1 parrafo breve sobre inscripcion y deslindes
+- topografia: 2 oraciones estimando la composicion del relieve en porcentajes aproximados a partir de las clases de suelo (Clases I a III = sectores planos; IV = lomajes suaves; VI = laderas; VII y VIII = cerros y quebradas). Estilo: "Predio compuesto en un 80% por cerros y quebradas, un 13% por laderas y un 7% por sectores de lomaje suave."
 - suelos: 1 parrafo breve sobre clasificacion de suelos segun SII
 - ciren: 1 parrafo breve con caracteristicas de la serie de suelo
+- usoActual: 2 oraciones breves describiendo la composicion del uso actual del suelo segun el catastro CONAF (que uso domina, que implica para el predio)
 - clima: 1 parrafo sobre el clima de la zona. Si hay DATOS CLIMATICOS medidos, usalos como base (cifras reales del punto del predio) en vez de generalidades
-- hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas
-- conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion
+- hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas. NUNCA menciones valores monetarios de los derechos (esos van solo en la tabla de valorizacion)
+- conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion. Si hay INSTRUCCIONES DEL TASADOR, siguelas estrictamente como enfoque principal de la conclusion
 
 Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado.`;
 
@@ -434,6 +438,7 @@ const manejadorSuelos = async (req, res) => {
 
     let respPlantaciones = null;
     let respFruticolaNota = '';
+    let respCapaFrut = null;
     // 6c) SIT RURAL (visor.sitrural.cl/geoserver): capa "Suelos" de la comuna.
     // El GetCapabilities trae ~miles de capas organizadas por comuna (workspace tipo
     // "galvarino-sigcra"). El nombre tecnico es un codigo; la palabra "Suelos" va en
@@ -637,6 +642,7 @@ const manejadorSuelos = async (req, res) => {
       // 6d) Catastro Fruticola CIREN (SIT Rural): cuarteles frutales dentro del predio
       try {
         const capaFrut = (cacheSitrural.capas || []).find(x => /FRUT/i.test(x.t) && esDeLaComuna(x));
+        if (capaFrut) respCapaFrut = capaFrut.n;
         debug.push({ paso:'fruticola-capa', capa: capaFrut ? (capaFrut.n + ' | ' + capaFrut.t) : 'SIN CATASTRO FRUTICOLA PARA LA COMUNA' });
         if (capaFrut) {
           let geomF = 'thegeom';
@@ -795,7 +801,7 @@ const manejadorSuelos = async (req, res) => {
 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
@@ -1203,6 +1209,19 @@ const manejadorDerechos = async (req, res) => {
 };
 app.post('/derechos-agua', manejadorDerechos);
 app.get('/derechos-agua', manejadorDerechos); // prueba por link: /derechos-agua?region=ohiggins&comuna=quinta de tilcoco
+
+// ──────── PROXY DE IMAGENES SIT RURAL (para dibujar la capa fruticola en el plano) ────────
+app.get('/img-sitrural', async (req, res) => {
+  try {
+    const u = String(req.query.u || '');
+    if (!u.startsWith('https://visor.sitrural.cl/geoserver/')) return res.status(400).send('URL no permitida');
+    const r = await fetch(u, { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0' } });
+    if (!r.ok) return res.status(502).send('Error del geoservidor');
+    res.set('Content-Type', r.headers.get('content-type') || 'image/png');
+    res.set('Cache-Control', 'public, max-age=3600');
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (e) { res.status(500).send(e.message); }
+});
 
 app.listen(PORT, () => {
   console.log(`Servidor Farm Brokers corriendo en puerto ${PORT}`);
