@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v43', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v44', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -43,6 +43,7 @@ PLANTACIONES: ${datos.plantacionDesc} (${datos.plantacionHas} ha)
 CONSTRUCCIONES: ${datos.construcciones}
 COORDENADAS: ${datos.coordLat} S, ${datos.coordLon} O | DISTANCIA SANTIAGO: ${datos.distSantiago} km | DISTANCIA CENTRO COMUNAL: ${datos.distComuna || "no informada"}
 ACCESO: ${datos.acceso}
+ALTITUD: ${datos.altitud || "no informada"} m.s.n.m. | DATOS CLIMATICOS MEDIDOS: ${datos.climaTxt || "sin datos medidos"}
 
 Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 8 campos de texto:
 - resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual
@@ -50,7 +51,7 @@ Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codi
 - titulos: 1 parrafo breve sobre inscripcion y deslindes
 - suelos: 1 parrafo breve sobre clasificacion de suelos segun SII
 - ciren: 1 parrafo breve con caracteristicas de la serie de suelo
-- clima: 1 parrafo sobre clima mediterraneo semiarido de la zona
+- clima: 1 parrafo sobre el clima de la zona. Si hay DATOS CLIMATICOS medidos, usalos como base (cifras reales del punto del predio) en vez de generalidades
 - hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas
 - conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion
 
