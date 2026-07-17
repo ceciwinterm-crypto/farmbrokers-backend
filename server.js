@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v45', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v46', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -310,6 +310,12 @@ const manejadorSuelos = async (req, res) => {
       }
       else return res.json({ ok:false, mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN de la region. Si en SII Mapas figura como Ubicacion: Urbana, es una propiedad urbana y no corresponde a esta plataforma de predios agricolas. Si es rural, ingresa los suelos manualmente.', debug });
     }
+
+    // Superficie SII registrada en el catastro (campo tipo "superfirea" del rol)
+    const propsRol = gj.features[0].properties || {};
+    const kSup = Object.keys(propsRol).find(k => /SUPERF/i.test(k) && propsRol[k] !== null && String(propsRol[k]).trim() !== '');
+    const superficieSII = kSup ? (parseFloat(String(propsRol[kSup]).replace(',', '.')) || null) : null;
+    debug.push({ paso:'superficie-sii', campo: kSup || 'no encontrado', valor: superficieSII });
 
     let predio = gj.features[0];
     if (gj.features.length > 1) {
@@ -801,7 +807,7 @@ const manejadorSuelos = async (req, res) => {
 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
