@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v46', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v47', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -167,6 +167,9 @@ app.post('/buscar-rol', async (req, res) => {
     if (r && Array.isArray(r.data) && r.data.some(x => x.Comuna || x.comuna)) {
       listaComunas = r.data; cacheComunas.lista = listaComunas;
       break; // nos devolvio alternativas de comuna: pasamos a resolverla
+    }
+    if (r && (r.__status === 503 || /under construction/i.test(JSON.stringify(r)))) {
+      return res.json({ ok: false, mensaje: '🔧 El servicio de SimpleAPI esta caido en este momento (su servidor muestra "Site Under Construction"). No es un problema de tu plataforma ni de tu cuota. Reintenta en un rato, o usa los botones manuales Avaluo SII / Mapa SII.', debug });
     }
     if (esErrorComunas(r)) { await sleep(4000); continue; } // transitorio: esperar y reintentar
     if (r && r.__status === 401) {
