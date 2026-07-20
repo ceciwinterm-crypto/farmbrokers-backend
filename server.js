@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v47', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v48', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -46,6 +46,7 @@ ACCESO: ${datos.acceso}
 ALTITUD: ${datos.altitud || "no informada"} m.s.n.m. | DATOS CLIMATICOS MEDIDOS: ${datos.climaTxt || "sin datos medidos"}
 USO ACTUAL DEL SUELO (CONAF): ${datos.usosResumen || "sin datos"}
 INSTRUCCIONES DEL TASADOR PARA LAS CONCLUSIONES: ${datos.guiaConclusion || "ninguna"}
+ZONA DE ESCASEZ HIDRICA: ${datos.escasezTxt || "sin decreto vigente detectado"}
 
 Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 10 campos de texto:
 - resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual
@@ -56,7 +57,7 @@ Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codi
 - ciren: 1 parrafo breve con caracteristicas de la serie de suelo
 - usoActual: 2 oraciones breves describiendo la composicion del uso actual del suelo segun el catastro CONAF (que uso domina, que implica para el predio)
 - clima: 1 parrafo sobre el clima de la zona. Si hay DATOS CLIMATICOS medidos, usalos como base (cifras reales del punto del predio) en vez de generalidades
-- hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas. NUNCA menciones valores monetarios de los derechos (esos van solo en la tabla de valorizacion)
+- hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas. NUNCA menciones valores monetarios de los derechos (esos van solo en la tabla de valorizacion). Si la zona esta bajo decreto de escasez hidrica, menciona la advertencia y la necesidad de monitorear caudales
 - conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion. Si hay INSTRUCCIONES DEL TASADOR, siguelas estrictamente como enfoque principal de la conclusion
 
 Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado.`;
@@ -1230,6 +1231,37 @@ app.get('/img-sitrural', async (req, res) => {
     res.set('Cache-Control', 'public, max-age=3600');
     res.send(Buffer.from(await r.arrayBuffer()));
   } catch (e) { res.status(500).send(e.message); }
+});
+
+// ──────── ESCASEZ HIDRICA: decretos vigentes segun pagina oficial DGA ────────
+const cacheEscasez = { t: 0, decretos: null };
+app.get('/escasez', async (req, res) => {
+  const { comuna = '', provincia = '', region = '' } = req.query || {};
+  try {
+    if (!cacheEscasez.decretos || (Date.now() - cacheEscasez.t) > 12 * 3600 * 1000) {
+      const r = await fetch('https://dga.mop.gob.cl/derechos-de-agua/proteccion-de-las-fuentes/decretos-de-escasez-2/', { headers: { 'User-Agent': 'FarmBrokersTasacion/1.0' } });
+      const html = await r.text();
+      const texto = html.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/gi, ' ').replace(/\s+/g, ' ');
+      // Cada decreto es una oracion "Decreto MOP N°... caducidad DD-MM-AAAA"
+      const trozos = texto.split(/(?=Decreto MOP)/g).filter(t => /caducidad/i.test(t)).map(t => t.substring(0, 400).trim());
+      cacheEscasez.decretos = trozos; cacheEscasez.t = Date.now();
+    }
+    const hoy = new Date();
+    const vigente = (t) => {
+      const m = t.match(/caducidad\s+(\d{2})-(\d{2})-(\d{4})/i);
+      if (!m) return false;
+      return new Date(+m[3], +m[2] - 1, +m[1]) >= hoy;
+    };
+    const objetivos = [comuna, provincia, region].map(x => normU(x)).filter(x => x.length > 3);
+    const coincidencias = cacheEscasez.decretos.filter(t => {
+      if (!vigente(t)) return false;
+      const tn = normU(t);
+      return objetivos.some(o => tn.includes(o));
+    });
+    res.json({ ok: true, enEscasez: coincidencias.length > 0, decretos: coincidencias.slice(0, 3),
+      totalVigentesPais: cacheEscasez.decretos.filter(vigente).length,
+      nota: 'Fuente: DGA (pagina oficial de decretos de escasez). Verificacion referencial por nombre de comuna/provincia/region.' });
+  } catch (e) { res.json({ ok: false, error: e.message }); }
 });
 
 app.listen(PORT, () => {
