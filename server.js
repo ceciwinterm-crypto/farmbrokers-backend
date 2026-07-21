@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v49', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v51', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -29,7 +29,7 @@ app.post('/generar-informe', async (req, res) => {
 
 DATOS DEL PREDIO:
 PREDIO: ${datos.predioNombre}
-ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'')).join(' | ')}
+ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'') + ((r.datos&&r.datos.noAgricola)?' [ROL NO AGRICOLA: urbano u otro destino, sin analisis de suelos]':'')).join(' | ')}
 COMUNA: ${datos.roles?.[0]?.comuna || ''} | PROVINCIA: ${datos.provincia} | REGION: ${datos.region}
 LOCALIDAD: ${datos.localidad}
 PROPIETARIO: ${(datos.roles || []).map(r => r.datos?.propietario).filter(Boolean).join(', ')}
@@ -312,7 +312,11 @@ const manejadorSuelos = async (req, res) => {
         }
         gj.features = gj2.features;
       }
-      else return res.json({ ok:false, mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN de la region. Si en SII Mapas figura como Ubicacion: Urbana, es una propiedad urbana y no corresponde a esta plataforma de predios agricolas. Si es rural, ingresa los suelos manualmente.', debug });
+      else return res.json({ ok:true, noAgricola:true,
+        mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN: se informa como NO AGRICOLA (propiedad urbana u otro destino). Sus demas antecedentes (avaluo, superficie, inscripciones) se incluyen normalmente en el informe.',
+        superficieHa:'0', superficieSII:null, clases:{}, serie:'', usos:{}, plantaciones:null, fruticolaNota:'', capaFruticola:null,
+        caracteristicas:{}, camposDominante:null, capacidadUso:'NO AGRICOLA', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null,
+        fuente:'CIREN - IDE Minagri (referencial)', debug });
     }
 
     // Superficie SII registrada en el catastro (campo tipo "superfirea" del rol)
@@ -811,7 +815,12 @@ const manejadorSuelos = async (req, res) => {
 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    let predioGeo = null;
+    try {
+      const simple = turf.simplify(predio, { tolerance: 0.00008, highQuality: false });
+      predioGeo = simple.geometry;
+    } catch (e) { try { predioGeo = predio.geometry; } catch (e2) {} }
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
