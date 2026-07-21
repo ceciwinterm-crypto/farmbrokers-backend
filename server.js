@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v48', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v49', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -29,7 +29,7 @@ app.post('/generar-informe', async (req, res) => {
 
 DATOS DEL PREDIO:
 PREDIO: ${datos.predioNombre}
-ROLES SII: ${(datos.roles || []).map(r => r.rol).join(', ')}
+ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'')).join(' | ')}
 COMUNA: ${datos.roles?.[0]?.comuna || ''} | PROVINCIA: ${datos.provincia} | REGION: ${datos.region}
 LOCALIDAD: ${datos.localidad}
 PROPIETARIO: ${(datos.roles || []).map(r => r.datos?.propietario).filter(Boolean).join(', ')}
@@ -49,7 +49,7 @@ INSTRUCCIONES DEL TASADOR PARA LAS CONCLUSIONES: ${datos.guiaConclusion || "ning
 ZONA DE ESCASEZ HIDRICA: ${datos.escasezTxt || "sin decreto vigente detectado"}
 
 Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 10 campos de texto:
-- resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual
+- resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual. Si son varios roles, describe el predio como una unidad compuesta por esos paños
 - ubicacion: 1-2 oraciones con coordenadas, distancia a Santiago y acceso
 - titulos: 1 parrafo breve sobre inscripcion y deslindes
 - topografia: 2 oraciones estimando la composicion del relieve en porcentajes aproximados a partir de las clases de suelo (Clases I a III = sectores planos; IV = lomajes suaves; VI = laderas; VII y VIII = cerros y quebradas). Estilo: "Predio compuesto en un 80% por cerros y quebradas, un 13% por laderas y un 7% por sectores de lomaje suave."
@@ -58,7 +58,7 @@ Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codi
 - usoActual: 2 oraciones breves describiendo la composicion del uso actual del suelo segun el catastro CONAF (que uso domina, que implica para el predio)
 - clima: 1 parrafo sobre el clima de la zona. Si hay DATOS CLIMATICOS medidos, usalos como base (cifras reales del punto del predio) en vez de generalidades
 - hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas. NUNCA menciones valores monetarios de los derechos (esos van solo en la tabla de valorizacion). Si la zona esta bajo decreto de escasez hidrica, menciona la advertencia y la necesidad de monitorear caudales
-- conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion. Si hay INSTRUCCIONES DEL TASADOR, siguelas estrictamente como enfoque principal de la conclusion
+- conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion. Si el predio tiene VARIOS roles, la conclusion SIEMPRE abarca el conjunto completo (superficie total, plantaciones de todos los paños) y menciona cada rol con su nombre de paño si existe. Si hay INSTRUCCIONES DEL TASADOR, siguelas estrictamente como enfoque principal de la conclusion
 
 Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado.`;
 
