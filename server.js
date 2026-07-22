@@ -685,21 +685,40 @@ const manejadorSuelos = async (req, res) => {
               return (k ? parseFloat(String(dp[k]).replace(',', '.')) : 0) || 0;
             };
             for (const f of jf.features) {
-              let ha = 0;
+              let ha = 0;               // superficie del cuartel DENTRO del rol (recortada)
+              let haCuartel = 0;        // superficie total del cuartel (para prorratear arboles)
               let dentro = false;
-              // 1) Interseccion geometrica exacta
+              let recortado = false;
+              // Superficie total del cuartel (geometrica; sirve para el prorrateo de arboles)
+              try { haCuartel = turf.area(f) / 10000; } catch (e) { haCuartel = 0; }
+              // 1) Interseccion geometrica exacta: recorta el cuartel al poligono del rol.
+              //    Esta es la superficie REAL de plantacion que pertenece a este predio.
               try {
                 const inter = turf.intersect(turf.featureCollection([predio, f]));
                 if (inter) {
                   ha = turf.area(inter) / 10000;
-                  if (ha >= 0.005) { dentro = true; nInter++; }
+                  if (ha >= 0.005) { dentro = true; recortado = true; nInter++; }
                 }
-              } catch (e) { nError++; }
-              // 2) Respaldo: el centro del cuartel cae dentro del predio
+              } catch (e) {
+                nError++;
+                // Respaldo geometrico ante error de interseccion: buffer(0) repara la geometria
+                try {
+                  const f2 = turf.buffer(f, 0, { units: 'meters' });
+                  const inter2 = turf.intersect(turf.featureCollection([predio, f2]));
+                  if (inter2) {
+                    ha = turf.area(inter2) / 10000;
+                    if (ha >= 0.005) { dentro = true; recortado = true; nInter++; }
+                  }
+                } catch (e3) {}
+              }
+              // 2) Respaldo SOLO si no se pudo recortar geometricamente. En ese caso se
+              //    acota la superficie a lo que fisicamente cabe en el rol para no inflar.
               if (!dentro) {
                 try {
                   if (turf.booleanPointInPolygon(turf.centroid(f), predio)) {
-                    ha = haOficial(f) || (turf.area(f) / 10000);
+                    const haC = haOficial(f) || haCuartel;
+                    // Nunca atribuir al rol mas superficie que la del propio predio disponible
+                    ha = Math.min(haC, superficieHa || haC);
                     dentro = true; nCentro++;
                   }
                 } catch (e2) {}
@@ -710,13 +729,19 @@ const manejadorSuelos = async (req, res) => {
               if (!especie) continue;
               const variedad = buscarF(dp, /VARI/i);
               const anio = buscarF(dp, /ANO|AGNO|PLANT/i).replace(/[^0-9]/g, '').substring(0, 4);
-              const arboles = parseFloat(buscarF(dp, /ARBO|N_?ARB/i)) || 0;
+              const arbCuartel = parseFloat(buscarF(dp, /ARBO|N_?ARB/i)) || 0;
+              // Arboles proporcionales a la fraccion del cuartel que cae dentro del rol
+              const fraccion = (recortado && haCuartel > 0) ? Math.min(1, ha / haCuartel) : 1;
+              const arboles = arbCuartel * fraccion;
               const clave = especie + '|' + variedad + '|' + anio;
               if (!grupos[clave]) grupos[clave] = { especie, variedad, anio, arboles: 0, has: 0 };
               grupos[clave].arboles += arboles;
               grupos[clave].has += ha;
             }
-            debug.push({ paso:'fruticola-cruce', porInterseccion: nInter, porCentro: nCentro, fuera: nFuera, erroresGeometria: nError });
+            const haTotalRol = Object.values(grupos).reduce((a, g) => a + g.has, 0);
+            debug.push({ paso:'fruticola-cruce', porInterseccion: nInter, porCentro: nCentro, fuera: nFuera, erroresGeometria: nError,
+              haRecortadaAlRol: Math.round(haTotalRol * 100) / 100, superficiePredioHa: Math.round(superficieHa * 100) / 100,
+              nota: nCentro > 0 ? ('ATENCION: ' + nCentro + ' cuartel(es) no se pudieron recortar geometricamente y se acotaron a la superficie del predio.') : 'Todas las plantaciones fueron recortadas al poligono del rol.' });
             const plantaciones = Object.values(grupos)
               .sort((x, y) => y.has - x.has)
               .map(p => ({ ...p, arboles: Math.round(p.arboles), has: Math.round(p.has * 100) / 100 }));
