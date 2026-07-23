@@ -335,6 +335,117 @@ Si encontrado es false, deja los demas campos como "".
   }
 });
 
+// ──────────────── BUSQUEDA DE COMPARABLES DE MERCADO (IA + busqueda web) ────────────────
+// Busca ofertas VIGENTES de campos agricolas en portales reales (Portal Inmobiliario,
+// Colliers, GPS Property y otros corredores agricolas chilenos) cerca de la comuna del
+// predio. Es una busqueda a pedido, nunca automatica: entrega una LISTA de candidatos para
+// que el tasador elija cuales incorporar, cada uno con su fuente y fecha de consulta,
+// porque las publicaciones inmobiliarias cambian o se retiran constantemente.
+app.post('/buscar-comparables', async (req, res) => {
+  try {
+    const { comuna, region, superficieObjetivo } = req.body || {};
+    if (!comuna) return res.status(400).json({ ok: false, mensaje: 'Falta la comuna del predio.' });
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
+
+    const sup = parseFloat(String(superficieObjetivo || '0').replace(',', '.')) || 0;
+    const rangoTxt = sup > 0 ? ('Busca preferentemente predios de tamaño similar, entre ' + Math.round(sup * 0.3) + ' y ' + Math.round(sup * 3) + ' hectáreas aproximadamente (el predio en tasación tiene ' + sup + ' ha).') : '';
+
+    const prompt = `Necesito encontrar OFERTAS VIGENTES (publicadas ahora mismo) de campos o predios agrícolas EN VENTA, para usar como referencias de mercado en una tasación agrícola profesional en Chile.
+
+Comuna del predio en tasación: ${comuna}
+Región: ${region || '(no especificada)'}
+${rangoTxt}
+
+Busca en estos portales y corredores (y otros similares de propiedades agrícolas en Chile si los encuentras):
+- portalinmobiliario.com (sección Campos/Terrenos agrícolas)
+- colliers.cl o colliers.com (Chile, agrícola)
+- gpsproperty.cl (sección Agrícola)
+- Otros corredores especializados en campos agrícolas chilenos (ej. Tattersall Campos, Ipropiedadesagricolas, Aqueveque Propiedades, etc.)
+
+Busca ofertas EN LA MISMA COMUNA o en comunas VECINAS de la misma región (prioriza cercanía geográfica real). Busca hasta 6 ofertas distintas si existen.
+
+Para cada oferta que encuentres, extrae SOLO lo que está publicado explícitamente:
+- Nombre/referencia de la oferta o corredor
+- Ubicación (comuna/sector)
+- Superficie en hectáreas
+- Precio total (o precio por hectárea si es lo único publicado)
+- URL directa de la publicación
+
+Reglas estrictas:
+- NUNCA inventes ni estimes un precio o superficie que no esté publicado explícitamente. Si el precio dice "Consultar" o no está publicado, indícalo así, no lo omitas ni lo inventes.
+- No repitas la misma propiedad dos veces.
+- Cada oferta debe tener su URL real y verificable.
+- Si no encuentras ninguna oferta real y vigente, dilo claramente: no inventes ofertas de relleno.
+
+Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
+{"encontrado":true|false,"ofertas":[{"oferta":"...","ubicacion":"...","superficieHa":"...","precioTotal":"...","precioHa":"...","url":"...","fuente":"..."}]}
+
+Si encontrado es false, deja "ofertas" como un array vacío.`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2200,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 10 }]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Anthropic API error (buscar-comparables):', response.status, errText);
+      return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al buscar.', detail: errText.substring(0, 500) });
+    }
+
+    const data = await response.json();
+    const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
+    const fuentesConsultadas = (data.content || [])
+      .filter(b => b.type === 'web_search_tool_result')
+      .flatMap(b => (Array.isArray(b.content) ? b.content : []))
+      .map(r => r && r.url).filter(Boolean);
+
+    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
+    if (!match) {
+      return res.json({ ok: false, mensaje: 'La búsqueda no devolvió una respuesta interpretable.', fuentesConsultadas });
+    }
+    let resultado;
+    try { resultado = JSON.parse(match[0]); }
+    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al buscar.', fuentesConsultadas }); }
+
+    const ofertasCrudas = Array.isArray(resultado.ofertas) ? resultado.ofertas : [];
+    // Solo se aceptan ofertas con URL real (segunda capa de seguridad: sin URL, no se puede verificar -> se descarta)
+    const ofertas = ofertasCrudas
+      .filter(o => o && String(o.url || '').trim().startsWith('http'))
+      .slice(0, 6)
+      .map(o => ({
+        oferta: String(o.oferta || '').trim(),
+        ubicacion: String(o.ubicacion || '').trim(),
+        superficieHa: String(o.superficieHa || '').trim(),
+        precioTotal: String(o.precioTotal || '').trim(),
+        precioHa: String(o.precioHa || '').trim(),
+        url: String(o.url || '').trim(),
+        fuente: String(o.fuente || '').trim()
+      }));
+
+    if (!resultado.encontrado || !ofertas.length) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'No se encontraron ofertas vigentes verificables para ' + comuna + '. Prueba ampliando a una comuna vecina, o agrega referencias manualmente.',
+        fuentesConsultadas });
+    }
+
+    return res.json({ ok: true, encontrado: true, ofertas, fechaConsulta: new Date().toISOString().substring(0, 10), fuentesConsultadas });
+  } catch (err) {
+    console.error('Error en /buscar-comparables:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
+  }
+});
+
 // Cache en memoria de la lista de comunas de SimpleAPI (evita gastar consultas)
 const cacheComunas = { lista: null };
 const cacheBusquedas = {}; // resultados de buscar-rol por rol+comuna (24 h) para ahorrar cuota SimpleAPI
