@@ -148,21 +148,23 @@ app.post('/buscar-rol', async (req, res) => {
 
   const norm = s => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
-  // Detecta el error transitorio del scraper de SimpleAPI contra el SII
-  const esErrorComunas = (r) => {
+  // Detecta fallas TRANSITORIAS del scraper de SimpleAPI contra el SII: pueden venir
+  // como "Error al obtener comunas" o "Error al obtener predios", y ambas suelen ser
+  // el mismo problema de fondo (el SII respondio lento y el proxy de SimpleAPI hizo timeout).
+  const esErrorTransitorio = (r) => {
     if (!r) return false;
     const msg = JSON.stringify(r).toLowerCase();
-    return r.__status >= 400 && msg.includes('error al obtener comunas');
+    return r.__status >= 400 && (msg.includes('error al obtener comunas') || msg.includes('error al obtener predios') || msg.includes('gateway timeout'));
   };
 
   let resultado = null;
   let listaComunas = cacheComunas.lista;
 
   // ── Paso 1: intento directo con reintentos ──
-  // "Error al obtener comunas" = fallo transitorio del lado de SimpleAPI/SII.
-  // Reintentamos hasta 3 veces con pausa (respetando el limite de 5 consultas/min).
+  // Gateway Timeout / "Error al obtener comunas o predios" = fallo transitorio del lado
+  // de SimpleAPI/SII. Reintentamos varias veces con pausa (respetando el limite de 5/min).
   const bodyDirecto = JSON.stringify({ comuna: comunaLimpia, manzana, predio });
-  for (let intento = 1; intento <= 2 && !resultado; intento++) {
+  for (let intento = 1; intento <= 3 && !resultado; intento++) {
     const r = await intentar(URL, { method: 'POST', headers, body: bodyDirecto }, debug, 'POST directo (intento ' + intento + ')');
     if (r && r.__status === 200) { resultado = r; break; }
     if (r && Array.isArray(r.data) && r.data.some(x => x.Comuna || x.comuna)) {
@@ -172,7 +174,7 @@ app.post('/buscar-rol', async (req, res) => {
     if (r && (r.__status === 503 || /under construction/i.test(JSON.stringify(r)))) {
       return res.json({ ok: false, mensaje: '🔧 El servicio de SimpleAPI esta caido en este momento (su servidor muestra "Site Under Construction"). No es un problema de tu plataforma ni de tu cuota. Reintenta en un rato, o usa los botones manuales Avaluo SII / Mapa SII.', debug });
     }
-    if (esErrorComunas(r)) { await sleep(4000); continue; } // transitorio: esperar y reintentar
+    if (esErrorTransitorio(r)) { await sleep(4000); continue; } // transitorio: esperar y reintentar
     if (r && r.__status === 401) {
       const cuerpo = JSON.stringify(r).toLowerCase();
       const esCuota = cuerpo.includes('l\u00edmite') || cuerpo.includes('limite');
@@ -181,6 +183,15 @@ app.post('/buscar-rol', async (req, res) => {
         : 'SimpleAPI rechazo la API key (401). Revisa SIMPLEAPI_KEY en Railway.', debug });
     }
     break; // otro tipo de error: no insistir por la misma via
+  }
+
+  // ── Paso 2b: si el directo siguio fallando por timeout y no hay lista de comunas
+  // en cache, igual vale la pena reintentar el directo una vez mas con pausa larga:
+  // el timeout suele ser del SII respondiendo lento, no de la comuna en si.
+  if (!resultado && !Array.isArray(listaComunas) && debug.some(d => esErrorTransitorio({ __status: 400, mensaje: d.snippet }))) {
+    await sleep(6000);
+    const r = await intentar(URL, { method: 'POST', headers, body: bodyDirecto }, debug, 'POST directo (reintento final tras timeout)');
+    if (r && r.__status === 200) resultado = r;
   }
 
   // ── Paso 3: resolver la comuna con el catalogo y buscar con el nombre/Id exacto ──
@@ -203,9 +214,9 @@ app.post('/buscar-rol', async (req, res) => {
   }
 
   if (!resultado) {
-    const huboTransitorio = debug.some(d => (d.snippet || '').toLowerCase().includes('error al obtener comunas'));
+    const huboTransitorio = debug.some(d => esErrorTransitorio({ __status: 400, mensaje: d.snippet }));
     const mensaje = huboTransitorio
-      ? 'SimpleAPI no logro consultar el SII en este momento (fallo temporal de su lado). Espera 1-2 minutos y vuelve a intentar. Si persiste, usa los botones manuales.'
+      ? 'El SII/SimpleAPI respondio lento o con timeout varias veces seguidas (fallo temporal de su lado, no de tu cuenta ni de la plataforma). Espera 1-2 minutos y vuelve a intentar. Si persiste, usa los botones manuales Avaluo SII / Mapa SII.'
       : 'Ninguna ruta respondio con datos. Revisa el detalle.';
     return res.json({ ok: false, mensaje, debug });
   }
