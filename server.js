@@ -441,21 +441,29 @@ Comuna: ${comuna}
 Región: ${region || '(no especificada)'}
 ${claseSuelo ? 'Clase de capacidad de uso del suelo (CIREN): ' + claseSuelo : ''}
 
-Busca en fuentes OFICIALES chilenas: Superintendencia de Electricidad y Combustibles (SEC), Comisión Nacional de Energía (CNE), Ministerio de Energía, SAG (cambio de uso de suelo agrícola), o el Plan Regulador Comunal de esa comuna si es pertinente.
+Busca en fuentes OFICIALES chilenas: SAG (permisos para construcciones ajenas a la agricultura en área rural), Superintendencia de Electricidad y Combustibles (SEC), Comisión Nacional de Energía (CNE), Ministerio de Energía, Servicio de Evaluación Ambiental (SEIA), o el Plan Regulador Comunal de esa comuna si es pertinente.
 
-Busca específicamente:
-- Si existe alguna restricción o requisito para instalar proyectos fotovoltaicos en suelo de uso agrícola en Chile (por ejemplo, cambio de uso de suelo, permisos SAG, restricciones por clase de suelo).
-- Si hay normativa específica para la región u O'Higgins/comuna consultada.
+Busca específicamente si existe alguna restricción o trámite requerido para instalar proyectos fotovoltaicos en suelo de uso agrícola en Chile.
 
-Reglas estrictas:
+Reglas estrictas sobre las fuentes:
 - Solo usa fuentes gubernamentales oficiales (.gob.cl, .cl de organismos públicos). No inventes una regla genérica no verificada.
 - Si no encuentras normativa específica, dilo claramente. NO derives una conclusión de "sí" o "no" a partir de la clase de suelo por tu cuenta: eso sería un criterio inventado, no verificado.
-- Cita SIEMPRE la URL de la fuente específica.
+- Cita cada fuente real que uses, con su URL exacta.
+
+Reglas estrictas sobre CÓMO REDACTAR la respuesta — esto es MUY IMPORTANTE porque lo va a leer una persona sin formación legal, que necesita entenderlo a la primera lectura, no un abogado:
+- NO uses lenguaje legal, ni cites artículos de ley por número dentro del texto, ni encadenes fuentes dentro de la misma oración (nada de "según el Art. 55° de la LGUC y la Circular N°296...").
+- Escribe como si le explicaras la situación a un colega en una conversación: frases cortas, directas, sin tecnicismos innecesarios.
+- Estructura la respuesta en dos partes separadas: (1) un resumen breve de la situación en 2-4 frases simples, y (2) un listado de pasos concretos y accionables que la persona debe seguir en la práctica, en orden.
+- Los nombres de trámites o instituciones sí puedes mencionarlos (ej. "SAG", "permiso IFC"), pero explica en una frase simple qué es cada uno la primera vez que lo nombras.
+- Todas las referencias legales (números de ley, circulares, artículos) van SOLO en el arreglo de fuentes, nunca mezcladas dentro del resumen o los pasos.
 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
-{"encontrado":true|false,"resumen":"...","fuenteUrl":"...","fuenteNombre":"...","fechaPublicacion":"..."}
+{"encontrado":true|false,"resumen":"...","pasos":["...","..."],"fuentes":[{"nombre":"...","url":"...","fecha":"..."}]}
 
-Si encontrado es false, deja los demas campos como "".`;
+"resumen": 2-4 frases simples que respondan la pregunta central (¿se puede o no, en términos generales?).
+"pasos": lista de 2-6 pasos concretos, cada uno una frase corta y accionable (ej. "Solicitar el permiso IFC al SAG antes de construir").
+"fuentes": cada fuente real y verificable que hayas usado, con su nombre corto, URL exacta, y fecha de publicación si la tiene.
+Si encontrado es false, deja "resumen","pasos" y "fuentes" vacíos.`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -492,12 +500,17 @@ Si encontrado es false, deja los demas campos como "".`;
         mensaje: 'No se encontró normativa específica y verificable para esta comuna. Consulta directamente con la SEC, la CNE o un abogado especializado en energía antes de avanzar con un proyecto solar.',
         fuentesConsultadas });
     }
-    const fuenteUrl = String(resultado.fuenteUrl || '').trim();
-    const fuenteValida = /\.gob\.cl(\/|$)|coordinador\.cl(\/|$)/i.test(fuenteUrl.replace(/^https?:\/\//, ''));
-    if (!fuenteValida) {
+    // Solo se aceptan fuentes de dominios gubernamentales oficiales; el resto se descarta
+    const fuentesCrudas = Array.isArray(resultado.fuentes) ? resultado.fuentes : [];
+    const fuentes = fuentesCrudas
+      .filter(f => f && /\.gob\.cl(\/|$)|coordinador\.cl(\/|$)/i.test(String(f.url || '').trim().replace(/^https?:\/\//, '')))
+      .map(f => ({ nombre: String(f.nombre || '').trim(), url: String(f.url || '').trim(), fecha: String(f.fecha || '').trim() }));
+    const pasos = Array.isArray(resultado.pasos) ? resultado.pasos.map(p => String(p || '').trim()).filter(Boolean) : [];
+
+    if (!fuentes.length) {
       return res.json({ ok: true, encontrado: false, mensaje: 'La búsqueda no encontró una fuente gubernamental oficial verificable.', fuentesConsultadas });
     }
-    res.json({ ok: true, encontrado: true, resumen: String(resultado.resumen || '').trim(), fuenteUrl, fuenteNombre: String(resultado.fuenteNombre || '').trim(), fechaPublicacion: String(resultado.fechaPublicacion || '').trim(), fuentesConsultadas });
+    res.json({ ok: true, encontrado: true, resumen: String(resultado.resumen || '').trim(), pasos, fuentes, fuentesConsultadas });
   } catch (err) {
     console.error('Error en /consultar-normativa-solar:', err);
     res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
