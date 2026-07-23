@@ -16,7 +16,7 @@ if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v51', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v52 (recorte + tope de seguridad plantaciones)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -227,8 +227,24 @@ app.post('/buscar-rol', async (req, res) => {
     reavaluo: String(g(cand, 'Reavalúo', 'Reavaluo', 'reavaluo')),
     ubicacionTipo: String(g(cand, 'Ubicación', 'Ubicacion', 'ubicacion')),
     lat: String(g(cand, 'PosicionX', 'lat', 'latitud')),
-    lon: String(g(cand, 'PosicionY', 'lng', 'lon', 'longitud'))
+    lon: String(g(cand, 'PosicionY', 'lng', 'lon', 'longitud')),
+    // Propietario/RUT: SII Mapas a veces los incluye en el mismo detalle del predio.
+    // No hay confirmacion de los nombres exactos de campo de SimpleAPI para esto
+    // (es informacion publica distinta a la del visor de mapas), asi que se prueban
+    // varias variantes conocidas y, si no calzan, se detectan mas abajo para revisar.
+    propietario: String(g(cand, 'Propietario', 'NombrePropietario', 'Contribuyente', 'NombreContribuyente',
+      'RazonSocial', 'Titular', 'NombreTitular', 'Nombre')),
+    rut: String(g(cand, 'Rut', 'RUT', 'RutPropietario', 'RutContribuyente', 'RutTitular'))
   };
+
+  // Si no calzaron los nombres anteriores, buscar en TODAS las llaves de la respuesta
+  // cualquiera que suene a propietario/RUT, para verificar con un caso real sin adivinar.
+  let candidatosPropietario = [];
+  if ((!datosMap.propietario || !datosMap.rut) && cand && typeof cand === 'object') {
+    candidatosPropietario = Object.keys(cand)
+      .filter(k => /propiet|contribuyente|titular|due[nñ]|razonsocial|^rut/i.test(k))
+      .map(k => ({ campo: k, valor: cand[k] }));
+  }
 
   console.log('SimpleAPI respuesta completa:', JSON.stringify(cand).substring(0, 2000));
 
@@ -238,7 +254,7 @@ app.post('/buscar-rol', async (req, res) => {
     return res.json({ ok: false, mensaje: 'El rol se encontro, pero los nombres de campos son distintos. Envia el detalle a Claude.', debug });
   }
 
-  const respuestaOk = { ok: true, datos: datosMap, raw: cand, debug };
+  const respuestaOk = { ok: true, datos: datosMap, raw: cand, candidatosPropietario, debug };
   cacheBusquedas[claveCache] = { t: Date.now(), respuesta: respuestaOk };
   res.json(respuestaOk);
 });
@@ -738,10 +754,27 @@ const manejadorSuelos = async (req, res) => {
               grupos[clave].arboles += arboles;
               grupos[clave].has += ha;
             }
+            const haTotalRolCrudo = Object.values(grupos).reduce((a, g) => a + g.has, 0);
+            // ── Tope de seguridad final ──────────────────────────────────────────
+            // Por diseño, lo plantado NUNCA puede superar la superficie del propio rol.
+            // El recorte geometrico de arriba deberia garantizarlo, pero si CIREN entrega
+            // cuarteles con geometria degenerada, o el poligono del rol tiene algun defecto,
+            // esto evita -pase lo que pase- que la valorizacion reciba una cifra imposible:
+            // se reescala TODO proporcionalmente para que la suma calce con el predio.
+            let capoSeguridad = false;
+            if (superficieHa > 0 && haTotalRolCrudo > superficieHa * 1.02) {
+              const factor = superficieHa / haTotalRolCrudo;
+              Object.values(grupos).forEach(g => { g.has *= factor; g.arboles *= factor; });
+              capoSeguridad = true;
+            }
             const haTotalRol = Object.values(grupos).reduce((a, g) => a + g.has, 0);
             debug.push({ paso:'fruticola-cruce', porInterseccion: nInter, porCentro: nCentro, fuera: nFuera, erroresGeometria: nError,
+              haTotalAntesDelTope: Math.round(haTotalRolCrudo * 100) / 100,
               haRecortadaAlRol: Math.round(haTotalRol * 100) / 100, superficiePredioHa: Math.round(superficieHa * 100) / 100,
-              nota: nCentro > 0 ? ('ATENCION: ' + nCentro + ' cuartel(es) no se pudieron recortar geometricamente y se acotaron a la superficie del predio.') : 'Todas las plantaciones fueron recortadas al poligono del rol.' });
+              topeDeSeguridadAplicado: capoSeguridad,
+              nota: capoSeguridad
+                ? ('ATENCION: la suma cruda de cuarteles (' + haTotalRolCrudo.toFixed(2) + ' ha) superaba el predio (' + superficieHa.toFixed(2) + ' ha); se reescalo proporcionalmente. Revisar en terreno.')
+                : (nCentro > 0 ? ('ATENCION: ' + nCentro + ' cuartel(es) no se pudieron recortar geometricamente y se acotaron a la superficie del predio.') : 'Todas las plantaciones fueron recortadas al poligono del rol.') });
             const plantaciones = Object.values(grupos)
               .sort((x, y) => y.has - x.has)
               .map(p => ({ ...p, arboles: Math.round(p.arboles), has: Math.round(p.has * 100) / 100 }));
