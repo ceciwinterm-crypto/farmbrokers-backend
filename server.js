@@ -335,6 +335,174 @@ Si encontrado es false, deja los demas campos como "".
   }
 });
 
+// ──────────────── INFRAESTRUCTURA ELECTRICA CERCANA (ArcGIS publico Min. Energia) ────────────────
+// Consulta el servicio geografico PUBLICO del Ministerio de Energia (IDE_ENERGIA) y calcula
+// la distancia real desde el punto del predio a la linea de transmision y a la subestacion
+// mas cercanas. Esto es una MEDICION GEOGRAFICA real (no requiere cuenta ni clave), pero
+// NO equivale a "capacidad disponible para inyectar energia": eso depende de estudios de
+// capacidad que publican las distribuidoras y el Coordinador Electrico Nacional, y no es
+// un dato que se pueda derivar de la distancia. Esto se aclara siempre en la respuesta.
+const ENERGIA_ARCGIS = 'https://arcgis2.minenergia.cl/public/rest/services/IDE_ENERGIA/IDE_2019/FeatureServer';
+app.post('/energia-cercana', async (req, res) => {
+  const debug = [];
+  try {
+    const { lat, lon } = req.body || {};
+    const latN = parseFloat(String(lat || '').replace(',', '.'));
+    const lonN = parseFloat(String(lon || '').replace(',', '.'));
+    if (!isFinite(latN) || !isFinite(lonN)) return res.status(400).json({ ok: false, mensaje: 'Faltan coordenadas del predio (lat/lon).' });
+
+    // Radio de busqueda: se amplia progresivamente si no encuentra nada cerca (predios rurales
+    // pueden estar lejos de la red). 15 km -> 40 km -> 80 km.
+    const radios = [15000, 40000, 80000];
+    const capas = [
+      { id: 8, nombre: 'Línea de Transmisión', campo: 'lineaTransmision' },
+      { id: 9, nombre: 'Subestación', campo: 'subestacion' }
+    ];
+    const resultado = {};
+
+    for (const capa of capas) {
+      let encontrado = null;
+      for (const radio of radios) {
+        try {
+          const url = ENERGIA_ARCGIS + '/' + capa.id + '/query?f=json&geometry=' + lonN + ',' + latN +
+            '&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects' +
+            '&distance=' + radio + '&units=esriSRUnit_Meter&outFields=*&returnGeometry=true&outSR=4326';
+          const r = await fetch(url, { timeout: 15000 });
+          const j = await r.json();
+          debug.push({ capa: capa.nombre, radio, status: r.status, features: j && j.features ? j.features.length : 0, error: j && j.error });
+          if (j && Array.isArray(j.features) && j.features.length) {
+            // Calcular distancia real a cada feature encontrada y quedarse con la mas cercana
+            let mejor = null;
+            j.features.forEach(f => {
+              try {
+                const punto2 = turf.point([lonN, latN]);
+                let dKm = null;
+                if (f.geometry && Array.isArray(f.geometry.paths)) {
+                  // Cada "path" es un segmento de linea: se mide la distancia a cada uno y se toma la minima
+                  f.geometry.paths.forEach(path => {
+                    if (!path || path.length < 2) return;
+                    try {
+                      const d = turf.pointToLineDistance(punto2, turf.lineString(path), { units: 'kilometers' });
+                      if (dKm === null || d < dKm) dKm = d;
+                    } catch (eL) {}
+                  });
+                } else if (f.geometry && Array.isArray(f.geometry.rings)) {
+                  f.geometry.rings.forEach(ring => {
+                    if (!ring || ring.length < 3) return;
+                    try {
+                      const d = turf.pointToLineDistance(punto2, turf.lineString([...ring, ring[0]]), { units: 'kilometers' });
+                      if (dKm === null || d < dKm) dKm = d;
+                    } catch (eL) {}
+                  });
+                } else if (f.geometry && f.geometry.x !== undefined) {
+                  dKm = turf.distance(punto2, turf.point([f.geometry.x, f.geometry.y]), { units: 'kilometers' });
+                }
+                if (dKm === null || isNaN(dKm)) return;
+                if (!mejor || dKm < mejor.distanciaKm) mejor = { distanciaKm: Math.round(dKm * 100) / 100, atributos: f.attributes || {} };
+              } catch (eF) {}
+            });
+            if (mejor) { encontrado = mejor; break; }
+          }
+        } catch (eR) { debug.push({ capa: capa.nombre, radio, error: eR.message }); }
+      }
+      resultado[capa.campo] = encontrado
+        ? { distanciaKm: encontrado.distanciaKm, nombre: encontrado.atributos.Nombre || encontrado.atributos.NOMBRE || encontrado.atributos.name || '', voltaje: encontrado.atributos.Tension || encontrado.atributos.TENSION || encontrado.atributos.voltage || '' }
+        : null;
+    }
+
+    res.json({
+      ok: true,
+      lineaTransmision: resultado.lineaTransmision,
+      subestacion: resultado.subestacion,
+      nota: 'La distancia es una medición geográfica real. NO indica si esa línea o subestación tiene capacidad disponible para inyectar energía: eso requiere consultar los estudios de capacidad de la distribuidora o del Coordinador Eléctrico Nacional (coordinador.cl).',
+      fuente: 'Ministerio de Energía — Infraestructura Energética (IDE_ENERGIA), servicio público arcgis2.minenergia.cl',
+      debug
+    });
+  } catch (err) {
+    console.error('Error en /energia-cercana:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message, debug });
+  }
+});
+
+// ──────────────── CONSULTA NORMATIVA: USO DE SUELO PARA PANELES SOLARES (IA + busqueda web) ────────────────
+// Pregunta REGULATORIA, no tecnica: si el suelo agricola de este predio permite instalar
+// paneles solares. Se responde SOLO citando fuentes oficiales reales (SEC, CNE, Ministerio
+// de Energia, SAG, o el Plan Regulador de la comuna). Nunca se infiere una regla generica
+// desde la clase de suelo: eso seria inventar un criterio legal no verificado.
+app.post('/consultar-normativa-solar', async (req, res) => {
+  try {
+    const { comuna, region, claseSuelo } = req.body || {};
+    if (!comuna) return res.status(400).json({ ok: false, mensaje: 'Falta la comuna del predio.' });
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
+
+    const prompt = `Necesito saber si un predio agrícola en Chile puede destinarse a la instalación de paneles solares (proyecto fotovoltaico), desde el punto de vista NORMATIVO/REGULATORIO.
+
+Comuna: ${comuna}
+Región: ${region || '(no especificada)'}
+${claseSuelo ? 'Clase de capacidad de uso del suelo (CIREN): ' + claseSuelo : ''}
+
+Busca en fuentes OFICIALES chilenas: Superintendencia de Electricidad y Combustibles (SEC), Comisión Nacional de Energía (CNE), Ministerio de Energía, SAG (cambio de uso de suelo agrícola), o el Plan Regulador Comunal de esa comuna si es pertinente.
+
+Busca específicamente:
+- Si existe alguna restricción o requisito para instalar proyectos fotovoltaicos en suelo de uso agrícola en Chile (por ejemplo, cambio de uso de suelo, permisos SAG, restricciones por clase de suelo).
+- Si hay normativa específica para la región u O'Higgins/comuna consultada.
+
+Reglas estrictas:
+- Solo usa fuentes gubernamentales oficiales (.gob.cl, .cl de organismos públicos). No inventes una regla genérica no verificada.
+- Si no encuentras normativa específica, dilo claramente. NO derives una conclusión de "sí" o "no" a partir de la clase de suelo por tu cuenta: eso sería un criterio inventado, no verificado.
+- Cita SIEMPRE la URL de la fuente específica.
+
+Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
+{"encontrado":true|false,"resumen":"...","fuenteUrl":"...","fuenteNombre":"...","fechaPublicacion":"..."}
+
+Si encontrado es false, deja los demas campos como "".`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Anthropic API error (consultar-normativa-solar):', response.status, errText);
+      return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al consultar.', detail: errText.substring(0, 500) });
+    }
+
+    const data = await response.json();
+    const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
+    const fuentesConsultadas = (data.content || [])
+      .filter(b => b.type === 'web_search_tool_result')
+      .flatMap(b => (Array.isArray(b.content) ? b.content : []))
+      .map(r => r && r.url).filter(Boolean);
+
+    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
+    if (!match) return res.json({ ok: false, mensaje: 'La consulta no devolvió una respuesta interpretable.', fuentesConsultadas });
+    let resultado;
+    try { resultado = JSON.parse(match[0]); }
+    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al consultar.', fuentesConsultadas }); }
+
+    if (!resultado.encontrado) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'No se encontró normativa específica y verificable para esta comuna. Consulta directamente con la SEC, la CNE o un abogado especializado en energía antes de avanzar con un proyecto solar.',
+        fuentesConsultadas });
+    }
+    const fuenteUrl = String(resultado.fuenteUrl || '').trim();
+    const fuenteValida = /\.gob\.cl(\/|$)|coordinador\.cl(\/|$)/i.test(fuenteUrl.replace(/^https?:\/\//, ''));
+    if (!fuenteValida) {
+      return res.json({ ok: true, encontrado: false, mensaje: 'La búsqueda no encontró una fuente gubernamental oficial verificable.', fuentesConsultadas });
+    }
+    res.json({ ok: true, encontrado: true, resumen: String(resultado.resumen || '').trim(), fuenteUrl, fuenteNombre: String(resultado.fuenteNombre || '').trim(), fechaPublicacion: String(resultado.fechaPublicacion || '').trim(), fuentesConsultadas });
+  } catch (err) {
+    console.error('Error en /consultar-normativa-solar:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
+  }
+});
 // ──────────────── BUSQUEDA DE COMPARABLES DE MERCADO (IA + busqueda web) ────────────────
 // Busca ofertas VIGENTES de campos agricolas en portales reales (Portal Inmobiliario,
 // Colliers, GPS Property y otros corredores agricolas chilenos) cerca de la comuna del
