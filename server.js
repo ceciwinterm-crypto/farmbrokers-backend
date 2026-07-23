@@ -111,27 +111,38 @@ app.post('/buscar-propietario', async (req, res) => {
     if (!rol || !comuna) return res.status(400).json({ ok: false, mensaje: 'Falta rol o comuna.' });
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
 
-    const prompt = `Necesito identificar al propietario de un predio agrícola en Chile a partir de documentos PUBLICOS OFICIALES.
+    const prompt = `Necesito identificar al propietario de un predio agrícola en Chile a partir de documentos PUBLICOS OFICIALES, y si es una EMPRESA, tambien su RUT.
 
 Rol de avalúo: ${rol}
 Comuna: ${comuna}
 Región: ${region || '(no especificada)'}
 
+PASO 1 — Propietario:
 Busca el documento oficial "Rol de Avalúos y Contribuciones Bienes Raíces Agrícolas" (o "Rol de Avalúo") que la Municipalidad de ${comuna}, o en su defecto el SII, publica en su sitio web (normalmente un PDF). Ese documento lista, por cada rol, el nombre del propietario y el nombre o dirección del predio.
 
 Encuentra dentro de ese documento la línea EXACTA correspondiente al rol ${rol}. Debes encontrar el numero de rol EXACTO, no uno parecido.
 
-Reglas estrictas:
-- Solo usa fuentes gubernamentales o municipales oficiales (municipalidad.cl, sii.cl). No uses directorios de empresas, rutificadores, ni sitios de terceros no oficiales.
-- Si encuentras el rol exacto, extrae el nombre del propietario y el nombre del predio TAL COMO aparecen en el documento, sin corregir ni completar nada.
+Reglas estrictas para el Paso 1:
+- Solo usa fuentes gubernamentales o municipales oficiales (municipalidad.cl, sii.cl) para el propietario y nombre del predio.
+- Extrae el nombre del propietario y el nombre del predio TAL COMO aparecen en el documento, sin corregir ni completar nada.
 - Si NO encuentras el documento, o no encuentras la linea exacta de ese rol, responde que no se encontro. Nunca inventes ni "completes" un nombre parecido.
-- No busques ni entregues RUT: estos documentos casi nunca lo publican, y no debes inferirlo ni calcularlo.
+
+PASO 2 — RUT (SOLO si el propietario encontrado en el Paso 1 es una EMPRESA):
+IMPORTANTE: los documentos municipales suelen truncar el nombre del propietario a ~25 caracteres. Un nombre que empieza con "AGRICOLA" casi siempre es una empresa aunque el sufijo "Limitada"/"SpA" haya quedado cortado por el ancho de columna del PDF — trátalo como empresa igual, e intenta encontrar su razón social COMPLETA (con el sufijo legal) en el directorio de empresas antes de buscar el RUT.
+
+Si el nombre del propietario corresponde claramente a una empresa (empieza con "Agricola", o contiene "Limitada", "Ltda", "S.A.", "SpA", "Sociedad", "EIRL", "Comercial", "Inmobiliaria", "Inversiones", etc.), busca su RUT en directorios chilenos de empresas que agreguen datos oficiales (por ejemplo portalchile.org, u otros que citen como fuente al SII/INAPI/Mercado Publico/CMF).
+
+Reglas estrictas para el Paso 2:
+- Solo entrega el RUT si encuentras una coincidencia EXACTA e INEQUIVOCA de la razón social completa (no una empresa con nombre parecido).
+- Si existen varias empresas con nombres similares, o no hay coincidencia exacta y clara, deja el RUT vacío y explica la ambiguedad en notaIncertidumbre.
+- Si el propietario es una PERSONA NATURAL (nombre de persona, no una razón social de empresa), NO busques su RUT bajo ninguna circunstancia: por privacidad, ese dato SIEMPRE debe completarlo el tasador manualmente. Deja rut vacio en ese caso.
+- Nunca calcules ni inventes un RUT ni su dígito verificador: solo repórtalo si lo viste literalmente en una fuente real.
 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
-{"encontrado":true|false,"propietario":"...","nombrePredio":"...","fuenteUrl":"...","fuenteNombre":"...","fechaDocumento":"...","notaIncertidumbre":"..."}
+{"encontrado":true|false,"propietario":"...","nombrePredio":"...","fuenteUrl":"...","fuenteNombre":"...","fechaDocumento":"...","esEmpresa":true|false,"rut":"...","rutFuenteUrl":"...","rutFuenteNombre":"...","notaIncertidumbre":"..."}
 
-Si encontrado es false, deja los demas campos como "".
-"notaIncertidumbre" es para que menciones cualquier duda (ej. "hay otra empresa con nombre muy similar", "el documento es de 2018 y podria estar desactualizado").`;
+Si encontrado es false, deja los demas campos como "" o false.
+"notaIncertidumbre" es para que menciones cualquier duda (ej. "hay otra empresa con nombre muy similar", "el documento es de 2018 y podria estar desactualizado", "no se encontro coincidencia exacta de RUT").`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -142,9 +153,9 @@ Si encontrado es false, deja los demas campos como "".
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
+        max_tokens: 1800,
         messages: [{ role: 'user', content: prompt }],
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 }]
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 10 }]
       })
     });
 
@@ -177,14 +188,25 @@ Si encontrado es false, deja los demas campos como "".
         fuentesConsultadas });
     }
 
+    // ── Segunda capa de seguridad (no depender solo del prompt): ──
+    // solo se entrega RUT si el nombre del propietario realmente PARECE una empresa.
+    // Si no calza el patron, se descarta el RUT aunque el modelo lo haya devuelto.
+    const propietarioTxt = String(resultado.propietario || '');
+    const pareceEmpresa = /\bLIMITADA\b|\bLTDA\b|\bS\.?A\.?\b|\bSPA\b|\bSOCIEDAD\b|\bEIRL\b|\bCOMERCIAL\b|^AGRICOLA\b|\bINMOBILIARIA\b|\bINVERSIONES\b|\bFORESTAL\b|\bFRUTICOLA\b|\bCONSTRUCTORA\b|\bTRANSPORTES\b/i.test(propietarioTxt);
+    const rutSeguro = pareceEmpresa ? String(resultado.rut || '').trim() : '';
+    const rutDescartadoPorPersona = !pareceEmpresa && String(resultado.rut || '').trim() !== '';
+
     return res.json({
       ok: true, encontrado: true,
-      propietario: String(resultado.propietario || '').trim(),
+      propietario: propietarioTxt.trim(),
       nombrePredio: String(resultado.nombrePredio || '').trim(),
       fuenteUrl: String(resultado.fuenteUrl || '').trim(),
       fuenteNombre: String(resultado.fuenteNombre || '').trim(),
       fechaDocumento: String(resultado.fechaDocumento || '').trim(),
-      notaIncertidumbre: String(resultado.notaIncertidumbre || '').trim(),
+      rut: rutSeguro,
+      rutFuenteUrl: rutSeguro ? String(resultado.rutFuenteUrl || '').trim() : '',
+      rutFuenteNombre: rutSeguro ? String(resultado.rutFuenteNombre || '').trim() : '',
+      notaIncertidumbre: String(resultado.notaIncertidumbre || '').trim() + (rutDescartadoPorPersona ? ' (Se descartó un RUT devuelto por la búsqueda porque el propietario parece persona natural: ese dato queda siempre manual.)' : ''),
       fuentesConsultadas
     });
   } catch (err) {
