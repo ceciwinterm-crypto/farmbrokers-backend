@@ -233,6 +233,108 @@ async function intentar(url, opts, debug, label) {
   }
 }
 
+// ──────────────── CONSULTA PUNTUAL A INIA (IA + busqueda web, un cultivo a la vez) ────────────────
+// Busca en publicaciones OFICIALES de INIA (biblioteca.inia.cl, inia.cl) recomendaciones
+// tecnicas para un cultivo especifico en una zona especifica. Es una consulta puntual,
+// a pedido: nunca se ejecuta automaticamente en cada informe. Siempre exige fuente citable
+// y se presenta como informativa, no como sustituto de asesoria agronomica en terreno.
+app.post('/consultar-inia', async (req, res) => {
+  try {
+    const { cultivo, comuna, region, contexto } = req.body || {};
+    if (!cultivo) return res.status(400).json({ ok: false, mensaje: 'Falta indicar el cultivo a consultar.' });
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
+
+    const prompt = `Necesito informacion tecnica AGRONOMICA OFICIAL sobre el cultivo de "${cultivo}" en Chile, para una zona especifica.
+
+Comuna: ${comuna || '(no especificada)'}
+Región: ${region || '(no especificada)'}
+${contexto ? 'Contexto adicional del predio (suelo/clima ya medidos): ' + contexto : ''}
+
+Busca en publicaciones OFICIALES de INIA (Instituto de Investigaciones Agropecuarias de Chile): boletines tecnicos, informativos, "Tierra Adentro", estudios de zonificación agroclimática, o el sitio del centro regional INIA correspondiente a esa región (por ejemplo INIA Rayentué para O'Higgins, INIA La Platina para Metropolitana, etc.), disponibles en biblioteca.inia.cl o inia.cl.
+
+Busca especificamente:
+- Si INIA recomienda o ha estudiado este cultivo para esa zona/región.
+- Variedades recomendadas por INIA para la zona, si las hay.
+- Requerimientos agroclimáticos que INIA reporte (horas frío, riesgo de helada, tipo de suelo) para este cultivo.
+- Cualquier boletín técnico o informativo relevante.
+
+Reglas estrictas:
+- Solo usa fuentes de inia.cl o biblioteca.inia.cl. No inventes recomendaciones ni cites estudios que no puedas encontrar realmente.
+- Si no encuentras informacion especifica de INIA para esta combinacion cultivo+zona, dilo claramente: no completes con conocimiento general no verificado como si fuera de INIA.
+- Cita SIEMPRE la URL de la fuente especifica que uses (no solo la portada de inia.cl).
+
+Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
+{"encontrado":true|false,"resumen":"...","variedadesRecomendadas":"...","requerimientos":"...","fuenteUrl":"...","fuenteNombre":"...","fechaPublicacion":"..."}
+
+Si encontrado es false, deja los demas campos como "".
+"resumen" debe ser un parrafo breve (3-5 lineas) parafraseado, no una copia literal del texto original.`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1800,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Anthropic API error (consultar-inia):', response.status, errText);
+      return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al consultar.', detail: errText.substring(0, 500) });
+    }
+
+    const data = await response.json();
+    const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
+    const fuentesConsultadas = (data.content || [])
+      .filter(b => b.type === 'web_search_tool_result')
+      .flatMap(b => (Array.isArray(b.content) ? b.content : []))
+      .map(r => r && r.url).filter(Boolean);
+
+    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
+    if (!match) {
+      return res.json({ ok: false, mensaje: 'La consulta no devolvio una respuesta interpretable.', fuentesConsultadas });
+    }
+    let resultado;
+    try { resultado = JSON.parse(match[0]); }
+    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al consultar.', fuentesConsultadas }); }
+
+    if (!resultado.encontrado) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'No se encontró información específica de INIA para "' + cultivo + '" en esta zona. Prueba con el nombre del cultivo en español simple, o consulta directamente con el centro regional INIA correspondiente.',
+        fuentesConsultadas });
+    }
+
+    // Solo se acepta como fuente valida un dominio de INIA (segunda capa de seguridad, no depender solo del prompt)
+    const fuenteUrl = String(resultado.fuenteUrl || '').trim();
+    const fuenteValida = /(^|\.)inia\.cl(\/|$)/i.test(fuenteUrl.replace(/^https?:\/\//, ''));
+    if (!fuenteValida) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'La búsqueda no encontró una fuente oficial de inia.cl verificable para esta consulta.',
+        fuentesConsultadas });
+    }
+
+    return res.json({
+      ok: true, encontrado: true,
+      resumen: String(resultado.resumen || '').trim(),
+      variedadesRecomendadas: String(resultado.variedadesRecomendadas || '').trim(),
+      requerimientos: String(resultado.requerimientos || '').trim(),
+      fuenteUrl, fuenteNombre: String(resultado.fuenteNombre || '').trim(),
+      fechaPublicacion: String(resultado.fechaPublicacion || '').trim(),
+      fuentesConsultadas
+    });
+  } catch (err) {
+    console.error('Error en /consultar-inia:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
+  }
+});
+
 // Cache en memoria de la lista de comunas de SimpleAPI (evita gastar consultas)
 const cacheComunas = { lista: null };
 const cacheBusquedas = {}; // resultados de buscar-rol por rol+comuna (24 h) para ahorrar cuota SimpleAPI
