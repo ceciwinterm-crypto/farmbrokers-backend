@@ -100,6 +100,99 @@ Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado
   }
 });
 
+// ──────────────── BUSQUEDA DE PROPIETARIO POR ROL (IA + busqueda web) ────────────────
+// Usa el modelo con busqueda web activada para encontrar el "Rol de Avaluos" oficial
+// que publican las municipalidades (el mismo tipo de documento SII/gobierno que se uso
+// para verificar Mahuidanche y El Portal). NUNCA se usa como dato final: siempre queda
+// marcado como "verificar manualmente" y siempre se exige la URL fuente para poder revisarlo.
+app.post('/buscar-propietario', async (req, res) => {
+  try {
+    const { rol, comuna, region } = req.body || {};
+    if (!rol || !comuna) return res.status(400).json({ ok: false, mensaje: 'Falta rol o comuna.' });
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
+
+    const prompt = `Necesito identificar al propietario de un predio agrícola en Chile a partir de documentos PUBLICOS OFICIALES.
+
+Rol de avalúo: ${rol}
+Comuna: ${comuna}
+Región: ${region || '(no especificada)'}
+
+Busca el documento oficial "Rol de Avalúos y Contribuciones Bienes Raíces Agrícolas" (o "Rol de Avalúo") que la Municipalidad de ${comuna}, o en su defecto el SII, publica en su sitio web (normalmente un PDF). Ese documento lista, por cada rol, el nombre del propietario y el nombre o dirección del predio.
+
+Encuentra dentro de ese documento la línea EXACTA correspondiente al rol ${rol}. Debes encontrar el numero de rol EXACTO, no uno parecido.
+
+Reglas estrictas:
+- Solo usa fuentes gubernamentales o municipales oficiales (municipalidad.cl, sii.cl). No uses directorios de empresas, rutificadores, ni sitios de terceros no oficiales.
+- Si encuentras el rol exacto, extrae el nombre del propietario y el nombre del predio TAL COMO aparecen en el documento, sin corregir ni completar nada.
+- Si NO encuentras el documento, o no encuentras la linea exacta de ese rol, responde que no se encontro. Nunca inventes ni "completes" un nombre parecido.
+- No busques ni entregues RUT: estos documentos casi nunca lo publican, y no debes inferirlo ni calcularlo.
+
+Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
+{"encontrado":true|false,"propietario":"...","nombrePredio":"...","fuenteUrl":"...","fuenteNombre":"...","fechaDocumento":"...","notaIncertidumbre":"..."}
+
+Si encontrado es false, deja los demas campos como "".
+"notaIncertidumbre" es para que menciones cualquier duda (ej. "hay otra empresa con nombre muy similar", "el documento es de 2018 y podria estar desactualizado").`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1500,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 }]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Anthropic API error (buscar-propietario):', response.status, errText);
+      return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al buscar.', detail: errText.substring(0, 500) });
+    }
+
+    const data = await response.json();
+    // El texto final puede venir repartido en varios bloques (busquedas intermedias + respuesta final)
+    const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
+    // Fuentes que el modelo efectivamente consulto (para mostrar trazabilidad aunque el JSON falle)
+    const fuentesConsultadas = (data.content || [])
+      .filter(b => b.type === 'web_search_tool_result')
+      .flatMap(b => (Array.isArray(b.content) ? b.content : []))
+      .map(r => r && r.url).filter(Boolean);
+
+    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
+    if (!match) {
+      return res.json({ ok: false, mensaje: 'La busqueda no devolvio una respuesta interpretable. Verifica manualmente.', fuentesConsultadas });
+    }
+    let resultado;
+    try { resultado = JSON.parse(match[0]); }
+    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al buscar. Verifica manualmente.', fuentesConsultadas }); }
+
+    if (!resultado.encontrado) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'No se encontro un documento oficial con el rol exacto ' + rol + ' en ' + comuna + '. Completa el propietario manualmente.',
+        fuentesConsultadas });
+    }
+
+    return res.json({
+      ok: true, encontrado: true,
+      propietario: String(resultado.propietario || '').trim(),
+      nombrePredio: String(resultado.nombrePredio || '').trim(),
+      fuenteUrl: String(resultado.fuenteUrl || '').trim(),
+      fuenteNombre: String(resultado.fuenteNombre || '').trim(),
+      fechaDocumento: String(resultado.fechaDocumento || '').trim(),
+      notaIncertidumbre: String(resultado.notaIncertidumbre || '').trim(),
+      fuentesConsultadas
+    });
+  } catch (err) {
+    console.error('Error en /buscar-propietario:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
+  }
+});
+
 // ──────────────── BUSQUEDA POR ROL VIA SIMPLEAPI (Mapas SII) ────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
