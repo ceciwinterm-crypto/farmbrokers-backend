@@ -15,6 +15,33 @@ const PORT = process.env.PORT || 3000;
 if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
 
+// Extrae el primer objeto JSON BALANCEADO de un texto (cuenta llaves, respeta strings/escapes).
+// Mas robusto que un regex "primera { a ultima }": si el texto de Claude trae explicaciones
+// antes/despues del JSON, o si el JSON tiene objetos/arreglos anidados, esto encuentra el
+// cierre real del primer objeto en vez de agarrar basura hasta la ultima llave del texto.
+function extraerJSON(texto) {
+  const limpio = String(texto || '').replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+  const inicio = limpio.indexOf('{');
+  if (inicio === -1) return null;
+  let profundidad = 0, dentroString = false, escapando = false;
+  for (let i = inicio; i < limpio.length; i++) {
+    const ch = limpio[i];
+    if (escapando) { escapando = false; continue; }
+    if (ch === '\\') { escapando = true; continue; }
+    if (ch === '"') { dentroString = !dentroString; continue; }
+    if (dentroString) continue;
+    if (ch === '{') profundidad++;
+    else if (ch === '}') {
+      profundidad--;
+      if (profundidad === 0) {
+        const candidato = limpio.substring(inicio, i + 1);
+        try { return JSON.parse(candidato); } catch (e) { return null; }
+      }
+    }
+  }
+  return null; // nunca cerro: la respuesta se corto (truncada por max_tokens u otra causa)
+}
+
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v52', simpleapi: !!SIMPLEAPI_KEY });
 });
@@ -174,13 +201,10 @@ Si encontrado es false, deja los demas campos como "" o false.
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
 
-    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
-    if (!match) {
-      return res.json({ ok: false, mensaje: 'La busqueda no devolvio una respuesta interpretable. Verifica manualmente.', fuentesConsultadas });
+    const resultado = extraerJSON(texto);
+    if (!resultado) {
+      return res.json({ ok: false, mensaje: 'La busqueda no devolvio una respuesta interpretable (o se corto por longitud). Verifica manualmente.', fuentesConsultadas });
     }
-    let resultado;
-    try { resultado = JSON.parse(match[0]); }
-    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al buscar. Verifica manualmente.', fuentesConsultadas }); }
 
     if (!resultado.encontrado) {
       return res.json({ ok: true, encontrado: false,
@@ -297,13 +321,10 @@ Si encontrado es false, deja los demas campos como "".
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
 
-    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
-    if (!match) {
-      return res.json({ ok: false, mensaje: 'La consulta no devolvio una respuesta interpretable.', fuentesConsultadas });
+    const resultado = extraerJSON(texto);
+    if (!resultado) {
+      return res.json({ ok: false, mensaje: 'La consulta no devolvio una respuesta interpretable (o se corto por longitud).', fuentesConsultadas });
     }
-    let resultado;
-    try { resultado = JSON.parse(match[0]); }
-    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al consultar.', fuentesConsultadas }); }
 
     if (!resultado.encontrado) {
       return res.json({ ok: true, encontrado: false,
@@ -470,7 +491,7 @@ Si encontrado es false, deja "resumen","pasos" y "fuentes" vacíos.`;
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
+        max_tokens: 2500,
         messages: [{ role: 'user', content: prompt }],
         tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }]
       })
@@ -489,11 +510,8 @@ Si encontrado es false, deja "resumen","pasos" y "fuentes" vacíos.`;
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
 
-    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
-    if (!match) return res.json({ ok: false, mensaje: 'La consulta no devolvió una respuesta interpretable.', fuentesConsultadas });
-    let resultado;
-    try { resultado = JSON.parse(match[0]); }
-    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al consultar.', fuentesConsultadas }); }
+    const resultado = extraerJSON(texto);
+    if (!resultado) return res.json({ ok: false, mensaje: 'La consulta no devolvió una respuesta interpretable (o se cortó por longitud). Reintenta; si persiste, la consulta es muy compleja para el límite de tokens.', fuentesConsultadas });
 
     if (!resultado.encontrado) {
       return res.json({ ok: true, encontrado: false,
@@ -591,13 +609,10 @@ Si encontrado es false, deja "ofertas" como un array vacío.`;
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
 
-    const match = texto.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
-    if (!match) {
-      return res.json({ ok: false, mensaje: 'La búsqueda no devolvió una respuesta interpretable.', fuentesConsultadas });
+    const resultado = extraerJSON(texto);
+    if (!resultado) {
+      return res.json({ ok: false, mensaje: 'La búsqueda no devolvió una respuesta interpretable (o se cortó por longitud).', fuentesConsultadas });
     }
-    let resultado;
-    try { resultado = JSON.parse(match[0]); }
-    catch (e) { return res.json({ ok: false, mensaje: 'Respuesta mal formada al buscar.', fuentesConsultadas }); }
 
     const ofertasCrudas = Array.isArray(resultado.ofertas) ? resultado.ofertas : [];
     // Solo se aceptan ofertas con URL real (segunda capa de seguridad: sin URL, no se puede verificar -> se descarta)
