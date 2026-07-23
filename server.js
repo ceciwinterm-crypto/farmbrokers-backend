@@ -211,6 +211,17 @@ app.post('/buscar-rol', async (req, res) => {
   }
 
   // Mapeo flexible de campos (nombres reales confirmados de SimpleAPI Mapas)
+  // "Datos": null (explicito, con status 200) significa que el SII SI respondio la
+  // consulta pero no encontro ninguna propiedad con esa manzana/predio en esa comuna.
+  // Es un caso muy distinto a "los campos vinieron con otro nombre" y merece su propio mensaje.
+  if (resultado && resultado.Datos === null) {
+    debug.push({ label: 'rol-no-encontrado', comuna: comunaLimpia, manzana, predio });
+    return res.json({ ok: false, rolNoEncontrado: true,
+      mensaje: 'El SII no encontró ninguna propiedad con el rol ' + manzana + '-' + predio + ' en la comuna de ' + comunaLimpia +
+        '. Revisa: (1) que el número de rol esté bien escrito, (2) que la comuna sea la correcta (el rol puede pertenecer a una comuna vecina), o (3) usa los botones manuales Avalúo SII / Mapa SII para confirmarlo directamente en el sitio del SII.',
+      debug });
+  }
+
   const cand = (resultado && (resultado.Datos || resultado.datos)) || (Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado));
   const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
 
