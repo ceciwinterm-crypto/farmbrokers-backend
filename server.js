@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v56 (fix: rol sin datos CIREN ya no se etiqueta como NO AGRICOLA)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v57 (nuevo: /uso-suelo-conaf, consulta puntual de vegetacion/uso de suelo CONAF independiente de CIREN)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -90,6 +90,7 @@ COORDENADAS: ${datos.coordLat} S, ${datos.coordLon} O | DISTANCIA SANTIAGO: ${da
 ACCESO: ${datos.acceso}
 ALTITUD: ${datos.altitud || "no informada"} m.s.n.m. | DATOS CLIMATICOS MEDIDOS: ${datos.climaTxt || "sin datos medidos"}
 USO ACTUAL DEL SUELO (CONAF): ${datos.usosResumen || "sin datos"}
+USO DE SUELO Y VEGETACION PUNTUAL SEGUN CONAF EN EL CENTRO DEL PREDIO (independiente de CIREN): ${datos.usoSueloConafTxt || "sin datos"}
 INSTRUCCIONES DEL TASADOR PARA LAS CONCLUSIONES: ${datos.guiaConclusion || "ninguna"}
 ZONA DE ESCASEZ HIDRICA: ${datos.escasezTxt || "sin decreto vigente detectado"}
 
@@ -814,6 +815,21 @@ const CAPAS_REGION = [
   { id: 9, kw: ['BIOB'] }, { id: 10, kw: ['ARAUCAN'] }, { id: 11, kw: ['RIOS', 'RÍOS'] },
   { id: 12, kw: ['LAGOS'] }, { id: 13, kw: ['AYS'] }
 ];
+
+// Mapeo de region -> capa del servicio publico CONAF (Catastro de Uso de Suelo y Vegetacion,
+// via geoservidor de la SMA). Es un servicio DISTINTO e INDEPENDIENTE de CIREN: consulta por
+// coordenadas puntuales (lat/lon), no requiere que el rol este en el catastro rural de CIREN.
+// Util como respaldo cuando un rol no aparece en CIREN (ver /suelos-rol) pero igual se quiere
+// saber el uso de suelo/vegetacion real en el punto (bosque, matorral, agricola, urbano, etc).
+const CONAF_SMA_BASE = 'https://ideserver.sma.gob.cl/arcgis/rest/services/IDE/Biodiversidad/MapServer';
+const CONAF_CAPAS_REGION = [
+  { id: 20, kw: ['ARICA'] }, { id: 6, kw: ['TARAPAC'] }, { id: 7, kw: ['ANTOFAGASTA'] },
+  { id: 8, kw: ['ATACAMA'] }, { id: 9, kw: ['COQUIMBO'] }, { id: 10, kw: ['VALPARA'] },
+  { id: 18, kw: ['METROPOLITANA'] }, { id: 11, kw: ['HIGGINS', 'LIBERTADOR'] }, { id: 12, kw: ['MAULE'] },
+  { id: 21, kw: ['UBLE', 'ÑUBLE'] }, { id: 13, kw: ['BIOB'] }, { id: 14, kw: ['ARAUCAN'] },
+  { id: 19, kw: ['RIOS', 'RÍOS'] }, { id: 15, kw: ['LAGOS'] }, { id: 16, kw: ['AYS'] },
+  { id: 17, kw: ['MAGALLANES'] }
+];
 const cacheSuelosCapas = { lista: null };
 const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
 const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
@@ -1450,6 +1466,55 @@ const manejadorSuelos = async (req, res) => {
 };
 app.post('/suelos-rol', manejadorSuelos);
 app.get('/suelos-rol', manejadorSuelos); // permite probar por link: /suelos-rol?rol=75-32&comuna=galvarino
+
+// ──────── USO DE SUELO Y VEGETACION PUNTUAL (CONAF, via geoservidor SMA) ────────
+// Consulta el catastro oficial de CONAF de Uso de Suelo y Vegetacion en el PUNTO EXACTO
+// del predio (lat/lon), sin depender de que el rol este en el catastro rural de CIREN.
+// Categorias posibles: Bosques, Praderas y Matorrales, Terrenos Agricolas, Areas Urbanas
+// e Industriales, Cuerpos de Agua, Humedales, Nieves Eternas y Glaciares, Areas Desprovistas
+// de Vegetacion. Sirve especialmente para roles que CIREN no tiene mapeados (parcelaciones,
+// loteos), donde igual se quiere saber si el terreno es forestal, agricola, matorral, etc.
+app.post('/uso-suelo-conaf', async (req, res) => {
+  const debug = [];
+  try {
+    const { lat, lon, region } = req.body || {};
+    const latN = parseFloat(String(lat || '').replace(',', '.'));
+    let lonN = parseFloat(String(lon || '').replace(',', '.'));
+    if (!isFinite(latN) || !isFinite(lonN)) return res.status(400).json({ ok: false, mensaje: 'Faltan coordenadas del predio (lat/lon).' });
+    if (lonN > 0) lonN = -lonN; // Chile siempre es longitud oeste (negativa)
+
+    const regionU = normU(region || '');
+    const capaR = CONAF_CAPAS_REGION.find(cr => cr.kw.some(k => regionU.includes(k)));
+    if (!capaR) return res.json({ ok: false, mensaje: 'No pude identificar la region "' + region + '" para elegir la capa CONAF correcta. Completa la region en el formulario.' });
+
+    const url = CONAF_SMA_BASE + '/' + capaR.id + '/query?geometry=' + lonN + ',' + latN +
+      '&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects' +
+      '&outFields=USO,SUBUSO,ESTRUCTURA,COBERTURA,ESPECI1_CI,ESPECI1_CO,SUPERF_HA,NOM_COM,NOM_REG&returnGeometry=false&f=json';
+    const r = await fetch(url);
+    const j = await r.json();
+    debug.push({ paso: 'conaf-query', url, status: r.status, features: (j.features || []).length });
+
+    if (j.error) return res.json({ ok: false, mensaje: 'El servicio CONAF/SMA respondio con error: ' + (j.error.message || JSON.stringify(j.error)), debug });
+    if (!j.features || !j.features.length) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'El punto del predio no intersecta ningun poligono del catastro CONAF de uso de suelo/vegetacion (puede ser una zona sin cobertura del catastro, o el punto cae justo en un limite entre poligonos). Fuente: CONAF, via geoservidor SMA.',
+        debug });
+    }
+    const p = j.features[0].attributes || {};
+    res.json({
+      ok: true, encontrado: true,
+      uso: p.USO || null, subuso: p.SUBUSO || null, estructura: p.ESTRUCTURA || null,
+      cobertura: p.COBERTURA || null, especie: p.ESPECI1_CI || p.ESPECI1_CO || null,
+      superficiePoligonoHa: (p.SUPERF_HA != null && isFinite(p.SUPERF_HA)) ? Math.round(p.SUPERF_HA * 100) / 100 : null,
+      comuna: p.NOM_COM || null, regionCatastro: p.NOM_REG || null,
+      fuente: 'CONAF - Catastro de Uso de Suelo y Vegetacion (via geoservidor SMA, capa IDE/Biodiversidad)',
+      debug
+    });
+  } catch (err) {
+    console.error('Error /uso-suelo-conaf:', err);
+    res.json({ ok: false, mensaje: 'Error consultando CONAF: ' + err.message, debug });
+  }
+});
 
 // ──────── DIAGNOSTICO SIT RURAL v2 (abrir en el navegador: /diag-sitrural) ────────
 // Lee el codigo de la pagina del visor SIT Rural y extrae las direcciones reales
