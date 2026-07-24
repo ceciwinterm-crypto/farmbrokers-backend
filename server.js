@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v55 (fix: SIT Rural ahora tambien extrae clase de suelo, no solo caracteristicas)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v56 (fix: rol sin datos CIREN ya no se etiqueta como NO AGRICOLA)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -74,7 +74,7 @@ app.post('/generar-informe', async (req, res) => {
 
 DATOS DEL PREDIO:
 PREDIO: ${datos.predioNombre}
-ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'') + ((r.datos&&r.datos.noAgricola)?' [ROL NO AGRICOLA: urbano u otro destino, sin analisis de suelos]':'')).join(' | ')}
+ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'') + ((r.datos&&r.datos.noAgricola)?' [ROL SIN DATOS EN CATASTRO CIREN: no se pudo determinar clase de suelo automaticamente; no asumir destino urbano, verificar destino real segun SII]':'')).join(' | ')}
 COMUNA: ${datos.roles?.[0]?.comuna || ''} | PROVINCIA: ${datos.provincia} | REGION: ${datos.region}
 LOCALIDAD: ${datos.localidad}
 PROPIETARIO: ${(datos.roles || []).map(r => r.datos?.propietario).filter(Boolean).join(', ')}
@@ -870,9 +870,9 @@ const manejadorSuelos = async (req, res) => {
         gj.features = gj2.features;
       }
       else return res.json({ ok:true, noAgricola:true,
-        mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN: se informa como NO AGRICOLA (propiedad urbana u otro destino). Sus demas antecedentes (avaluo, superficie, inscripciones) se incluyen normalmente en el informe.',
+        mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN (cobertura incompleta de esa capa; esto NO significa que el predio sea urbano o no agricola). Verifica el destino real en SII Mapas: si dice "Ubicacion: Urbana", no corresponde a esta plataforma de predios agricolas; si dice "Rural" con destino Agricola u otro uso rural, ingresa las clases de suelo manualmente. Sus demas antecedentes (avaluo, superficie, inscripciones) se incluyen normalmente en el informe.',
         superficieHa:'0', superficieSII:null, clases:{}, serie:'', usos:{}, plantaciones:null, fruticolaNota:'', capaFruticola:null,
-        caracteristicas:{}, camposDominante:null, capacidadUso:'NO AGRICOLA', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null,
+        caracteristicas:{}, camposDominante:null, capacidadUso:'SIN DATOS CIREN', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null,
         fuente:'CIREN - IDE Minagri (referencial)', debug });
     }
 
