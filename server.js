@@ -19,6 +19,24 @@ if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por ro
 // Mas robusto que un regex "primera { a ultima }": si el texto de Claude trae explicaciones
 // antes/despues del JSON, o si el JSON tiene objetos/arreglos anidados, esto encuentra el
 // cierre real del primer objeto en vez de agarrar basura hasta la ultima llave del texto.
+// Distancia de edicion (Levenshtein) entre dos strings: cuantas letras hay que cambiar/
+// agregar/quitar para pasar de una a la otra. Se usa para detectar errores de tipeo en
+// nombres de comuna (ej. "OVLLE" vs "OVALLE" = 1 letra de diferencia) sin adivinar a ciegas.
+function distanciaLevenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const curr = [i];
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1] ? prev[j - 1] : 1 + Math.min(prev[j], curr[j - 1], prev[j - 1]);
+    }
+    prev = curr;
+  }
+  return prev[n];
+}
+
 function extraerJSON(texto) {
   const limpio = String(texto || '').replace(/```json\s*/gi, '').replace(/```\s*/g, '');
   const inicio = limpio.indexOf('{');
@@ -43,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v52', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v53 (SIT Rural + normativa + energia + correccion tipeo)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -710,11 +728,26 @@ app.post('/buscar-rol', async (req, res) => {
   // ── Paso 3: resolver la comuna con el catalogo y buscar con el nombre/Id exacto ──
   if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
-    const found = listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre) === objetivo)
-               || listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre).includes(objetivo));
+    let found = listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre) === objetivo)
+             || listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre).includes(objetivo));
+    let corregidoDe = null;
+    // Si no hubo match exacto ni por substring, probar correccion de tipeo (ej. "OVLLE" -> "OVALLE")
+    if (!found && objetivo.length >= 4) {
+      let mejor = null, mejorDist = Infinity;
+      for (const x of listaComunas) {
+        const nombreX = norm(x.Comuna || x.comuna || x.Nombre || x.nombre);
+        const d = distanciaLevenshtein(objetivo, nombreX);
+        if (d < mejorDist) { mejorDist = d; mejor = x; }
+      }
+      // Tolerancia: maximo 2 ediciones, y no mas del 25% de la longitud del nombre (evita "corregir" a algo no relacionado)
+      if (mejor && mejorDist <= 2 && mejorDist / objetivo.length <= 0.25) {
+        found = mejor; corregidoDe = objetivo;
+      }
+    }
     const comunaId = found && (found.Id || found.id || found.ID || found.Codigo || found.codigo);
     const comunaNombre = found && (found.Comuna || found.comuna || found.Nombre || found.nombre);
-    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length });
+    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length,
+      correccionAutomatica: corregidoDe ? ('"' + corregidoDe + '" no existe; se uso la comuna mas parecida: "' + comunaNombre + '"') : null });
 
     const bodies = [];
     if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
@@ -722,7 +755,7 @@ app.post('/buscar-rol', async (req, res) => {
     for (const b of bodies) {
       await sleep(2000);
       const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST ' + JSON.stringify(b));
-      if (r && r.__status === 200) { resultado = r; break; }
+      if (r && r.__status === 200) { resultado = r; if (corregidoDe) resultado.__comunaCorregida = comunaNombre; break; }
     }
   }
 
