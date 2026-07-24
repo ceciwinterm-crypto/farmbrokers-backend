@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v58 (fix critico: clases de suelo ahora priorizan el registro OFICIAL del predio en CIREN, rieX/secX ha - mismo dato que SIT Rural - en vez del cruce geometrico que podia desalinearse)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v55 (fix: SIT Rural ahora tambien extrae clase de suelo, no solo caracteristicas)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -74,7 +74,7 @@ app.post('/generar-informe', async (req, res) => {
 
 DATOS DEL PREDIO:
 PREDIO: ${datos.predioNombre}
-ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'') + ((r.datos&&r.datos.noAgricola)?' [ROL SIN DATOS EN CATASTRO CIREN: no se pudo determinar clase de suelo automaticamente; no asumir destino urbano, verificar destino real segun SII]':'')).join(' | ')}
+ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'') + ((r.datos&&r.datos.noAgricola)?' [ROL NO AGRICOLA: urbano u otro destino, sin analisis de suelos]':'')).join(' | ')}
 COMUNA: ${datos.roles?.[0]?.comuna || ''} | PROVINCIA: ${datos.provincia} | REGION: ${datos.region}
 LOCALIDAD: ${datos.localidad}
 PROPIETARIO: ${(datos.roles || []).map(r => r.datos?.propietario).filter(Boolean).join(', ')}
@@ -90,7 +90,6 @@ COORDENADAS: ${datos.coordLat} S, ${datos.coordLon} O | DISTANCIA SANTIAGO: ${da
 ACCESO: ${datos.acceso}
 ALTITUD: ${datos.altitud || "no informada"} m.s.n.m. | DATOS CLIMATICOS MEDIDOS: ${datos.climaTxt || "sin datos medidos"}
 USO ACTUAL DEL SUELO (CONAF): ${datos.usosResumen || "sin datos"}
-USO DE SUELO Y VEGETACION PUNTUAL SEGUN CONAF EN EL CENTRO DEL PREDIO (independiente de CIREN): ${datos.usoSueloConafTxt || "sin datos"}
 INSTRUCCIONES DEL TASADOR PARA LAS CONCLUSIONES: ${datos.guiaConclusion || "ninguna"}
 ZONA DE ESCASEZ HIDRICA: ${datos.escasezTxt || "sin decreto vigente detectado"}
 
@@ -815,21 +814,6 @@ const CAPAS_REGION = [
   { id: 9, kw: ['BIOB'] }, { id: 10, kw: ['ARAUCAN'] }, { id: 11, kw: ['RIOS', 'RÍOS'] },
   { id: 12, kw: ['LAGOS'] }, { id: 13, kw: ['AYS'] }
 ];
-
-// Mapeo de region -> capa del servicio publico CONAF (Catastro de Uso de Suelo y Vegetacion,
-// via geoservidor de la SMA). Es un servicio DISTINTO e INDEPENDIENTE de CIREN: consulta por
-// coordenadas puntuales (lat/lon), no requiere que el rol este en el catastro rural de CIREN.
-// Util como respaldo cuando un rol no aparece en CIREN (ver /suelos-rol) pero igual se quiere
-// saber el uso de suelo/vegetacion real en el punto (bosque, matorral, agricola, urbano, etc).
-const CONAF_SMA_BASE = 'https://ideserver.sma.gob.cl/arcgis/rest/services/IDE/Biodiversidad/MapServer';
-const CONAF_CAPAS_REGION = [
-  { id: 20, kw: ['ARICA'] }, { id: 6, kw: ['TARAPAC'] }, { id: 7, kw: ['ANTOFAGASTA'] },
-  { id: 8, kw: ['ATACAMA'] }, { id: 9, kw: ['COQUIMBO'] }, { id: 10, kw: ['VALPARA'] },
-  { id: 18, kw: ['METROPOLITANA'] }, { id: 11, kw: ['HIGGINS', 'LIBERTADOR'] }, { id: 12, kw: ['MAULE'] },
-  { id: 21, kw: ['UBLE', 'ÑUBLE'] }, { id: 13, kw: ['BIOB'] }, { id: 14, kw: ['ARAUCAN'] },
-  { id: 19, kw: ['RIOS', 'RÍOS'] }, { id: 15, kw: ['LAGOS'] }, { id: 16, kw: ['AYS'] },
-  { id: 17, kw: ['MAGALLANES'] }
-];
 const cacheSuelosCapas = { lista: null };
 const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
 const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
@@ -886,9 +870,9 @@ const manejadorSuelos = async (req, res) => {
         gj.features = gj2.features;
       }
       else return res.json({ ok:true, noAgricola:true,
-        mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN (cobertura incompleta de esa capa; esto NO significa que el predio sea urbano o no agricola). Verifica el destino real en SII Mapas: si dice "Ubicacion: Urbana", no corresponde a esta plataforma de predios agricolas; si dice "Rural" con destino Agricola u otro uso rural, ingresa las clases de suelo manualmente. Sus demas antecedentes (avaluo, superficie, inscripciones) se incluyen normalmente en el informe.',
+        mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN: se informa como NO AGRICOLA (propiedad urbana u otro destino). Sus demas antecedentes (avaluo, superficie, inscripciones) se incluyen normalmente en el informe.',
         superficieHa:'0', superficieSII:null, clases:{}, serie:'', usos:{}, plantaciones:null, fruticolaNota:'', capaFruticola:null,
-        caracteristicas:{}, camposDominante:null, capacidadUso:'SIN DATOS CIREN', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null,
+        caracteristicas:{}, camposDominante:null, capacidadUso:'NO AGRICOLA', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null,
         fuente:'CIREN - IDE Minagri (referencial)', debug });
     }
 
@@ -897,29 +881,6 @@ const manejadorSuelos = async (req, res) => {
     const kSup = Object.keys(propsRol).find(k => /SUPERF/i.test(k) && propsRol[k] !== null && String(propsRol[k]).trim() !== '');
     const superficieSII = kSup ? (parseFloat(String(propsRol[kSup]).replace(',', '.')) || null) : null;
     debug.push({ paso:'superficie-sii', campo: kSup || 'no encontrado', valor: superficieSII });
-
-    // Clases de suelo OFICIALES que CIREN ya trae calculadas para ESTE predio especifico, en el
-    // mismo registro de PROPIEDADES_RURALES (campos rie1rea_ha..rie4rea_ha para riego clases I-IV,
-    // y sec1rea_ha..sec8rea_ha para secano clases I-VIII). Es la MISMA fuente que muestra SIT Rural
-    // al hacer clic en el predio. Es mas confiable que cruzar geometricamente el poligono del predio
-    // con la capa separada de ESTUDIO_AGROLOGICO_SUELOS (mas abajo): ese cruce puede desalinearse
-    // (poligonos de estudio agrologico con otro levantamiento/vigencia) y dar clases y totales que
-    // no cuadran con lo que CIREN ya tiene oficialmente para el predio. Si estos campos existen,
-    // tienen PRIORIDAD sobre el cruce geometrico (se aplica mas abajo, justo antes de responder).
-    const romX = ['I','II','III','IV','V','VI','VII','VIII'];
-    const clasesPredioOficiales = {};
-    for (let n = 1; n <= 4; n++) {
-      const k = Object.keys(propsRol).find(kk => new RegExp('^rie' + n + 'rea_?ha$', 'i').test(kk));
-      const v = k ? parseFloat(String(propsRol[k]).replace(',', '.')) : NaN;
-      if (isFinite(v) && v > 0.005) clasesPredioOficiales[romX[n-1]] = (clasesPredioOficiales[romX[n-1]] || 0) + v;
-    }
-    for (let n = 1; n <= 8; n++) {
-      const k = Object.keys(propsRol).find(kk => new RegExp('^sec' + n + 'rea_?ha$', 'i').test(kk));
-      const v = k ? parseFloat(String(propsRol[k]).replace(',', '.')) : NaN;
-      if (isFinite(v) && v > 0.005) clasesPredioOficiales[romX[n-1]] = (clasesPredioOficiales[romX[n-1]] || 0) + v;
-    }
-    const hayClasesOficiales = Object.keys(clasesPredioOficiales).length > 0;
-    debug.push({ paso:'clases-oficiales-predio', encontradas: hayClasesOficiales, clasesPredioOficiales });
 
     let predio = gj.features[0];
     if (gj.features.length > 1) {
@@ -943,16 +904,21 @@ const manejadorSuelos = async (req, res) => {
     }
     let capaSuelo = cacheSuelosCapas.lista.find(l => capa.kw.some(k => normU(l.name).includes(k)));
     if (!capaSuelo && cacheSuelosCapas.lista.length === 1) capaSuelo = cacheSuelosCapas.lista[0];
-    if (!capaSuelo) return res.json({ ok:false, mensaje:'No encontre capa de suelos para la region. Superficie CIREN del predio: ' + superficieHa.toFixed(2) + ' ha.', superficieHa: superficieHa.toFixed(2), debug });
+    if (!capaSuelo) debug.push({ paso:'capa-suelo-no-existe', nota:'CIREN no tiene ninguna capa de suelo indexada para esta region; se omite la consulta CIREN y se intentara SIT Rural como respaldo mas abajo.' });
 
     // 4) Suelos que intersectan el predio (bbox del predio como filtro espacial)
+    // Si no hay capa CIREN para la region, gsu queda vacio "a proposito" (sin consultar nada)
+    // y el flujo sigue igual hacia SIT Rural mas abajo, en vez de cortarse aqui.
     const bb = turf.bbox(predio);
-    const urlSuelos = CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer/' + capaSuelo.id +
-      '/query?geometry=' + bb.join(',') + '&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
-    const rsu = await fetch(urlSuelos);
-    const gsu = await rsu.json();
-    debug.push({ paso:'suelos', capa: capaSuelo.name, id: capaSuelo.id, status: rsu.status, features: (gsu.features||[]).length,
-      camposEjemplo: gsu.features && gsu.features[0] ? Object.keys(gsu.features[0].properties||{}) : [] });
+    let gsu = { features: [] };
+    if (capaSuelo) {
+      const urlSuelos = CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer/' + capaSuelo.id +
+        '/query?geometry=' + bb.join(',') + '&geometryType=esriGeometryEnvelope&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+      const rsu = await fetch(urlSuelos);
+      gsu = await rsu.json();
+      debug.push({ paso:'suelos', capa: capaSuelo.name, id: capaSuelo.id, status: rsu.status, features: (gsu.features||[]).length,
+        camposEjemplo: gsu.features && gsu.features[0] ? Object.keys(gsu.features[0].properties||{}) : [] });
+    }
 
     if (!gsu.features || !gsu.features.length) {
       // ANTES esto cortaba la funcion aqui mismo y nunca se llegaba a intentar SIT Rural.
@@ -994,6 +960,7 @@ const manejadorSuelos = async (req, res) => {
     const caracteristicas = {};
     let camposDominante = null;
     try {
+      if (!capaSuelo) throw new Error('__sin_capa_ciren__'); // no hay capa CIREN para esta region: se omite (SIT Rural puede llenar esto mas abajo)
       if (!cacheMetaSuelos[capaSuelo.id]) {
         const rm = await fetch(CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer/' + capaSuelo.id + '?f=json');
         const jm = await rm.json();
@@ -1048,7 +1015,9 @@ const manejadorSuelos = async (req, res) => {
           if (campo) { serie = decodificar(campo, dp[campo]); break; }
         }
       }
-    } catch (e) { debug.push({ paso:'caracteristicas-error', error: e.message }); }
+    } catch (e) {
+      if (e.message !== '__sin_capa_ciren__') debug.push({ paso:'caracteristicas-error', error: e.message });
+    }
 
     let respPlantaciones = null;
     let respFruticolaNota = '';
@@ -1462,18 +1431,6 @@ const manejadorSuelos = async (req, res) => {
       }
     } catch(e) { debug.push({ paso:'uso-error', error: e.message }); }
 
-    // Prioridad: si CIREN ya trae las clases OFICIALES para este predio (rieX/secX), estas
-    // reemplazan al cruce geometrico de arriba (mas propenso a desalinearse con un estudio
-    // agrologico de otra vigencia). Si no existen para este predio, se mantiene el cruce
-    // geometrico (o el respaldo de SIT Rural) sin cambios — mismo comportamiento de siempre.
-    let fuenteClases = 'cruce geometrico con Estudio Agrologico de Suelos (CIREN)';
-    if (hayClasesOficiales) {
-      Object.keys(clases).forEach(k => delete clases[k]);
-      Object.keys(clasesPredioOficiales).forEach(k => { clases[k] = Math.round(clasesPredioOficiales[k] * 100) / 100; });
-      fuenteClases = 'registro oficial del predio en CIREN (mismos datos que SIT Rural)';
-      debug.push({ paso:'clases-fuente-elegida', fuente: fuenteClases, clases });
-    }
-
     // Diagnostico claro cuando las clases vienen vacias
     let notaClases = '';
     if (!Object.keys(clases).length && gsu.features && gsu.features.length) {
@@ -1491,7 +1448,7 @@ const manejadorSuelos = async (req, res) => {
       const simple = turf.simplify(predio, { tolerance: 0.00008, highQuality: false });
       predioGeo = simple.geometry;
     } catch (e) { try { predioGeo = predio.geometry; } catch (e2) {} }
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, fuenteClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
@@ -1501,55 +1458,6 @@ const manejadorSuelos = async (req, res) => {
 };
 app.post('/suelos-rol', manejadorSuelos);
 app.get('/suelos-rol', manejadorSuelos); // permite probar por link: /suelos-rol?rol=75-32&comuna=galvarino
-
-// ──────── USO DE SUELO Y VEGETACION PUNTUAL (CONAF, via geoservidor SMA) ────────
-// Consulta el catastro oficial de CONAF de Uso de Suelo y Vegetacion en el PUNTO EXACTO
-// del predio (lat/lon), sin depender de que el rol este en el catastro rural de CIREN.
-// Categorias posibles: Bosques, Praderas y Matorrales, Terrenos Agricolas, Areas Urbanas
-// e Industriales, Cuerpos de Agua, Humedales, Nieves Eternas y Glaciares, Areas Desprovistas
-// de Vegetacion. Sirve especialmente para roles que CIREN no tiene mapeados (parcelaciones,
-// loteos), donde igual se quiere saber si el terreno es forestal, agricola, matorral, etc.
-app.post('/uso-suelo-conaf', async (req, res) => {
-  const debug = [];
-  try {
-    const { lat, lon, region } = req.body || {};
-    const latN = parseFloat(String(lat || '').replace(',', '.'));
-    let lonN = parseFloat(String(lon || '').replace(',', '.'));
-    if (!isFinite(latN) || !isFinite(lonN)) return res.status(400).json({ ok: false, mensaje: 'Faltan coordenadas del predio (lat/lon).' });
-    if (lonN > 0) lonN = -lonN; // Chile siempre es longitud oeste (negativa)
-
-    const regionU = normU(region || '');
-    const capaR = CONAF_CAPAS_REGION.find(cr => cr.kw.some(k => regionU.includes(k)));
-    if (!capaR) return res.json({ ok: false, mensaje: 'No pude identificar la region "' + region + '" para elegir la capa CONAF correcta. Completa la region en el formulario.' });
-
-    const url = CONAF_SMA_BASE + '/' + capaR.id + '/query?geometry=' + lonN + ',' + latN +
-      '&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects' +
-      '&outFields=USO,SUBUSO,ESTRUCTURA,COBERTURA,ESPECI1_CI,ESPECI1_CO,SUPERF_HA,NOM_COM,NOM_REG&returnGeometry=false&f=json';
-    const r = await fetch(url);
-    const j = await r.json();
-    debug.push({ paso: 'conaf-query', url, status: r.status, features: (j.features || []).length });
-
-    if (j.error) return res.json({ ok: false, mensaje: 'El servicio CONAF/SMA respondio con error: ' + (j.error.message || JSON.stringify(j.error)), debug });
-    if (!j.features || !j.features.length) {
-      return res.json({ ok: true, encontrado: false,
-        mensaje: 'El punto del predio no intersecta ningun poligono del catastro CONAF de uso de suelo/vegetacion (puede ser una zona sin cobertura del catastro, o el punto cae justo en un limite entre poligonos). Fuente: CONAF, via geoservidor SMA.',
-        debug });
-    }
-    const p = j.features[0].attributes || {};
-    res.json({
-      ok: true, encontrado: true,
-      uso: p.USO || null, subuso: p.SUBUSO || null, estructura: p.ESTRUCTURA || null,
-      cobertura: p.COBERTURA || null, especie: p.ESPECI1_CI || p.ESPECI1_CO || null,
-      superficiePoligonoHa: (p.SUPERF_HA != null && isFinite(p.SUPERF_HA)) ? Math.round(p.SUPERF_HA * 100) / 100 : null,
-      comuna: p.NOM_COM || null, regionCatastro: p.NOM_REG || null,
-      fuente: 'CONAF - Catastro de Uso de Suelo y Vegetacion (via geoservidor SMA, capa IDE/Biodiversidad)',
-      debug
-    });
-  } catch (err) {
-    console.error('Error /uso-suelo-conaf:', err);
-    res.json({ ok: false, mensaje: 'Error consultando CONAF: ' + err.message, debug });
-  }
-});
 
 // ──────── DIAGNOSTICO SIT RURAL v2 (abrir en el navegador: /diag-sitrural) ────────
 // Lee el codigo de la pagina del visor SIT Rural y extrae las direcciones reales
