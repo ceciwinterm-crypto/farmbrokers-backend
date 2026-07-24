@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v53 (SIT Rural + normativa + energia + correccion tipeo)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v54 (fix: SIT Rural ya se intenta cuando CIREN no tiene suelo)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -916,11 +916,15 @@ const manejadorSuelos = async (req, res) => {
       camposEjemplo: gsu.features && gsu.features[0] ? Object.keys(gsu.features[0].properties||{}) : [] });
 
     if (!gsu.features || !gsu.features.length) {
-      return res.json({ ok:true, superficieHa: superficieHa.toFixed(2), clases:{}, serie:'', mensaje:'Poligono encontrado (superficie CIREN) pero sin datos de suelo en la capa. Completa clases manualmente.', debug });
+      // ANTES esto cortaba la funcion aqui mismo y nunca se llegaba a intentar SIT Rural.
+      // Ahora se deja constancia en el debug y el flujo SIGUE: mas abajo, SIT Rural (6c)
+      // y el catastro de uso CONAF (6d/7) igual se intentan como respaldo. Si al final
+      // del todo tampoco encontraron nada, recien ahi se informa "sin datos" (ver notaClases).
+      debug.push({ paso:'suelos-ciren-vacio', nota:'CIREN no tiene poligonos de suelo para este predio; se intentara SIT Rural como respaldo mas abajo.' });
     }
 
     // 5) Detectar campo de clase y de serie
-    const props0 = gsu.features[0].properties || {};
+    const props0 = (gsu.features[0] && gsu.features[0].properties) || {};
     const claveClase = Object.keys(props0).find(k => /capac|cus|clase|us[oe]?$/i.test(k) && claseDesdeTexto(props0[k])) ||
                        Object.keys(props0).find(k => claseDesdeTexto(props0[k]));
     const claveSerie = Object.keys(props0).find(k => /serie|nomserie|asociaci/i.test(k));
@@ -1410,6 +1414,8 @@ const manejadorSuelos = async (req, res) => {
       const muestra = gsu.features[0].properties || {};
       notaClases = 'ATENCION: encontre ' + gsu.features.length + ' poligonos de suelo pero no pude leer la clase. Propiedades de muestra: ' + JSON.stringify(muestra).substring(0, 400);
       debug.push({ paso:'muestra-suelo', propiedades: muestra });
+    } else if (!Object.keys(clases).length) {
+      notaClases = 'Ni CIREN ni SIT Rural tienen datos de clase de suelo publicados para este predio (zona sin levantamiento agrologico disponible). Completa la clasificacion manualmente con el certificado de avaluo o criterio profesional en terreno.';
     }
 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
