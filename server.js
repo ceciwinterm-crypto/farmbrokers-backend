@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v57 (nuevo: /uso-suelo-conaf, consulta puntual de vegetacion/uso de suelo CONAF independiente de CIREN)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v58 (fix critico: clases de suelo ahora priorizan el registro OFICIAL del predio en CIREN, rieX/secX ha - mismo dato que SIT Rural - en vez del cruce geometrico que podia desalinearse)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -898,6 +898,29 @@ const manejadorSuelos = async (req, res) => {
     const superficieSII = kSup ? (parseFloat(String(propsRol[kSup]).replace(',', '.')) || null) : null;
     debug.push({ paso:'superficie-sii', campo: kSup || 'no encontrado', valor: superficieSII });
 
+    // Clases de suelo OFICIALES que CIREN ya trae calculadas para ESTE predio especifico, en el
+    // mismo registro de PROPIEDADES_RURALES (campos rie1rea_ha..rie4rea_ha para riego clases I-IV,
+    // y sec1rea_ha..sec8rea_ha para secano clases I-VIII). Es la MISMA fuente que muestra SIT Rural
+    // al hacer clic en el predio. Es mas confiable que cruzar geometricamente el poligono del predio
+    // con la capa separada de ESTUDIO_AGROLOGICO_SUELOS (mas abajo): ese cruce puede desalinearse
+    // (poligonos de estudio agrologico con otro levantamiento/vigencia) y dar clases y totales que
+    // no cuadran con lo que CIREN ya tiene oficialmente para el predio. Si estos campos existen,
+    // tienen PRIORIDAD sobre el cruce geometrico (se aplica mas abajo, justo antes de responder).
+    const romX = ['I','II','III','IV','V','VI','VII','VIII'];
+    const clasesPredioOficiales = {};
+    for (let n = 1; n <= 4; n++) {
+      const k = Object.keys(propsRol).find(kk => new RegExp('^rie' + n + 'rea_?ha$', 'i').test(kk));
+      const v = k ? parseFloat(String(propsRol[k]).replace(',', '.')) : NaN;
+      if (isFinite(v) && v > 0.005) clasesPredioOficiales[romX[n-1]] = (clasesPredioOficiales[romX[n-1]] || 0) + v;
+    }
+    for (let n = 1; n <= 8; n++) {
+      const k = Object.keys(propsRol).find(kk => new RegExp('^sec' + n + 'rea_?ha$', 'i').test(kk));
+      const v = k ? parseFloat(String(propsRol[k]).replace(',', '.')) : NaN;
+      if (isFinite(v) && v > 0.005) clasesPredioOficiales[romX[n-1]] = (clasesPredioOficiales[romX[n-1]] || 0) + v;
+    }
+    const hayClasesOficiales = Object.keys(clasesPredioOficiales).length > 0;
+    debug.push({ paso:'clases-oficiales-predio', encontradas: hayClasesOficiales, clasesPredioOficiales });
+
     let predio = gj.features[0];
     if (gj.features.length > 1) {
       // El rol puede venir en varias partes (paños separados): se unen todas para el analisis
@@ -1439,6 +1462,18 @@ const manejadorSuelos = async (req, res) => {
       }
     } catch(e) { debug.push({ paso:'uso-error', error: e.message }); }
 
+    // Prioridad: si CIREN ya trae las clases OFICIALES para este predio (rieX/secX), estas
+    // reemplazan al cruce geometrico de arriba (mas propenso a desalinearse con un estudio
+    // agrologico de otra vigencia). Si no existen para este predio, se mantiene el cruce
+    // geometrico (o el respaldo de SIT Rural) sin cambios — mismo comportamiento de siempre.
+    let fuenteClases = 'cruce geometrico con Estudio Agrologico de Suelos (CIREN)';
+    if (hayClasesOficiales) {
+      Object.keys(clases).forEach(k => delete clases[k]);
+      Object.keys(clasesPredioOficiales).forEach(k => { clases[k] = Math.round(clasesPredioOficiales[k] * 100) / 100; });
+      fuenteClases = 'registro oficial del predio en CIREN (mismos datos que SIT Rural)';
+      debug.push({ paso:'clases-fuente-elegida', fuente: fuenteClases, clases });
+    }
+
     // Diagnostico claro cuando las clases vienen vacias
     let notaClases = '';
     if (!Object.keys(clases).length && gsu.features && gsu.features.length) {
@@ -1456,7 +1491,7 @@ const manejadorSuelos = async (req, res) => {
       const simple = turf.simplify(predio, { tolerance: 0.00008, highQuality: false });
       predioGeo = simple.geometry;
     } catch (e) { try { predioGeo = predio.geometry; } catch (e2) {} }
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, fuenteClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
