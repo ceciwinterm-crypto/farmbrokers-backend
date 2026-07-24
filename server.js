@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v54 (fix: SIT Rural ya se intenta cuando CIREN no tiene suelo)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v55 (fix: SIT Rural ahora tambien extrae clase de suelo, no solo caracteristicas)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -1210,6 +1210,21 @@ const manejadorSuelos = async (req, res) => {
           const listaSeries = Object.entries(seriesHa).sort((x, y) => y[1] - x[1]).map(e => e[0]);
           if (listaSeries.length) serie = listaSeries.join(', ');
           debug.push({ paso:'sitrural-series', series: Object.entries(seriesHa).map(e => e[0] + ' (' + (Math.round(e[1]*10)/10) + ' ha)') });
+
+          // Clase de capacidad de uso (I a VIII): mismo criterio que la capa CIREN principal
+          // (campo cuyo nombre calza con /capac|cus|clase|us[oe]?$/i Y cuyo valor decodifica a
+          // numero romano I-VIII), aplicado sobre CADA poligono para sumar hectareas por clase.
+          if (!Object.keys(clases).length) {
+            const rxClase = /capac|cus|clase|us[oe]?$/i;
+            for (const { f, ha } of interSit) {
+              const dp = f.properties || {};
+              const kClase = Object.keys(dp).find(k => rxClase.test(k) && claseDesdeTexto(dp[k]));
+              if (!kClase) continue;
+              const cl = claseDesdeTexto(dp[kClase]);
+              if (cl) clases[cl] = (clases[cl] || 0) + ha;
+            }
+            if (Object.keys(clases).length) debug.push({ paso:'sitrural-clases', clases });
+          }
           if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
         }
       }
