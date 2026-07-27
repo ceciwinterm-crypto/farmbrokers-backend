@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v57 (clasificacion SII fiscal rie/sec del rol, mostrada junto a la agrologica)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v58 (fix: la clasificacion SII fiscal se lee de la capa Propiedades rurales de SIT Rural — CIREN no trae esos campos)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -899,7 +899,7 @@ const manejadorSuelos = async (req, res) => {
       const vS = kS ? (parseFloat(String(propsRol[kS]).replace(',', '.')) || 0) : 0;
       if (vS > 0) { clasesSIIsecano[ROMSII[ci-1]] = Math.round(vS*100)/100; totalClasesSII += vS; }
     }
-    const clasesSIIfiscal = totalClasesSII > 0
+    let clasesSIIfiscal = totalClasesSII > 0
       ? { riego: clasesSIIriego, secano: clasesSIIsecano, total: Math.round(totalClasesSII*100)/100 }
       : null;
     debug.push({ paso:'clases-sii-fiscal', encontrado: !!clasesSIIfiscal, detalle: clasesSIIfiscal,
@@ -1125,6 +1125,82 @@ const manejadorSuelos = async (req, res) => {
           return null;
         }
       };
+
+      // ── Clasificacion SII (fiscal): capa "Propiedades rurales <comuna>" de SIT Rural.
+      // Verificado contra el servidor: los campos rieN/secN NO existen en CIREN
+      // (su capa de propiedades solo trae rol y comuna); viven unicamente en esta
+      // capa del geoserver de SIT Rural, la misma tabla que muestra el visor.
+      try {
+        if (!clasesSIIfiscal) {
+          const candPropSit = (cacheSitrural.capas || [])
+            .filter(x => /propiedad/i.test(x.t + ' ' + x.n) && esDeLaComuna(x))
+            .slice(0, 2);
+          debug.push({ paso:'sitrural-prop-fiscal-capas', capas: candPropSit.map(x => x.n + ' | ' + x.t) });
+          for (const cp of candPropSit) {
+            let geomP = 'the_geom';
+            try {
+              const rdp = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=DescribeFeatureType&typeName=' + encodeURIComponent(cp.n));
+              const xsdp = await rdp.text();
+              const rxElP = /<xsd:element[^>]*name="([^"]+)"[^>]*type="([^"]+)"[^>]*>/g;
+              let mp;
+              while ((mp = rxElP.exec(xsdp)) !== null) {
+                if (/gml:/.test(mp[2]) && /Geometry|Point|Polygon|Line|Surface|Curve/i.test(mp[2])) geomP = mp[1];
+              }
+            } catch (e) {}
+            const baseP = SIT_WFS + '?service=WFS&request=GetFeature&typeName=' + encodeURIComponent(cp.n) +
+              '&outputFormat=application/json&maxFeatures=200';
+            const intentosP = [
+              ['1.0 BBOX+CRS', baseP + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+                encodeURIComponent("BBOX(" + geomP + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')")],
+              ['1.1 bbox lon-lat', baseP + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[0], bbS[1], bbS[2], bbS[3], 'EPSG:4326'].join(',')],
+              ['1.1 bbox lat-lon', baseP + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[1], bbS[0], bbS[3], bbS[2], 'urn:x-ogc:def:crs:EPSG:4326'].join(',')]
+            ];
+            let featsP = null;
+            for (const [etq, url] of intentosP) {
+              const j = await traerJson(url, 'fiscal ' + cp.t + ' | ' + etq);
+              if (j && j.features && j.features.length) { featsP = j.features; break; }
+            }
+            if (!featsP) continue;
+            // El registro correcto es el poligono que mas se superpone con el predio CIREN
+            let mejorP = null;
+            for (const f of featsP) {
+              try {
+                const inter = turf.intersect(turf.featureCollection([predio, f]));
+                if (!inter) continue;
+                const ha = turf.area(inter) / 10000;
+                if (ha < 0.05) continue;
+                if (!mejorP || ha > mejorP.ha) mejorP = { f, ha };
+              } catch (e) {}
+            }
+            if (!mejorP) {
+              for (const f of featsP) {
+                try { if (turf.booleanPointInPolygon(turf.point(centro), f)) { mejorP = { f, ha: 0 }; break; } } catch (e) {}
+              }
+            }
+            if (!mejorP) { debug.push({ paso:'sitrural-prop-fiscal', capa: cp.t, nota:'ningun poligono coincide con el predio' }); continue; }
+            const pf = mejorP.f.properties || {};
+            const riegoF = {}, secanoF = {};
+            let totF = 0;
+            for (let ci = 1; ci <= 8; ci++) {
+              if (ci <= 4) {
+                const kR = Object.keys(pf).find(k => new RegExp('^rie' + ci + 'rea', 'i').test(k));
+                const vR = kR ? (parseFloat(String(pf[kR]).replace(',', '.')) || 0) : 0;
+                if (vR > 0) { riegoF[ROMSII[ci-1]] = Math.round(vR*100)/100; totF += vR; }
+              }
+              const kS = Object.keys(pf).find(k => new RegExp('^sec' + ci + 'rea', 'i').test(k));
+              const vS = kS ? (parseFloat(String(pf[kS]).replace(',', '.')) || 0) : 0;
+              if (vS > 0) { secanoF[ROMSII[ci-1]] = Math.round(vS*100)/100; totF += vS; }
+            }
+            debug.push({ paso:'sitrural-prop-fiscal', capa: cp.t, solapeHa: Math.round(mejorP.ha*100)/100,
+              nombrePredio: pf.nompredrea || pf.nompred || pf.nombre || null, totalFiscal: Math.round(totF*100)/100,
+              camposEjemplo: Object.keys(pf).slice(0, 30) });
+            if (totF > 0) {
+              clasesSIIfiscal = { riego: riegoF, secano: secanoF, total: Math.round(totF*100)/100 };
+              break;
+            }
+          }
+        }
+      } catch (e) { debug.push({ paso:'sitrural-prop-fiscal-error', error: e.message }); }
 
       for (const cand of candidatasSit.slice(0, 2)) {
         // 1) Preguntar al servidor el nombre real del campo de geometria y los atributos
