@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v55 (fix: SIT Rural ahora tambien extrae clase de suelo, no solo caracteristicas)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v56 (fuente real de suelo visible: CIREN vs SIT Rural, ya no dice siempre CIREN)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -938,6 +938,10 @@ const manejadorSuelos = async (req, res) => {
     // 6) Interseccion y hectareas por clase + lista de poligonos ordenada por superficie
     const clases = {};
     let serie = '';
+    // Rastrea de DONDE vino cada dato realmente, para no decir siempre "CIREN" cuando
+    // en realidad SIT Rural fue el que encontro clase/serie/caracteristicas. Se completa
+    // mas abajo, justo cuando cada bloque (CIREN o SIT Rural) efectivamente aporta el dato.
+    const fuentePorCampo = { clases: null, serie: null, caracteristicas: null };
     const intersecciones = [];
     for (const f of gsu.features) {
       try {
@@ -947,8 +951,8 @@ const manejadorSuelos = async (req, res) => {
         if (ha < 0.005) continue;
         intersecciones.push({ f, ha });
         const clase = claveClase ? claseDesdeTexto(f.properties[claveClase]) : null;
-        if (clase) clases[clase] = (clases[clase] || 0) + ha;
-        if (!serie && claveSerie && f.properties[claveSerie]) serie = String(f.properties[claveSerie]);
+        if (clase) { clases[clase] = (clases[clase] || 0) + ha; fuentePorCampo.clases = 'CIREN'; }
+        if (!serie && claveSerie && f.properties[claveSerie]) { serie = String(f.properties[claveSerie]); fuentePorCampo.serie = 'CIREN'; }
       } catch(e) { debug.push({ paso:'interseccion-error', error: e.message }); }
     }
     intersecciones.sort((a, b) => b.ha - a.ha);
@@ -1002,7 +1006,7 @@ const manejadorSuelos = async (req, res) => {
           const dp = f.properties || {};
           const campo = candidatos.find(k => esValorUtil(dp[k])) ||
                         Object.keys(dp).find(k => rx.test(k) && esValorUtil(dp[k]));
-          if (campo) { caracteristicas[clave] = decodificar(campo, dp[campo]); break; }
+          if (campo) { caracteristicas[clave] = decodificar(campo, dp[campo]); fuentePorCampo.caracteristicas = 'CIREN'; break; }
         }
       }
 
@@ -1012,7 +1016,7 @@ const manejadorSuelos = async (req, res) => {
         for (const { f } of intersecciones) {
           const dp = f.properties || {};
           const campo = candS.find(k => esValorUtil(dp[k])) || Object.keys(dp).find(k => rxS.test(k) && esValorUtil(dp[k]));
-          if (campo) { serie = decodificar(campo, dp[campo]); break; }
+          if (campo) { serie = decodificar(campo, dp[campo]); fuentePorCampo.serie = 'CIREN'; break; }
         }
       }
     } catch (e) {
@@ -1195,7 +1199,7 @@ const manejadorSuelos = async (req, res) => {
           let algunaSit = false;
           for (const [clave, rx, evitar] of OBJ_SIT) {
             const v = tomar(rx, evitar);
-            if (v) { caracteristicas[clave] = v; algunaSit = true; }
+            if (v) { caracteristicas[clave] = v; algunaSit = true; fuentePorCampo.caracteristicas = 'SIT Rural'; }
           }
           // Series de suelo del predio: puede haber varias (ej. "Perquenco, Metrenco 1, Metrenco 5").
           // Se recorren TODOS los poligonos que tocan el predio, se agrupan por serie+variacion
@@ -1216,7 +1220,7 @@ const manejadorSuelos = async (req, res) => {
             seriesHa[nombre] = (seriesHa[nombre] || 0) + ha;
           }
           const listaSeries = Object.entries(seriesHa).sort((x, y) => y[1] - x[1]).map(e => e[0]);
-          if (listaSeries.length) serie = listaSeries.join(', ');
+          if (listaSeries.length) { serie = listaSeries.join(', '); fuentePorCampo.serie = 'SIT Rural'; }
           debug.push({ paso:'sitrural-series', series: Object.entries(seriesHa).map(e => e[0] + ' (' + (Math.round(e[1]*10)/10) + ' ha)') });
 
           // Clase de capacidad de uso (I a VIII): mismo criterio que la capa CIREN principal
@@ -1231,7 +1235,7 @@ const manejadorSuelos = async (req, res) => {
               const cl = claseDesdeTexto(dp[kClase]);
               if (cl) clases[cl] = (clases[cl] || 0) + ha;
             }
-            if (Object.keys(clases).length) debug.push({ paso:'sitrural-clases', clases });
+            if (Object.keys(clases).length) { fuentePorCampo.clases = 'SIT Rural'; debug.push({ paso:'sitrural-clases', clases }); }
           }
           if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
         }
@@ -1448,7 +1452,15 @@ const manejadorSuelos = async (req, res) => {
       const simple = turf.simplify(predio, { tolerance: 0.00008, highQuality: false });
       predioGeo = simple.geometry;
     } catch (e) { try { predioGeo = predio.geometry; } catch (e2) {} }
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', debug });
+
+    // Fuente REAL de los datos (honesto): puede ser solo CIREN, solo SIT Rural, o una
+    // mezcla (ej. clase vino de SIT Rural pero uso de suelo vino de CONAF/CIREN aparte).
+    const fuentesUsadas = [...new Set(Object.values(fuentePorCampo).filter(Boolean))];
+    const fuenteSuelo = fuentesUsadas.length === 0 ? 'Sin datos de suelo' :
+      fuentesUsadas.length === 1 ? fuentesUsadas[0] : fuentesUsadas.join(' + ');
+    debug.push({ paso:'fuente-real-suelo', fuentePorCampo, resumen: fuenteSuelo });
+
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', fuenteSuelo, fuentePorCampo, debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
