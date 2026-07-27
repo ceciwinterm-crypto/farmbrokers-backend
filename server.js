@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v56 (fuente real de suelo visible: CIREN vs SIT Rural, ya no dice siempre CIREN)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v57 (clasificacion SII fiscal rie/sec del rol, mostrada junto a la agrologica)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
@@ -81,6 +81,7 @@ PROPIETARIO: ${(datos.roles || []).map(r => r.datos?.propietario).filter(Boolean
 AVALUO TOTAL: $${datos.avaluoTotal || 0} | UF BASE: ${datos.ufBase}
 SUPERFICIES: Titulos ${datos.superfTitulos} ha, SII ${datos.superfSIITotal} ha, Google Earth ${datos.superfGoogleEarth} ha
 SUELOS: ${datos.suelosDetalle || ("Clase I " + datos.c1 + " ha, II " + datos.c2 + " ha, III " + datos.c3 + " ha, IV " + datos.c4 + " ha")}
+CLASIFICACION SII (fiscal, base del avaluo — puede diferir de la agrologica): ${datos.clasesSIITxt || "sin desglose fiscal disponible"}
 SERIE: ${datos.seriesSuelo} | PENDIENTE: ${datos.pendiente} | DRENAJE: ${datos.drenaje}
 PLANTACIONES FRUTALES (catastro CIREN): ${datos.plantacionesTxt || "sin plantaciones registradas en el catastro fruticola"}
 AGUA: ${datos.recursosHidricosTxt || (datos.cn1 ? datos.cn1 + ' (' + datos.ca1 + ' acciones, ' + datos.cq1 + ' l/s)' : 'sin derechos de agua informados')}
@@ -98,7 +99,7 @@ Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codi
 - ubicacion: 1-2 oraciones con coordenadas, distancia a Santiago y acceso
 - titulos: 1 parrafo breve sobre inscripcion y deslindes
 - topografia: 2 oraciones estimando la composicion del relieve en porcentajes aproximados a partir de las clases de suelo (Clases I a III = sectores planos; IV = lomajes suaves; VI = laderas; VII y VIII = cerros y quebradas). Estilo: "Predio compuesto en un 80% por cerros y quebradas, un 13% por laderas y un 7% por sectores de lomaje suave."
-- suelos: 1 parrafo breve sobre clasificacion de suelos segun SII
+- suelos: 1 parrafo breve sobre clasificacion de suelos. Si existen la clasificacion agrologica (CIREN/SIT Rural) y la CLASIFICACION SII fiscal y difieren, menciona AMBAS con sus cifras y aclara que la fiscal es la registrada por el SII para el avaluo y la agrologica la del estudio de suelos; nunca las mezcles como si fueran una sola
 - ciren: 1 parrafo breve con caracteristicas de la serie de suelo
 - usoActual: 2 oraciones breves describiendo la composicion del uso actual del suelo segun el catastro CONAF (que uso domina, que implica para el predio)
 - clima: 1 parrafo sobre el clima de la zona. Si hay DATOS CLIMATICOS medidos, usalos como base (cifras reales del punto del predio) en vez de generalidades
@@ -872,7 +873,7 @@ const manejadorSuelos = async (req, res) => {
       else return res.json({ ok:true, noAgricola:true,
         mensaje:'El rol ' + rolLimpio + ' no aparece en el catastro rural CIREN: se informa como NO AGRICOLA (propiedad urbana u otro destino). Sus demas antecedentes (avaluo, superficie, inscripciones) se incluyen normalmente en el informe.',
         superficieHa:'0', superficieSII:null, clases:{}, serie:'', usos:{}, plantaciones:null, fruticolaNota:'', capaFruticola:null,
-        caracteristicas:{}, camposDominante:null, capacidadUso:'NO AGRICOLA', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null,
+        caracteristicas:{}, camposDominante:null, capacidadUso:'NO AGRICOLA', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null, clasesSIIfiscal:null,
         fuente:'CIREN - IDE Minagri (referencial)', debug });
     }
 
@@ -881,6 +882,28 @@ const manejadorSuelos = async (req, res) => {
     const kSup = Object.keys(propsRol).find(k => /SUPERF/i.test(k) && propsRol[k] !== null && String(propsRol[k]).trim() !== '');
     const superficieSII = kSup ? (parseFloat(String(propsRol[kSup]).replace(',', '.')) || null) : null;
     debug.push({ paso:'superficie-sii', campo: kSup || 'no encontrado', valor: superficieSII });
+
+    // Clasificacion de suelos SII (fiscal): campos rieNrea_ha / secNrea_ha del propio registro
+    // del catastro de propiedades rurales (la misma tabla que muestra el visor de SIT Rural).
+    // Es la clasificacion que el SII usa para el avaluo — NO es la capacidad de uso CIREN.
+    const ROMSII = ['I','II','III','IV','V','VI','VII','VIII'];
+    const clasesSIIriego = {}, clasesSIIsecano = {};
+    let totalClasesSII = 0;
+    for (let ci = 1; ci <= 8; ci++) {
+      if (ci <= 4) {
+        const kR = Object.keys(propsRol).find(k => new RegExp('^rie' + ci + 'rea', 'i').test(k));
+        const vR = kR ? (parseFloat(String(propsRol[kR]).replace(',', '.')) || 0) : 0;
+        if (vR > 0) { clasesSIIriego[ROMSII[ci-1]] = Math.round(vR*100)/100; totalClasesSII += vR; }
+      }
+      const kS = Object.keys(propsRol).find(k => new RegExp('^sec' + ci + 'rea', 'i').test(k));
+      const vS = kS ? (parseFloat(String(propsRol[kS]).replace(',', '.')) || 0) : 0;
+      if (vS > 0) { clasesSIIsecano[ROMSII[ci-1]] = Math.round(vS*100)/100; totalClasesSII += vS; }
+    }
+    const clasesSIIfiscal = totalClasesSII > 0
+      ? { riego: clasesSIIriego, secano: clasesSIIsecano, total: Math.round(totalClasesSII*100)/100 }
+      : null;
+    debug.push({ paso:'clases-sii-fiscal', encontrado: !!clasesSIIfiscal, detalle: clasesSIIfiscal,
+      nota: gj.features.length > 1 ? 'Rol en varias partes: la clasificacion fiscal se toma del primer registro (es del rol completo).' : undefined });
 
     let predio = gj.features[0];
     if (gj.features.length > 1) {
@@ -1460,7 +1483,7 @@ const manejadorSuelos = async (req, res) => {
       fuentesUsadas.length === 1 ? fuentesUsadas[0] : fuentesUsadas.join(' + ');
     debug.push({ paso:'fuente-real-suelo', fuentePorCampo, resumen: fuenteSuelo });
 
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, fuente:'CIREN - IDE Minagri (referencial)', fuenteSuelo, fuentePorCampo, debug });
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, clasesSIIfiscal, fuente:'CIREN - IDE Minagri (referencial)', fuenteSuelo, fuentePorCampo, debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
