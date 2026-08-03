@@ -5,7 +5,7 @@ const cors = require('cors');
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '60mb' }));   // el informe viaja con sus imagenes en base64
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SIMPLEAPI_KEY = process.env.SIMPLEAPI_KEY;
@@ -61,10 +61,37 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v58 (fix: la clasificacion SII fiscal se lee de la capa Propiedades rurales de SIT Rural — CIREN no trae esos campos)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v59 (informe en Word nativo .docx via /generar-word + clasificacion SII fiscal desde SIT Rural)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
+// ── Informe en Word NATIVO (.docx) ──────────────────────────────────────────
+// El frontend serializa el informe ya renderizado en bloques simples
+// (seccion, subtitulo, parrafo, tabla, imagen, lista...) y aqui se arman como
+// elementos nativos de Word. Antes se enviaba el HTML renombrado .doc, que
+// Word abria pero desarmaba: este endpoint entrega un .docx de verdad.
+app.post('/generar-word', async (req, res) => {
+  try {
+    const { bloques, meta } = req.body || {};
+    if (!Array.isArray(bloques) || !bloques.length) {
+      return res.status(400).json({ error: 'No se recibieron bloques del informe' });
+    }
+    const { generarDocx } = require('./wordgen');
+    const buffer = await generarDocx(bloques, meta || {});
+    const nombre = 'Informe_Tasacion_' +
+      String((meta && (meta.numTasacion || meta.predioNombre)) || 'FarmBrokers')
+        .normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-zA-Z0-9]+/g, '-')
+        .replace(/^-|-$/g, '') + '.docx';
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+    res.setHeader('Content-Disposition', 'attachment; filename="' + nombre + '"');
+    res.setHeader('X-Nombre-Archivo', nombre);
+    res.send(buffer);
+  } catch (e) {
+    console.error('generar-word error:', e);
+    res.status(500).json({ error: 'No se pudo generar el Word: ' + e.message });
+  }
+});
+
 app.post('/generar-informe', async (req, res) => {
   try {
     const datos = req.body;
