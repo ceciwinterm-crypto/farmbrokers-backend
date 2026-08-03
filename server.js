@@ -1,4 +1,6 @@
-// Servidor backend para Farm Brokers - Plataforma de Tasaciones
+// ============================================================
+// SERVER.JS - PARTE 1 (copia esto primero)
+// ============================================================
 
 const express = require('express');
 const cors = require('cors');
@@ -9,19 +11,13 @@ app.use(express.json({ limit: '10mb' }));
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SIMPLEAPI_KEY = process.env.SIMPLEAPI_KEY;
-const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL; // opcional: fija la ruta exacta
+const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL;
 const PORT = process.env.PORT || 3000;
 
 if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
-if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
+if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY');
 
-// Extrae el primer objeto JSON BALANCEADO de un texto (cuenta llaves, respeta strings/escapes).
-// Mas robusto que un regex "primera { a ultima }": si el texto de Claude trae explicaciones
-// antes/despues del JSON, o si el JSON tiene objetos/arreglos anidados, esto encuentra el
-// cierre real del primer objeto en vez de agarrar basura hasta la ultima llave del texto.
-// Distancia de edicion (Levenshtein) entre dos strings: cuantas letras hay que cambiar/
-// agregar/quitar para pasar de una a la otra. Se usa para detectar errores de tipeo en
-// nombres de comuna (ej. "OVLLE" vs "OVALLE" = 1 letra de diferencia) sin adivinar a ciegas.
+// ── Funciones auxiliares ──
 function distanciaLevenshtein(a, b) {
   const m = a.length, n = b.length;
   if (m === 0) return n;
@@ -57,14 +53,16 @@ function extraerJSON(texto) {
       }
     }
   }
-  return null; // nunca cerro: la respuesta se corto (truncada por max_tokens u otra causa)
+  return null;
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v58 (fix: la clasificacion SII fiscal se lee de la capa Propiedades rurales de SIT Rural — CIREN no trae esos campos)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API', simpleapi: !!SIMPLEAPI_KEY });
 });
 
-// ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
+// ════════════════════════════════════════════════════════════
+// 1. GENERAR INFORME (IA)
+// ════════════════════════════════════════════════════════════
 app.post('/generar-informe', async (req, res) => {
   try {
     const datos = req.body;
@@ -146,11 +144,9 @@ Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado
   }
 });
 
-// ──────────────── BUSQUEDA DE PROPIETARIO POR ROL (IA + busqueda web) ────────────────
-// Usa el modelo con busqueda web activada para encontrar el "Rol de Avaluos" oficial
-// que publican las municipalidades (el mismo tipo de documento SII/gobierno que se uso
-// para verificar Mahuidanche y El Portal). NUNCA se usa como dato final: siempre queda
-// marcado como "verificar manualmente" y siempre se exige la URL fuente para poder revisarlo.
+// ════════════════════════════════════════════════════════════
+// 2. BUSCAR PROPIETARIO POR ROL
+// ════════════════════════════════════════════════════════════
 app.post('/buscar-propietario', async (req, res) => {
   try {
     const { rol, comuna, region } = req.body || {};
@@ -185,10 +181,7 @@ Reglas estrictas para el Paso 2:
 - Nunca calcules ni inventes un RUT ni su dígito verificador: solo repórtalo si lo viste literalmente en una fuente real.
 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
-{"encontrado":true|false,"propietario":"...","nombrePredio":"...","fuenteUrl":"...","fuenteNombre":"...","fechaDocumento":"...","esEmpresa":true|false,"rut":"...","rutFuenteUrl":"...","rutFuenteNombre":"...","notaIncertidumbre":"..."}
-
-Si encontrado es false, deja los demas campos como "" o false.
-"notaIncertidumbre" es para que menciones cualquier duda (ej. "hay otra empresa con nombre muy similar", "el documento es de 2018 y podria estar desactualizado", "no se encontro coincidencia exacta de RUT").`;
+{"encontrado":true|false,"propietario":"...","nombrePredio":"...","fuenteUrl":"...","fuenteNombre":"...","fechaDocumento":"...","esEmpresa":true|false,"rut":"...","rutFuenteUrl":"...","rutFuenteNombre":"...","notaIncertidumbre":"..."}`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -212,9 +205,7 @@ Si encontrado es false, deja los demas campos como "" o false.
     }
 
     const data = await response.json();
-    // El texto final puede venir repartido en varios bloques (busquedas intermedias + respuesta final)
     const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
-    // Fuentes que el modelo efectivamente consulto (para mostrar trazabilidad aunque el JSON falle)
     const fuentesConsultadas = (data.content || [])
       .filter(b => b.type === 'web_search_tool_result')
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
@@ -231,9 +222,6 @@ Si encontrado es false, deja los demas campos como "" o false.
         fuentesConsultadas });
     }
 
-    // ── Segunda capa de seguridad (no depender solo del prompt): ──
-    // solo se entrega RUT si el nombre del propietario realmente PARECE una empresa.
-    // Si no calza el patron, se descarta el RUT aunque el modelo lo haya devuelto.
     const propietarioTxt = String(resultado.propietario || '');
     const pareceEmpresa = /\bLIMITADA\b|\bLTDA\b|\bS\.?A\.?\b|\bSPA\b|\bSOCIEDAD\b|\bEIRL\b|\bCOMERCIAL\b|^AGRICOLA\b|\bINMOBILIARIA\b|\bINVERSIONES\b|\bFORESTAL\b|\bFRUTICOLA\b|\bCONSTRUCTORA\b|\bTRANSPORTES\b/i.test(propietarioTxt);
     const rutSeguro = pareceEmpresa ? String(resultado.rut || '').trim() : '';
@@ -258,7 +246,9 @@ Si encontrado es false, deja los demas campos como "" o false.
   }
 });
 
-// ──────────────── BUSQUEDA POR ROL VIA SIMPLEAPI (Mapas SII) ────────────────
+// ════════════════════════════════════════════════════════════
+// 3. BUSCAR ROL VIA SIMPLEAPI
+// ════════════════════════════════════════════════════════════
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function intentar(url, opts, debug, label) {
@@ -276,11 +266,139 @@ async function intentar(url, opts, debug, label) {
   }
 }
 
-// ──────────────── CONSULTA PUNTUAL A INIA (IA + busqueda web, un cultivo a la vez) ────────────────
-// Busca en publicaciones OFICIALES de INIA (biblioteca.inia.cl, inia.cl) recomendaciones
-// tecnicas para un cultivo especifico en una zona especifica. Es una consulta puntual,
-// a pedido: nunca se ejecuta automaticamente en cada informe. Siempre exige fuente citable
-// y se presenta como informativa, no como sustituto de asesoria agronomica en terreno.
+const cacheComunas = { lista: null };
+const cacheBusquedas = {};
+
+app.post('/buscar-rol', async (req, res) => {
+  const { rol, comuna } = req.body || {};
+  if (!rol || !comuna) return res.status(400).json({ ok: false, error: 'Faltan rol y comuna' });
+  if (!SIMPLEAPI_KEY) return res.json({ ok: false, error: 'Falta configurar SIMPLEAPI_KEY en Railway (Variables)' });
+
+  const debug = [];
+  const headers = { 'Authorization': SIMPLEAPI_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' };
+  const rolLimpio = String(rol).trim();
+  const comunaLimpia = String(comuna).trim();
+
+  const claveCache = (rolLimpio + '|' + comunaLimpia).toLowerCase();
+  const enCache = cacheBusquedas[claveCache];
+  if (enCache && (Date.now() - enCache.t) < 24 * 3600 * 1000) {
+    return res.json({ ...enCache.respuesta, cache: true });
+  }
+
+  const BASE = 'https://servicios.simpleapi.cl/api/mapas';
+  const URL = SIMPLEAPI_URL || (BASE + '/buscar/rol');
+
+  const partes = rolLimpio.split('-').map(s => s.trim());
+  const manzana = partes[0] || '';
+  const predio = partes[1] || '';
+
+  const norm = s => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  const esErrorComunas = (r) => {
+    if (!r) return false;
+    const msg = JSON.stringify(r).toLowerCase();
+    return r.__status >= 400 && msg.includes('error al obtener comunas');
+  };
+
+  let resultado = null;
+  let listaComunas = cacheComunas.lista;
+
+  const bodyDirecto = JSON.stringify({ comuna: comunaLimpia, manzana, predio });
+  for (let intento = 1; intento <= 2 && !resultado; intento++) {
+    const r = await intentar(URL, { method: 'POST', headers, body: bodyDirecto }, debug, 'POST directo (intento ' + intento + ')');
+    if (r && r.__status === 200) { resultado = r; break; }
+    if (r && Array.isArray(r.data) && r.data.some(x => x.Comuna || x.comuna)) {
+      listaComunas = r.data; cacheComunas.lista = listaComunas;
+      break;
+    }
+    if (r && (r.__status === 503 || /under construction/i.test(JSON.stringify(r)))) {
+      return res.json({ ok: false, mensaje: '🔧 El servicio de SimpleAPI esta caido en este momento (su servidor muestra "Site Under Construction"). No es un problema de tu plataforma ni de tu cuota. Reintenta en un rato, o usa los botones manuales Avaluo SII / Mapa SII.', debug });
+    }
+    if (esErrorComunas(r)) { await sleep(4000); continue; }
+    if (r && r.__status === 401) {
+      const cuerpo = JSON.stringify(r).toLowerCase();
+      const esCuota = cuerpo.includes('l\u00edmite') || cuerpo.includes('limite');
+      return res.json({ ok: false, mensaje: esCuota
+        ? 'SimpleAPI: limite de consultas alcanzado en tu plan (modulo Mapas). Espera unos minutos y reintenta; si persiste, revisa el saldo/plan de tu cuenta en simpleapi.cl. Mientras, usa los botones manuales Avaluo SII / Mapa SII.'
+        : 'SimpleAPI rechazo la API key (401). Revisa SIMPLEAPI_KEY en Railway.', debug });
+    }
+    break;
+  }
+
+  if (!resultado && Array.isArray(listaComunas)) {
+    const objetivo = norm(comunaLimpia);
+    let found = listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre) === objetivo)
+             || listaComunas.find(x => norm(x.Comuna || x.comuna || x.Nombre || x.nombre).includes(objetivo));
+    let corregidoDe = null;
+    if (!found && objetivo.length >= 4) {
+      let mejor = null, mejorDist = Infinity;
+      for (const x of listaComunas) {
+        const nombreX = norm(x.Comuna || x.comuna || x.Nombre || x.nombre);
+        const d = distanciaLevenshtein(objetivo, nombreX);
+        if (d < mejorDist) { mejorDist = d; mejor = x; }
+      }
+      if (mejor && mejorDist <= 2 && mejorDist / objetivo.length <= 0.25) {
+        found = mejor; corregidoDe = objetivo;
+      }
+    }
+    const comunaId = found && (found.Id || found.id || found.ID || found.Codigo || found.codigo);
+    const comunaNombre = found && (found.Comuna || found.comuna || found.Nombre || found.nombre);
+    debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length,
+      correccionAutomatica: corregidoDe ? ('"' + corregidoDe + '" no existe; se uso la comuna mas parecida: "' + comunaNombre + '"') : null });
+
+    const bodies = [];
+    if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
+    if (comunaId !== undefined && comunaId !== null) bodies.push({ comuna: comunaId, manzana, predio });
+    for (const b of bodies) {
+      await sleep(2000);
+      const r = await intentar(URL, { method: 'POST', headers, body: JSON.stringify(b) }, debug, 'POST ' + JSON.stringify(b));
+      if (r && r.__status === 200) { resultado = r; if (corregidoDe) resultado.__comunaCorregida = comunaNombre; break; }
+    }
+  }
+
+  if (!resultado) {
+    const huboTransitorio = debug.some(d => (d.snippet || '').toLowerCase().includes('error al obtener comunas'));
+    const mensaje = huboTransitorio
+      ? 'SimpleAPI no logro consultar el SII en este momento (fallo temporal de su lado). Espera 1-2 minutos y vuelve a intentar. Si persiste, usa los botones manuales.'
+      : 'Ninguna ruta respondio con datos. Revisa el detalle.';
+    return res.json({ ok: false, mensaje, debug });
+  }
+
+  const cand = (resultado && (resultado.Datos || resultado.datos)) || (Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado));
+  const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
+
+  const datosMap = {
+    avaluoFiscal: String(g(cand, 'ValorTotal', 'avaluo', 'avaluoTotal', 'avaluoFiscal')),
+    avaluoAfecto: String(g(cand, 'ValorAfecto')),
+    avaluoExento: String(g(cand, 'ValorExento')),
+    superficie: String(g(cand, 'SuperficieTerreno', 'superficie', 'superficieTerreno')),
+    unidad: String(g(cand, 'UnidadMedida')),
+    destino: String(g(cand, 'Destino', 'destino', 'uso')),
+    direccion: String(g(cand, 'Direccion', 'direccion')),
+    periodo: String(g(cand, 'Periodo', 'periodo')),
+    areaHomogenea: String(g(cand, 'AreaHomogenea', 'areaHomogenea', 'AH')).trim(),
+    reavaluo: String(g(cand, 'Reavalúo', 'Reavaluo', 'reavaluo')),
+    ubicacionTipo: String(g(cand, 'Ubicación', 'Ubicacion', 'ubicacion')),
+    lat: String(g(cand, 'PosicionX', 'lat', 'latitud')),
+    lon: String(g(cand, 'PosicionY', 'lng', 'lon', 'longitud'))
+  };
+
+  console.log('SimpleAPI respuesta completa:', JSON.stringify(cand).substring(0, 2000));
+
+  const vacio = !datosMap.avaluoFiscal && !datosMap.superficie && !datosMap.destino && !datosMap.lat;
+  if (vacio) {
+    debug.push({ label: 'RESPUESTA-COMPLETA (enviar a Claude para mapear campos)', respuesta: cand });
+    return res.json({ ok: false, mensaje: 'El rol se encontro, pero los nombres de campos son distintos. Envia el detalle a Claude.', debug });
+  }
+
+  const respuestaOk = { ok: true, datos: datosMap, raw: cand, debug };
+  cacheBusquedas[claveCache] = { t: Date.now(), respuesta: respuestaOk };
+  res.json(respuestaOk);
+});
+
+// ════════════════════════════════════════════════════════════
+// 4. CONSULTAR INIA
+// ════════════════════════════════════════════════════════════
 app.post('/consultar-inia', async (req, res) => {
   try {
     const { cultivo, comuna, region, contexto } = req.body || {};
@@ -307,10 +425,7 @@ Reglas estrictas:
 - Cita SIEMPRE la URL de la fuente especifica que uses (no solo la portada de inia.cl).
 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
-{"encontrado":true|false,"resumen":"...","variedadesRecomendadas":"...","requerimientos":"...","fuenteUrl":"...","fuenteNombre":"...","fechaPublicacion":"..."}
-
-Si encontrado es false, deja los demas campos como "".
-"resumen" debe ser un parrafo breve (3-5 lineas) parafraseado, no una copia literal del texto original.`;
+{"encontrado":true|false,"resumen":"...","variedadesRecomendadas":"...","requerimientos":"...","fuenteUrl":"...","fuenteNombre":"...","fechaPublicacion":"..."}`;
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -351,7 +466,6 @@ Si encontrado es false, deja los demas campos como "".
         fuentesConsultadas });
     }
 
-    // Solo se acepta como fuente valida un dominio de INIA (segunda capa de seguridad, no depender solo del prompt)
     const fuenteUrl = String(resultado.fuenteUrl || '').trim();
     const fuenteValida = /(^|\.)inia\.cl(\/|$)/i.test(fuenteUrl.replace(/^https?:\/\//, ''));
     if (!fuenteValida) {
@@ -375,13 +489,9 @@ Si encontrado es false, deja los demas campos como "".
   }
 });
 
-// ──────────────── INFRAESTRUCTURA ELECTRICA CERCANA (ArcGIS publico Min. Energia) ────────────────
-// Consulta el servicio geografico PUBLICO del Ministerio de Energia (IDE_ENERGIA) y calcula
-// la distancia real desde el punto del predio a la linea de transmision y a la subestacion
-// mas cercanas. Esto es una MEDICION GEOGRAFICA real (no requiere cuenta ni clave), pero
-// NO equivale a "capacidad disponible para inyectar energia": eso depende de estudios de
-// capacidad que publican las distribuidoras y el Coordinador Electrico Nacional, y no es
-// un dato que se pueda derivar de la distancia. Esto se aclara siempre en la respuesta.
+// ════════════════════════════════════════════════════════════
+// 5. INFRAESTRUCTURA ELECTRICA CERCANA
+// ════════════════════════════════════════════════════════════
 const ENERGIA_ARCGIS = 'https://arcgis2.minenergia.cl/public/rest/services/IDE_ENERGIA/IDE_2019/FeatureServer';
 app.post('/energia-cercana', async (req, res) => {
   const debug = [];
@@ -391,8 +501,6 @@ app.post('/energia-cercana', async (req, res) => {
     const lonN = parseFloat(String(lon || '').replace(',', '.'));
     if (!isFinite(latN) || !isFinite(lonN)) return res.status(400).json({ ok: false, mensaje: 'Faltan coordenadas del predio (lat/lon).' });
 
-    // Radio de busqueda: se amplia progresivamente si no encuentra nada cerca (predios rurales
-    // pueden estar lejos de la red). 15 km -> 40 km -> 80 km.
     const radios = [15000, 40000, 80000];
     const capas = [
       { id: 8, nombre: 'Línea de Transmisión', campo: 'lineaTransmision' },
@@ -411,14 +519,12 @@ app.post('/energia-cercana', async (req, res) => {
           const j = await r.json();
           debug.push({ capa: capa.nombre, radio, status: r.status, features: j && j.features ? j.features.length : 0, error: j && j.error });
           if (j && Array.isArray(j.features) && j.features.length) {
-            // Calcular distancia real a cada feature encontrada y quedarse con la mas cercana
             let mejor = null;
             j.features.forEach(f => {
               try {
                 const punto2 = turf.point([lonN, latN]);
                 let dKm = null;
                 if (f.geometry && Array.isArray(f.geometry.paths)) {
-                  // Cada "path" es un segmento de linea: se mide la distancia a cada uno y se toma la minima
                   f.geometry.paths.forEach(path => {
                     if (!path || path.length < 2) return;
                     try {
@@ -454,4 +560,196 @@ app.post('/energia-cercana', async (req, res) => {
       ok: true,
       lineaTransmision: resultado.lineaTransmision,
       subestacion: resultado.subestacion,
-      nota: 'La distancia es una medición geográfica real. NO indica si esa línea o subestación tiene capacidad disponible para inyect
+      nota: 'La distancia es una medición geográfica real. NO indica si esa línea o subestación tiene capacidad disponible para inyectar energía: eso requiere consultar los estudios de capacidad de la distribuidora o del Coordinador Eléctrico Nacional (coordinador.cl).',
+      fuente: 'Ministerio de Energía — Infraestructura Energética (IDE_ENERGIA), servicio público arcgis2.minenergia.cl',
+      debug
+    });
+  } catch (err) {
+    console.error('Error en /energia-cercana:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message, debug });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// 6. CONSULTAR NORMATIVA SOLAR
+// ════════════════════════════════════════════════════════════
+app.post('/consultar-normativa-solar', async (req, res) => {
+  try {
+    const { comuna, region, claseSuelo } = req.body || {};
+    if (!comuna) return res.status(400).json({ ok: false, mensaje: 'Falta la comuna del predio.' });
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
+
+    const prompt = `Necesito saber si un predio agrícola en Chile puede destinarse a la instalación de paneles solares (proyecto fotovoltaico), desde el punto de vista NORMATIVO/REGULATORIO.
+
+Comuna: ${comuna}
+Región: ${region || '(no especificada)'}
+${claseSuelo ? 'Clase de capacidad de uso del suelo (CIREN): ' + claseSuelo : ''}
+
+Busca en fuentes OFICIALES chilenas: SAG (permisos para construcciones ajenas a la agricultura en área rural), Superintendencia de Electricidad y Combustibles (SEC), Comisión Nacional de Energía (CNE), Ministerio de Energía, Servicio de Evaluación Ambiental (SEIA), o el Plan Regulador Comunal de esa comuna si es pertinente.
+
+Busca específicamente si existe alguna restricción o trámite requerido para instalar proyectos fotovoltaicos en suelo de uso agrícola en Chile.
+
+Reglas estrictas sobre las fuentes:
+- Solo usa fuentes gubernamentales oficiales (.gob.cl, .cl de organismos públicos). No inventes una regla genérica no verificada.
+- Si no encuentras normativa específica, dilo claramente. NO derives una conclusión de "sí" o "no" a partir de la clase de suelo por tu cuenta: eso sería un criterio inventado, no verificado.
+- Cita cada fuente real que uses, con su URL exacta.
+
+Reglas estrictas sobre CÓMO REDACTAR la respuesta — esto es MUY IMPORTANTE porque lo va a leer una persona sin formación legal, que necesita entenderlo a la primera lectura, no un abogado:
+- NO uses lenguaje legal, ni cites artículos de ley por número dentro del texto, ni encadenes fuentes dentro de la misma oración (nada de "según el Art. 55° de la LGUC y la Circular N°296...").
+- Escribe como si le explicaras la situación a un colega en una conversación: frases cortas, directas, sin tecnicismos innecesarios.
+- Estructura la respuesta en dos partes separadas: (1) un resumen breve de la situación en 2-4 frases simples, y (2) un listado de pasos concretos y accionables que la persona debe seguir en la práctica, en orden.
+- Los nombres de trámites o instituciones sí puedes mencionarlos (ej. "SAG", "permiso IFC"), pero explica en una frase simple qué es cada uno la primera vez que lo nombras.
+- Todas las referencias legales (números de ley, circulares, artículos) van SOLO en el arreglo de fuentes, nunca mezcladas dentro del resumen o los pasos.
+
+Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
+{"encontrado":true|false,"resumen":"...","pasos":["...","..."],"fuentes":[{"nombre":"...","url":"...","fecha":"..."}]}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2500,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Anthropic API error (consultar-normativa-solar):', response.status, errText);
+      return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al consultar.', detail: errText.substring(0, 500) });
+    }
+
+    const data = await response.json();
+    const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
+    const fuentesConsultadas = (data.content || [])
+      .filter(b => b.type === 'web_search_tool_result')
+      .flatMap(b => (Array.isArray(b.content) ? b.content : []))
+      .map(r => r && r.url).filter(Boolean);
+
+    const resultado = extraerJSON(texto);
+    if (!resultado) return res.json({ ok: false, mensaje: 'La consulta no devolvió una respuesta interpretable (o se cortó por longitud). Reintenta; si persiste, la consulta es muy compleja para el límite de tokens.', fuentesConsultadas });
+
+    if (!resultado.encontrado) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'No se encontró normativa específica y verificable para esta comuna. Consulta directamente con la SEC, la CNE o un abogado especializado en energía antes de avanzar con un proyecto solar.',
+        fuentesConsultadas });
+    }
+    const fuentesCrudas = Array.isArray(resultado.fuentes) ? resultado.fuentes : [];
+    const fuentes = fuentesCrudas
+      .filter(f => f && /\.gob\.cl(\/|$)|coordinador\.cl(\/|$)/i.test(String(f.url || '').trim().replace(/^https?:\/\//, '')))
+      .map(f => ({ nombre: String(f.nombre || '').trim(), url: String(f.url || '').trim(), fecha: String(f.fecha || '').trim() }));
+    const pasos = Array.isArray(resultado.pasos) ? resultado.pasos.map(p => String(p || '').trim()).filter(Boolean) : [];
+
+    if (!fuentes.length) {
+      return res.json({ ok: true, encontrado: false, mensaje: 'La búsqueda no encontró una fuente gubernamental oficial verificable.', fuentesConsultadas });
+    }
+    res.json({ ok: true, encontrado: true, resumen: String(resultado.resumen || '').trim(), pasos, fuentes, fuentesConsultadas });
+  } catch (err) {
+    console.error('Error en /consultar-normativa-solar:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
+  }
+});
+
+// ════════════════════════════════════════════════════════════
+// 7. BUSCAR COMPARABLES DE MERCADO
+// ════════════════════════════════════════════════════════════
+app.post('/buscar-comparables', async (req, res) => {
+  try {
+    const { comuna, region, superficieObjetivo } = req.body || {};
+    if (!comuna) return res.status(400).json({ ok: false, mensaje: 'Falta la comuna del predio.' });
+    if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
+
+    const sup = parseFloat(String(superficieObjetivo || '0').replace(',', '.')) || 0;
+    const rangoTxt = sup > 0 ? ('Busca preferentemente predios de tamaño similar, entre ' + Math.round(sup * 0.3) + ' y ' + Math.round(sup * 3) + ' hectáreas aproximadamente (el predio en tasación tiene ' + sup + ' ha).') : '';
+
+    const prompt = `Necesito encontrar OFERTAS VIGENTES (publicadas ahora mismo) de campos o predios agrícolas EN VENTA, para usar como referencias de mercado en una tasación agrícola profesional en Chile.
+
+Comuna del predio en tasación: ${comuna}
+Región: ${region || '(no especificada)'}
+${rangoTxt}
+
+Busca en estos portales y corredores (y otros similares de propiedades agrícolas en Chile si los encuentras):
+- portalinmobiliario.com (sección Campos/Terrenos agrícolas)
+- colliers.cl o colliers.com (Chile, agrícola)
+- gpsproperty.cl (sección Agrícola)
+- Otros corredores especializados en campos agrícolas chilenos (ej. Tattersall Campos, Ipropiedadesagricolas, Aqueveque Propiedades, etc.)
+
+Busca ofertas EN LA MISMA COMUNA o en comunas VECINAS de la misma región (prioriza cercanía geográfica real). Busca hasta 6 ofertas distintas si existen.
+
+Para cada oferta que encuentres, extrae SOLO lo que está publicado explícitamente:
+- Nombre/referencia de la oferta o corredor
+- Ubicación (comuna/sector)
+- Superficie en hectáreas
+- Precio total (o precio por hectárea si es lo único publicado)
+- URL directa de la publicación
+
+Reglas estrictas:
+- NUNCA inventes ni estimes un precio o superficie que no esté publicado explícitamente. Si el precio dice "Consultar" o no está publicado, indícalo así, no lo omitas ni lo inventes.
+- No repitas la misma propiedad dos veces.
+- Cada oferta debe tener su URL real y verificable.
+- Si no encuentras ninguna oferta real y vigente, dilo claramente: no inventes ofertas de relleno.
+
+Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
+{"encontrado":true|false,"ofertas":[{"oferta":"...","ubicacion":"...","superficieHa":"...","precioTotal":"...","precioHa":"...","url":"...","fuente":"..."}]}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': ANTHROPIC_API_KEY,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2200,
+        messages: [{ role: 'user', content: prompt }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 10 }]
+      })
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error('Anthropic API error (buscar-comparables):', response.status, errText);
+      return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al buscar.', detail: errText.substring(0, 500) });
+    }
+
+    const data = await response.json();
+    const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
+    const fuentesConsultadas = (data.content || [])
+      .filter(b => b.type === 'web_search_tool_result')
+      .flatMap(b => (Array.isArray(b.content) ? b.content : []))
+      .map(r => r && r.url).filter(Boolean);
+
+    const resultado = extraerJSON(texto);
+    if (!resultado) {
+      return res.json({ ok: false, mensaje: 'La búsqueda no devolvió una respuesta interpretable (o se cortó por longitud).', fuentesConsultadas });
+    }
+
+    const ofertasCrudas = Array.isArray(resultado.ofertas) ? resultado.ofertas : [];
+    const ofertas = ofertasCrudas
+      .filter(o => o && String(o.url || '').trim().startsWith('http'))
+      .slice(0, 6)
+      .map(o => ({
+        oferta: String(o.oferta || '').trim(),
+        ubicacion: String(o.ubicacion || '').trim(),
+        superficieHa: String(o.superficieHa || '').trim(),
+        precioTotal: String(o.precioTotal || '').trim(),
+        precioHa: String(o.precioHa || '').trim(),
+        url: String(o.url || '').trim(),
+        fuente: String(o.fuente || '').trim()
+      }));
+
+    if (!resultado.encontrado || !ofertas.length) {
+      return res.json({ ok: true, encontrado: false,
+        mensaje: 'No se encontraron ofertas vigentes verificables para ' + comuna + '. Prueba ampliando a una comuna vecina, o agrega referencias manualmente.',
+        fuentesConsultadas });
+    }
+
+    return res.json({ ok: true, encontrado: true, ofertas, fechaConsulta: new Date().toISOString().substring(0, 10), fuentesConsultadas });
+  } catch (err) {
+    console.error('Error en /buscar-comparables:', err);
+    res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
+  }
+});
