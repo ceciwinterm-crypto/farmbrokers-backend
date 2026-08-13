@@ -61,7 +61,64 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v59 (informe en Word nativo .docx via /generar-word + clasificacion SII fiscal desde SIT Rural)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v60 (respaldo de tasaciones en disco persistente + correlativo servidor + Word nativo)', simpleapi: !!SIMPLEAPI_KEY });
+});
+
+// ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
+// Las tasaciones dejan de vivir solo en el navegador. Todo va protegido por una
+// clave (FB_CLAVE en las variables de Railway): sin ella, nadie puede leer ni
+// escribir tasaciones, que contienen nombres de propietarios y RUT.
+const almacen = require('./almacen');
+const FB_CLAVE = process.env.FB_CLAVE;
+if (!FB_CLAVE) console.warn('AVISO: falta FB_CLAVE — el respaldo de tasaciones queda deshabilitado por seguridad');
+
+function claveOk(req, res) {
+  if (!FB_CLAVE) { res.status(503).json({ error: 'El respaldo no esta configurado en el servidor (falta FB_CLAVE).' }); return false; }
+  const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
+  if (String(dada) !== String(FB_CLAVE)) { res.status(401).json({ error: 'Clave incorrecta.' }); return false; }
+  return true;
+}
+
+app.post('/almacen-estado', (req, res) => {   // POST: la clave viaja en la cabecera, no en la URL
+  if (!claveOk(req, res)) return;
+  try { res.json({ ok: true, ...almacen.estado() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/tasacion-guardar', (req, res) => {
+  if (!claveOk(req, res)) return;
+  try {
+    const { id, nombre, datos } = req.body || {};
+    if (!id || !datos) return res.status(400).json({ error: 'Faltan id o datos de la tasacion' });
+    res.json({ ok: true, ...almacen.guardar(id, nombre, datos) });
+  } catch (e) { res.status(500).json({ error: 'No se pudo guardar: ' + e.message }); }
+});
+
+app.post('/tasaciones', (req, res) => {
+  if (!claveOk(req, res)) return;
+  try { res.json({ ok: true, tasaciones: almacen.listar() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/tasacion-abrir', (req, res) => {
+  if (!claveOk(req, res)) return;
+  try {
+    const r = almacen.obtener((req.body || {}).id);
+    if (!r) return res.status(404).json({ error: 'No existe esa tasacion en el respaldo.' });
+    res.json({ ok: true, registro: r });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/tasacion-borrar', (req, res) => {
+  if (!claveOk(req, res)) return;
+  try { res.json({ ok: almacen.borrar((req.body || {}).id) }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.post('/correlativo', (req, res) => {
+  if (!claveOk(req, res)) return;
+  try { res.json({ ok: true, numero: almacen.siguienteCorrelativo() }); }
+  catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
