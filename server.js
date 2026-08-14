@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v62 (catastro fruticola: cruce local cuando el filtro espacial del geoservidor falla)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v63 (catastro fruticola: cruce local + verificacion de sistema de coordenadas)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -1480,9 +1480,20 @@ const manejadorSuelos = async (req, res) => {
                   return !(b[2] < bbS[0] - 0.004 || b[0] > bbS[2] + 0.004 || b[3] < bbS[1] - 0.004 || b[1] > bbS[3] + 0.004);
                 } catch (e) { return false; }
               });
+              // Verificacion de coordenadas: distingue "no hay cuarteles aqui" de
+              // "la capa viene en otro sistema de coordenadas y por eso nada calza".
+              let muestraCoord = null, mismoSistema = null;
+              try {
+                const c0 = turf.bbox(rComp.features[0]);
+                muestraCoord = [Math.round(c0[0]*100)/100, Math.round(c0[1]*100)/100];
+                mismoSistema = (c0[0] >= -180 && c0[0] <= 180 && c0[1] >= -90 && c0[1] <= 90);
+              } catch (e) {}
               debug.push({ paso:'fruticola-cruce-local', enLaComuna: rComp.features.length, cercaDelPredio: cerca.length,
+                coordenadasDeLaCapa: muestraCoord, enGradosComoElPredio: mismoSistema,
                 nota: cerca.length ? 'El filtro espacial del servidor fallaba: el cruce se resolvio localmente.'
-                                   : 'La capa tiene cuarteles en la comuna, pero ninguno cerca de este predio.' });
+                  : (mismoSistema === false
+                      ? 'ATENCION: la capa fruticola NO viene en grados (lat/lon), por eso ningun cuartel calza con el predio. Es un problema de proyeccion del geoservidor, no ausencia de plantaciones.'
+                      : 'La capa tiene cuarteles en la comuna, pero ninguno se ubica sobre este predio: el predio no registra plantaciones en el catastro fruticola CIREN.') });
               if (cerca.length) jf = { features: cerca };
             } else {
               debug.push({ paso:'fruticola-capa-vacia', nota:'La capa fruticola de la comuna no devolvio ningun poligono.' });
@@ -1599,9 +1610,13 @@ const manejadorSuelos = async (req, res) => {
                   } catch (e2) {}
                 }
                 const lista = Object.entries(cercanos).map(e => e[0] + ' (' + (Math.round(e[1] * 10) / 10) + ' ha)');
-                respFruticolaNota = lista.length
+                const dCruce = debug.find(x => x.paso === 'fruticola-cruce-local');
+                if (dCruce && dCruce.enGradosComoElPredio === false) {
+                  respFruticolaNota = 'No se pudo cruzar el catastro fruticola: la capa de la comuna viene en un sistema de coordenadas distinto. Revisa las plantaciones directamente en el visor de SIT Rural e ingresalas manualmente.';
+                }
+                respFruticolaNota = respFruticolaNota || (lista.length
                   ? ('El rol no contiene cuarteles frutales, pero hay plantaciones COLINDANTES a menos de 250 m: ' + lista.join(', ') + '. Suelen pertenecer a otro rol del mismo campo: en el visor SIT Rural haz clic sobre el cuartel con la capa Propiedades activa para ver su rol y agregalo como Rol 2, o ingresalas manualmente.')
-                  : 'La comuna tiene catastro fruticola CIREN, pero el predio no registra cuarteles frutales.';
+                  : 'La comuna tiene catastro fruticola CIREN, pero el predio no registra cuarteles frutales.');
               } catch (e) {
                 respFruticolaNota = 'La comuna tiene catastro fruticola CIREN, pero el predio no registra cuarteles frutales.';
               }
