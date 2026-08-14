@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v63 (catastro fruticola: cruce local + verificacion de sistema de coordenadas)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v64 (catastro fruticola: cruce local, verificacion de coordenadas y aviso explicito al tasador)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -1500,8 +1500,15 @@ const manejadorSuelos = async (req, res) => {
             }
           }
 
-          if (!jf) debug.push({ paso:'fruticola-sin-resultado', geometriaDetectada: geomF,
-            nota: 'Ni el filtro espacial ni el cruce local encontraron cuarteles: lo mas probable es que el predio no tenga plantaciones catastradas por CIREN.' });
+          if (!jf) {
+            const dc = debug.find(x => x.paso === 'fruticola-cruce-local');
+            respFruticolaNota = (dc && dc.enGradosComoElPredio === false)
+              ? 'No se pudo cruzar el catastro fruticola: la capa de ' + comuna + ' viene en un sistema de coordenadas distinto al del predio. Revisa las plantaciones en el visor de SIT Rural e ingresalas manualmente.'
+              : (dc && dc.enLaComuna > 0
+                  ? 'Se revisaron los ' + dc.enLaComuna + ' cuarteles frutales catastrados en ' + comuna + ' y ninguno se ubica dentro de este predio: no registra plantaciones en el catastro fruticola CIREN. Si el predio tiene frutales, agregalos manualmente.'
+                  : 'La comuna no registra cuarteles en el catastro fruticola CIREN, o la capa no esta disponible. Si el predio tiene plantaciones, agregalas manualmente.');
+            debug.push({ paso:'fruticola-sin-resultado', geometriaDetectada: geomF, avisoAlTasador: respFruticolaNota });
+          }
           if (jf && jf.features && jf.features.length) {
             debug.push({ paso:'fruticola-campos', campos: Object.keys(jf.features[0].properties || {}) });
             const utilF = v => v !== null && v !== undefined && String(v).trim() !== '';
