@@ -1,20 +1,20 @@
 // Servidor backend para Farm Brokers - Plataforma de Tasaciones
-
+ 
 const express = require('express');
 const cors = require('cors');
 const app = express();
-
+ 
 app.use(cors());
 app.use(express.json({ limit: '60mb' }));   // el informe viaja con sus imagenes en base64
-
+ 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SIMPLEAPI_KEY = process.env.SIMPLEAPI_KEY;
 const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL; // opcional: fija la ruta exacta
 const PORT = process.env.PORT || 3000;
-
+ 
 if (!ANTHROPIC_API_KEY) console.error('ERROR: Falta ANTHROPIC_API_KEY');
 if (!SIMPLEAPI_KEY) console.warn('AVISO: Falta SIMPLEAPI_KEY (la busqueda por rol no funcionara)');
-
+ 
 // Extrae el primer objeto JSON BALANCEADO de un texto (cuenta llaves, respeta strings/escapes).
 // Mas robusto que un regex "primera { a ultima }": si el texto de Claude trae explicaciones
 // antes/despues del JSON, o si el JSON tiene objetos/arreglos anidados, esto encuentra el
@@ -36,7 +36,7 @@ function distanciaLevenshtein(a, b) {
   }
   return prev[n];
 }
-
+ 
 function extraerJSON(texto) {
   const limpio = String(texto || '').replace(/```json\s*/gi, '').replace(/```\s*/g, '');
   const inicio = limpio.indexOf('{');
@@ -59,11 +59,11 @@ function extraerJSON(texto) {
   }
   return null; // nunca cerro: la respuesta se corto (truncada por max_tokens u otra causa)
 }
-
+ 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v60 (respaldo de tasaciones en disco persistente + correlativo servidor + Word nativo)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v61 (catastro fruticola con cascada de consultas + respaldo en disco persistente)', simpleapi: !!SIMPLEAPI_KEY });
 });
-
+ 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
 // Las tasaciones dejan de vivir solo en el navegador. Todo va protegido por una
 // clave (FB_CLAVE en las variables de Railway): sin ella, nadie puede leer ni
@@ -71,20 +71,20 @@ app.get('/', (req, res) => {
 const almacen = require('./almacen');
 const FB_CLAVE = process.env.FB_CLAVE;
 if (!FB_CLAVE) console.warn('AVISO: falta FB_CLAVE — el respaldo de tasaciones queda deshabilitado por seguridad');
-
+ 
 function claveOk(req, res) {
   if (!FB_CLAVE) { res.status(503).json({ error: 'El respaldo no esta configurado en el servidor (falta FB_CLAVE).' }); return false; }
   const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
   if (String(dada) !== String(FB_CLAVE)) { res.status(401).json({ error: 'Clave incorrecta.' }); return false; }
   return true;
 }
-
+ 
 app.post('/almacen-estado', (req, res) => {   // POST: la clave viaja en la cabecera, no en la URL
   if (!claveOk(req, res)) return;
   try { res.json({ ok: true, ...almacen.estado() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-
+ 
 app.post('/tasacion-guardar', (req, res) => {
   if (!claveOk(req, res)) return;
   try {
@@ -93,13 +93,13 @@ app.post('/tasacion-guardar', (req, res) => {
     res.json({ ok: true, ...almacen.guardar(id, nombre, datos) });
   } catch (e) { res.status(500).json({ error: 'No se pudo guardar: ' + e.message }); }
 });
-
+ 
 app.post('/tasaciones', (req, res) => {
   if (!claveOk(req, res)) return;
   try { res.json({ ok: true, tasaciones: almacen.listar() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-
+ 
 app.post('/tasacion-abrir', (req, res) => {
   if (!claveOk(req, res)) return;
   try {
@@ -108,19 +108,19 @@ app.post('/tasacion-abrir', (req, res) => {
     res.json({ ok: true, registro: r });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-
+ 
 app.post('/tasacion-borrar', (req, res) => {
   if (!claveOk(req, res)) return;
   try { res.json({ ok: almacen.borrar((req.body || {}).id) }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-
+ 
 app.post('/correlativo', (req, res) => {
   if (!claveOk(req, res)) return;
   try { res.json({ ok: true, numero: almacen.siguienteCorrelativo() }); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
-
+ 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
 // ── Informe en Word NATIVO (.docx) ──────────────────────────────────────────
 // El frontend serializa el informe ya renderizado en bloques simples
@@ -148,14 +148,14 @@ app.post('/generar-word', async (req, res) => {
     res.status(500).json({ error: 'No se pudo generar el Word: ' + e.message });
   }
 });
-
+ 
 app.post('/generar-informe', async (req, res) => {
   try {
     const datos = req.body;
     if (!datos.predioNombre) return res.status(400).json({ error: 'Falta el nombre del predio' });
-
+ 
     const instruccion = `Eres tasador agricola experto de Farm Brokers Chile. Con los datos del predio a continuacion, redacta textos profesionales en espanol para un Informe de Tasacion.
-
+ 
 DATOS DEL PREDIO:
 PREDIO: ${datos.predioNombre}
 ROLES SII DEL PREDIO (${(datos.roles || []).length} rol(es) — el predio es el CONJUNTO de todos): ${(datos.roles || []).map(r => r.rol + ' de ' + (r.comuna||'') + ((r.datos&&r.datos.nombrePano)?' ("' + r.datos.nombrePano + '")':'') + ((r.datos&&r.datos.superfSII)?', ' + r.datos.superfSII + ' ha SII':'') + ((r.datos&&r.datos.avaluoFiscal)?', avaluo $' + r.datos.avaluoFiscal:'') + ((r.datos&&r.datos.noAgricola)?' [ROL NO AGRICOLA: urbano u otro destino, sin analisis de suelos]':'')).join(' | ')}
@@ -177,7 +177,7 @@ ALTITUD: ${datos.altitud || "no informada"} m.s.n.m. | DATOS CLIMATICOS MEDIDOS:
 USO ACTUAL DEL SUELO (CONAF): ${datos.usosResumen || "sin datos"}
 INSTRUCCIONES DEL TASADOR PARA LAS CONCLUSIONES: ${datos.guiaConclusion || "ninguna"}
 ZONA DE ESCASEZ HIDRICA: ${datos.escasezTxt || "sin decreto vigente detectado"}
-
+ 
 Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codigo, sin texto antes ni despues), con exactamente estos 10 campos de texto:
 - resumen: 2-3 oraciones breves describiendo el predio, ubicacion y uso actual. Si son varios roles, describe el predio como una unidad compuesta por esos paños
 - ubicacion: 1-2 oraciones con coordenadas, distancia a Santiago y acceso
@@ -189,9 +189,9 @@ Responde UNICAMENTE con un objeto JSON valido (sin markdown, sin bloques de codi
 - clima: 1 parrafo sobre el clima de la zona. Si hay DATOS CLIMATICOS medidos, usalos como base (cifras reales del punto del predio) en vez de generalidades
 - hidrico: 1 parrafo breve sobre derechos de aprovechamiento de aguas. NUNCA menciones valores monetarios de los derechos (esos van solo en la tabla de valorizacion). Si la zona esta bajo decreto de escasez hidrica, menciona la advertencia y la necesidad de monitorear caudales
 - conclusiones: 2 parrafos breves de conclusiones profesionales de tasacion. Si el predio tiene VARIOS roles, la conclusion SIEMPRE abarca el conjunto completo (superficie total, plantaciones de todos los paños) y menciona cada rol con su nombre de paño si existe. Si hay INSTRUCCIONES DEL TASADOR, siguelas estrictamente como enfoque principal de la conclusion
-
+ 
 Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado.`;
-
+ 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -205,31 +205,31 @@ Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado
         messages: [{ role: 'user', content: instruccion }]
       })
     });
-
+ 
     if (!response.ok) {
       const errText = await response.text();
       console.error('Anthropic API error:', response.status, errText);
       return res.status(502).json({ error: 'Error de la API de Claude', detail: errText });
     }
-
+ 
     const data = await response.json();
     const text = (data.content || []).map(c => c.text || '').join('').trim();
     console.log('Respuesta IA (500 chars):', text.substring(0, 500));
-
+ 
     const match = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
     if (!match) return res.status(500).json({ error: 'Respuesta de IA no contenia JSON valido', raw: text.substring(0, 1000) });
-
+ 
     let ia;
     try { ia = JSON.parse(match[0]); }
     catch (e) { return res.status(500).json({ error: 'JSON de IA mal formado: ' + e.message, raw: match[0].substring(0, 1000) }); }
-
+ 
     res.json({ ia });
   } catch (err) {
     console.error('Error en /generar-informe:', err);
     res.status(500).json({ error: err.message });
   }
 });
-
+ 
 // ──────────────── BUSQUEDA DE PROPIETARIO POR ROL (IA + busqueda web) ────────────────
 // Usa el modelo con busqueda web activada para encontrar el "Rol de Avaluos" oficial
 // que publican las municipalidades (el mismo tipo de documento SII/gobierno que se uso
@@ -240,40 +240,40 @@ app.post('/buscar-propietario', async (req, res) => {
     const { rol, comuna, region } = req.body || {};
     if (!rol || !comuna) return res.status(400).json({ ok: false, mensaje: 'Falta rol o comuna.' });
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
-
+ 
     const prompt = `Necesito identificar al propietario de un predio agrícola en Chile a partir de documentos PUBLICOS OFICIALES, y si es una EMPRESA, tambien su RUT.
-
+ 
 Rol de avalúo: ${rol}
 Comuna: ${comuna}
 Región: ${region || '(no especificada)'}
-
+ 
 PASO 1 — Propietario:
 Busca el documento oficial "Rol de Avalúos y Contribuciones Bienes Raíces Agrícolas" (o "Rol de Avalúo") que la Municipalidad de ${comuna}, o en su defecto el SII, publica en su sitio web (normalmente un PDF). Ese documento lista, por cada rol, el nombre del propietario y el nombre o dirección del predio.
-
+ 
 Encuentra dentro de ese documento la línea EXACTA correspondiente al rol ${rol}. Debes encontrar el numero de rol EXACTO, no uno parecido.
-
+ 
 Reglas estrictas para el Paso 1:
 - Solo usa fuentes gubernamentales o municipales oficiales (municipalidad.cl, sii.cl) para el propietario y nombre del predio.
 - Extrae el nombre del propietario y el nombre del predio TAL COMO aparecen en el documento, sin corregir ni completar nada.
 - Si NO encuentras el documento, o no encuentras la linea exacta de ese rol, responde que no se encontro. Nunca inventes ni "completes" un nombre parecido.
-
+ 
 PASO 2 — RUT (SOLO si el propietario encontrado en el Paso 1 es una EMPRESA):
 IMPORTANTE: los documentos municipales suelen truncar el nombre del propietario a ~25 caracteres. Un nombre que empieza con "AGRICOLA" casi siempre es una empresa aunque el sufijo "Limitada"/"SpA" haya quedado cortado por el ancho de columna del PDF — trátalo como empresa igual, e intenta encontrar su razón social COMPLETA (con el sufijo legal) en el directorio de empresas antes de buscar el RUT.
-
+ 
 Si el nombre del propietario corresponde claramente a una empresa (empieza con "Agricola", o contiene "Limitada", "Ltda", "S.A.", "SpA", "Sociedad", "EIRL", "Comercial", "Inmobiliaria", "Inversiones", etc.), busca su RUT en directorios chilenos de empresas que agreguen datos oficiales (por ejemplo portalchile.org, u otros que citen como fuente al SII/INAPI/Mercado Publico/CMF).
-
+ 
 Reglas estrictas para el Paso 2:
 - Solo entrega el RUT si encuentras una coincidencia EXACTA e INEQUIVOCA de la razón social completa (no una empresa con nombre parecido).
 - Si existen varias empresas con nombres similares, o no hay coincidencia exacta y clara, deja el RUT vacío y explica la ambiguedad en notaIncertidumbre.
 - Si el propietario es una PERSONA NATURAL (nombre de persona, no una razón social de empresa), NO busques su RUT bajo ninguna circunstancia: por privacidad, ese dato SIEMPRE debe completarlo el tasador manualmente. Deja rut vacio en ese caso.
 - Nunca calcules ni inventes un RUT ni su dígito verificador: solo repórtalo si lo viste literalmente en una fuente real.
-
+ 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
 {"encontrado":true|false,"propietario":"...","nombrePredio":"...","fuenteUrl":"...","fuenteNombre":"...","fechaDocumento":"...","esEmpresa":true|false,"rut":"...","rutFuenteUrl":"...","rutFuenteNombre":"...","notaIncertidumbre":"..."}
-
+ 
 Si encontrado es false, deja los demas campos como "" o false.
 "notaIncertidumbre" es para que menciones cualquier duda (ej. "hay otra empresa con nombre muy similar", "el documento es de 2018 y podria estar desactualizado", "no se encontro coincidencia exacta de RUT").`;
-
+ 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -288,13 +288,13 @@ Si encontrado es false, deja los demas campos como "" o false.
         tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 10 }]
       })
     });
-
+ 
     if (!response.ok) {
       const errText = await response.text();
       console.error('Anthropic API error (buscar-propietario):', response.status, errText);
       return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al buscar.', detail: errText.substring(0, 500) });
     }
-
+ 
     const data = await response.json();
     // El texto final puede venir repartido en varios bloques (busquedas intermedias + respuesta final)
     const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
@@ -303,18 +303,18 @@ Si encontrado es false, deja los demas campos como "" o false.
       .filter(b => b.type === 'web_search_tool_result')
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
-
+ 
     const resultado = extraerJSON(texto);
     if (!resultado) {
       return res.json({ ok: false, mensaje: 'La busqueda no devolvio una respuesta interpretable (o se corto por longitud). Verifica manualmente.', fuentesConsultadas });
     }
-
+ 
     if (!resultado.encontrado) {
       return res.json({ ok: true, encontrado: false,
         mensaje: 'No se encontro un documento oficial con el rol exacto ' + rol + ' en ' + comuna + '. Completa el propietario manualmente.',
         fuentesConsultadas });
     }
-
+ 
     // ── Segunda capa de seguridad (no depender solo del prompt): ──
     // solo se entrega RUT si el nombre del propietario realmente PARECE una empresa.
     // Si no calza el patron, se descarta el RUT aunque el modelo lo haya devuelto.
@@ -322,7 +322,7 @@ Si encontrado es false, deja los demas campos como "" o false.
     const pareceEmpresa = /\bLIMITADA\b|\bLTDA\b|\bS\.?A\.?\b|\bSPA\b|\bSOCIEDAD\b|\bEIRL\b|\bCOMERCIAL\b|^AGRICOLA\b|\bINMOBILIARIA\b|\bINVERSIONES\b|\bFORESTAL\b|\bFRUTICOLA\b|\bCONSTRUCTORA\b|\bTRANSPORTES\b/i.test(propietarioTxt);
     const rutSeguro = pareceEmpresa ? String(resultado.rut || '').trim() : '';
     const rutDescartadoPorPersona = !pareceEmpresa && String(resultado.rut || '').trim() !== '';
-
+ 
     return res.json({
       ok: true, encontrado: true,
       propietario: propietarioTxt.trim(),
@@ -341,10 +341,10 @@ Si encontrado es false, deja los demas campos como "" o false.
     res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
   }
 });
-
+ 
 // ──────────────── BUSQUEDA POR ROL VIA SIMPLEAPI (Mapas SII) ────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-
+ 
 async function intentar(url, opts, debug, label) {
   try {
     const r = await fetch(url, opts);
@@ -359,7 +359,7 @@ async function intentar(url, opts, debug, label) {
     return null;
   }
 }
-
+ 
 // ──────────────── CONSULTA PUNTUAL A INIA (IA + busqueda web, un cultivo a la vez) ────────────────
 // Busca en publicaciones OFICIALES de INIA (biblioteca.inia.cl, inia.cl) recomendaciones
 // tecnicas para un cultivo especifico en una zona especifica. Es una consulta puntual,
@@ -370,32 +370,32 @@ app.post('/consultar-inia', async (req, res) => {
     const { cultivo, comuna, region, contexto } = req.body || {};
     if (!cultivo) return res.status(400).json({ ok: false, mensaje: 'Falta indicar el cultivo a consultar.' });
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
-
+ 
     const prompt = `Necesito informacion tecnica AGRONOMICA OFICIAL sobre el cultivo de "${cultivo}" en Chile, para una zona especifica.
-
+ 
 Comuna: ${comuna || '(no especificada)'}
 Región: ${region || '(no especificada)'}
 ${contexto ? 'Contexto adicional del predio (suelo/clima ya medidos): ' + contexto : ''}
-
+ 
 Busca en publicaciones OFICIALES de INIA (Instituto de Investigaciones Agropecuarias de Chile): boletines tecnicos, informativos, "Tierra Adentro", estudios de zonificación agroclimática, o el sitio del centro regional INIA correspondiente a esa región (por ejemplo INIA Rayentué para O'Higgins, INIA La Platina para Metropolitana, etc.), disponibles en biblioteca.inia.cl o inia.cl.
-
+ 
 Busca especificamente:
 - Si INIA recomienda o ha estudiado este cultivo para esa zona/región.
 - Variedades recomendadas por INIA para la zona, si las hay.
 - Requerimientos agroclimáticos que INIA reporte (horas frío, riesgo de helada, tipo de suelo) para este cultivo.
 - Cualquier boletín técnico o informativo relevante.
-
+ 
 Reglas estrictas:
 - Solo usa fuentes de inia.cl o biblioteca.inia.cl. No inventes recomendaciones ni cites estudios que no puedas encontrar realmente.
 - Si no encuentras informacion especifica de INIA para esta combinacion cultivo+zona, dilo claramente: no completes con conocimiento general no verificado como si fuera de INIA.
 - Cita SIEMPRE la URL de la fuente especifica que uses (no solo la portada de inia.cl).
-
+ 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
 {"encontrado":true|false,"resumen":"...","variedadesRecomendadas":"...","requerimientos":"...","fuenteUrl":"...","fuenteNombre":"...","fechaPublicacion":"..."}
-
+ 
 Si encontrado es false, deja los demas campos como "".
 "resumen" debe ser un parrafo breve (3-5 lineas) parafraseado, no una copia literal del texto original.`;
-
+ 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -410,31 +410,31 @@ Si encontrado es false, deja los demas campos como "".
         tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }]
       })
     });
-
+ 
     if (!response.ok) {
       const errText = await response.text();
       console.error('Anthropic API error (consultar-inia):', response.status, errText);
       return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al consultar.', detail: errText.substring(0, 500) });
     }
-
+ 
     const data = await response.json();
     const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
     const fuentesConsultadas = (data.content || [])
       .filter(b => b.type === 'web_search_tool_result')
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
-
+ 
     const resultado = extraerJSON(texto);
     if (!resultado) {
       return res.json({ ok: false, mensaje: 'La consulta no devolvio una respuesta interpretable (o se corto por longitud).', fuentesConsultadas });
     }
-
+ 
     if (!resultado.encontrado) {
       return res.json({ ok: true, encontrado: false,
         mensaje: 'No se encontró información específica de INIA para "' + cultivo + '" en esta zona. Prueba con el nombre del cultivo en español simple, o consulta directamente con el centro regional INIA correspondiente.',
         fuentesConsultadas });
     }
-
+ 
     // Solo se acepta como fuente valida un dominio de INIA (segunda capa de seguridad, no depender solo del prompt)
     const fuenteUrl = String(resultado.fuenteUrl || '').trim();
     const fuenteValida = /(^|\.)inia\.cl(\/|$)/i.test(fuenteUrl.replace(/^https?:\/\//, ''));
@@ -443,7 +443,7 @@ Si encontrado es false, deja los demas campos como "".
         mensaje: 'La búsqueda no encontró una fuente oficial de inia.cl verificable para esta consulta.',
         fuentesConsultadas });
     }
-
+ 
     return res.json({
       ok: true, encontrado: true,
       resumen: String(resultado.resumen || '').trim(),
@@ -458,7 +458,7 @@ Si encontrado es false, deja los demas campos como "".
     res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
   }
 });
-
+ 
 // ──────────────── INFRAESTRUCTURA ELECTRICA CERCANA (ArcGIS publico Min. Energia) ────────────────
 // Consulta el servicio geografico PUBLICO del Ministerio de Energia (IDE_ENERGIA) y calcula
 // la distancia real desde el punto del predio a la linea de transmision y a la subestacion
@@ -474,7 +474,7 @@ app.post('/energia-cercana', async (req, res) => {
     const latN = parseFloat(String(lat || '').replace(',', '.'));
     const lonN = parseFloat(String(lon || '').replace(',', '.'));
     if (!isFinite(latN) || !isFinite(lonN)) return res.status(400).json({ ok: false, mensaje: 'Faltan coordenadas del predio (lat/lon).' });
-
+ 
     // Radio de busqueda: se amplia progresivamente si no encuentra nada cerca (predios rurales
     // pueden estar lejos de la red). 15 km -> 40 km -> 80 km.
     const radios = [15000, 40000, 80000];
@@ -483,7 +483,7 @@ app.post('/energia-cercana', async (req, res) => {
       { id: 9, nombre: 'Subestación', campo: 'subestacion' }
     ];
     const resultado = {};
-
+ 
     for (const capa of capas) {
       let encontrado = null;
       for (const radio of radios) {
@@ -533,7 +533,7 @@ app.post('/energia-cercana', async (req, res) => {
         ? { distanciaKm: encontrado.distanciaKm, nombre: encontrado.atributos.Nombre || encontrado.atributos.NOMBRE || encontrado.atributos.name || '', voltaje: encontrado.atributos.Tension || encontrado.atributos.TENSION || encontrado.atributos.voltage || '' }
         : null;
     }
-
+ 
     res.json({
       ok: true,
       lineaTransmision: resultado.lineaTransmision,
@@ -547,7 +547,7 @@ app.post('/energia-cercana', async (req, res) => {
     res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message, debug });
   }
 });
-
+ 
 // ──────────────── CONSULTA NORMATIVA: USO DE SUELO PARA PANELES SOLARES (IA + busqueda web) ────────────────
 // Pregunta REGULATORIA, no tecnica: si el suelo agricola de este predio permite instalar
 // paneles solares. Se responde SOLO citando fuentes oficiales reales (SEC, CNE, Ministerio
@@ -558,37 +558,37 @@ app.post('/consultar-normativa-solar', async (req, res) => {
     const { comuna, region, claseSuelo } = req.body || {};
     if (!comuna) return res.status(400).json({ ok: false, mensaje: 'Falta la comuna del predio.' });
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
-
+ 
     const prompt = `Necesito saber si un predio agrícola en Chile puede destinarse a la instalación de paneles solares (proyecto fotovoltaico), desde el punto de vista NORMATIVO/REGULATORIO.
-
+ 
 Comuna: ${comuna}
 Región: ${region || '(no especificada)'}
 ${claseSuelo ? 'Clase de capacidad de uso del suelo (CIREN): ' + claseSuelo : ''}
-
+ 
 Busca en fuentes OFICIALES chilenas: SAG (permisos para construcciones ajenas a la agricultura en área rural), Superintendencia de Electricidad y Combustibles (SEC), Comisión Nacional de Energía (CNE), Ministerio de Energía, Servicio de Evaluación Ambiental (SEIA), o el Plan Regulador Comunal de esa comuna si es pertinente.
-
+ 
 Busca específicamente si existe alguna restricción o trámite requerido para instalar proyectos fotovoltaicos en suelo de uso agrícola en Chile.
-
+ 
 Reglas estrictas sobre las fuentes:
 - Solo usa fuentes gubernamentales oficiales (.gob.cl, .cl de organismos públicos). No inventes una regla genérica no verificada.
 - Si no encuentras normativa específica, dilo claramente. NO derives una conclusión de "sí" o "no" a partir de la clase de suelo por tu cuenta: eso sería un criterio inventado, no verificado.
 - Cita cada fuente real que uses, con su URL exacta.
-
+ 
 Reglas estrictas sobre CÓMO REDACTAR la respuesta — esto es MUY IMPORTANTE porque lo va a leer una persona sin formación legal, que necesita entenderlo a la primera lectura, no un abogado:
 - NO uses lenguaje legal, ni cites artículos de ley por número dentro del texto, ni encadenes fuentes dentro de la misma oración (nada de "según el Art. 55° de la LGUC y la Circular N°296...").
 - Escribe como si le explicaras la situación a un colega en una conversación: frases cortas, directas, sin tecnicismos innecesarios.
 - Estructura la respuesta en dos partes separadas: (1) un resumen breve de la situación en 2-4 frases simples, y (2) un listado de pasos concretos y accionables que la persona debe seguir en la práctica, en orden.
 - Los nombres de trámites o instituciones sí puedes mencionarlos (ej. "SAG", "permiso IFC"), pero explica en una frase simple qué es cada uno la primera vez que lo nombras.
 - Todas las referencias legales (números de ley, circulares, artículos) van SOLO en el arreglo de fuentes, nunca mezcladas dentro del resumen o los pasos.
-
+ 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
 {"encontrado":true|false,"resumen":"...","pasos":["...","..."],"fuentes":[{"nombre":"...","url":"...","fecha":"..."}]}
-
+ 
 "resumen": 2-4 frases simples que respondan la pregunta central (¿se puede o no, en términos generales?).
 "pasos": lista de 2-6 pasos concretos, cada uno una frase corta y accionable (ej. "Solicitar el permiso IFC al SAG antes de construir").
 "fuentes": cada fuente real y verificable que hayas usado, con su nombre corto, URL exacta, y fecha de publicación si la tiene.
 Si encontrado es false, deja "resumen","pasos" y "fuentes" vacíos.`;
-
+ 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': ANTHROPIC_API_KEY, 'anthropic-version': '2023-06-01' },
@@ -599,23 +599,23 @@ Si encontrado es false, deja "resumen","pasos" y "fuentes" vacíos.`;
         tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 }]
       })
     });
-
+ 
     if (!response.ok) {
       const errText = await response.text();
       console.error('Anthropic API error (consultar-normativa-solar):', response.status, errText);
       return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al consultar.', detail: errText.substring(0, 500) });
     }
-
+ 
     const data = await response.json();
     const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
     const fuentesConsultadas = (data.content || [])
       .filter(b => b.type === 'web_search_tool_result')
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
-
+ 
     const resultado = extraerJSON(texto);
     if (!resultado) return res.json({ ok: false, mensaje: 'La consulta no devolvió una respuesta interpretable (o se cortó por longitud). Reintenta; si persiste, la consulta es muy compleja para el límite de tokens.', fuentesConsultadas });
-
+ 
     if (!resultado.encontrado) {
       return res.json({ ok: true, encontrado: false,
         mensaje: 'No se encontró normativa específica y verificable para esta comuna. Consulta directamente con la SEC, la CNE o un abogado especializado en energía antes de avanzar con un proyecto solar.',
@@ -627,7 +627,7 @@ Si encontrado es false, deja "resumen","pasos" y "fuentes" vacíos.`;
       .filter(f => f && /\.gob\.cl(\/|$)|coordinador\.cl(\/|$)/i.test(String(f.url || '').trim().replace(/^https?:\/\//, '')))
       .map(f => ({ nombre: String(f.nombre || '').trim(), url: String(f.url || '').trim(), fecha: String(f.fecha || '').trim() }));
     const pasos = Array.isArray(resultado.pasos) ? resultado.pasos.map(p => String(p || '').trim()).filter(Boolean) : [];
-
+ 
     if (!fuentes.length) {
       return res.json({ ok: true, encontrado: false, mensaje: 'La búsqueda no encontró una fuente gubernamental oficial verificable.', fuentesConsultadas });
     }
@@ -648,42 +648,42 @@ app.post('/buscar-comparables', async (req, res) => {
     const { comuna, region, superficieObjetivo } = req.body || {};
     if (!comuna) return res.status(400).json({ ok: false, mensaje: 'Falta la comuna del predio.' });
     if (!ANTHROPIC_API_KEY) return res.status(500).json({ ok: false, mensaje: 'Falta ANTHROPIC_API_KEY en el servidor.' });
-
+ 
     const sup = parseFloat(String(superficieObjetivo || '0').replace(',', '.')) || 0;
     const rangoTxt = sup > 0 ? ('Busca preferentemente predios de tamaño similar, entre ' + Math.round(sup * 0.3) + ' y ' + Math.round(sup * 3) + ' hectáreas aproximadamente (el predio en tasación tiene ' + sup + ' ha).') : '';
-
+ 
     const prompt = `Necesito encontrar OFERTAS VIGENTES (publicadas ahora mismo) de campos o predios agrícolas EN VENTA, para usar como referencias de mercado en una tasación agrícola profesional en Chile.
-
+ 
 Comuna del predio en tasación: ${comuna}
 Región: ${region || '(no especificada)'}
 ${rangoTxt}
-
+ 
 Busca en estos portales y corredores (y otros similares de propiedades agrícolas en Chile si los encuentras):
 - portalinmobiliario.com (sección Campos/Terrenos agrícolas)
 - colliers.cl o colliers.com (Chile, agrícola)
 - gpsproperty.cl (sección Agrícola)
 - Otros corredores especializados en campos agrícolas chilenos (ej. Tattersall Campos, Ipropiedadesagricolas, Aqueveque Propiedades, etc.)
-
+ 
 Busca ofertas EN LA MISMA COMUNA o en comunas VECINAS de la misma región (prioriza cercanía geográfica real). Busca hasta 6 ofertas distintas si existen.
-
+ 
 Para cada oferta que encuentres, extrae SOLO lo que está publicado explícitamente:
 - Nombre/referencia de la oferta o corredor
 - Ubicación (comuna/sector)
 - Superficie en hectáreas
 - Precio total (o precio por hectárea si es lo único publicado)
 - URL directa de la publicación
-
+ 
 Reglas estrictas:
 - NUNCA inventes ni estimes un precio o superficie que no esté publicado explícitamente. Si el precio dice "Consultar" o no está publicado, indícalo así, no lo omitas ni lo inventes.
 - No repitas la misma propiedad dos veces.
 - Cada oferta debe tener su URL real y verificable.
 - Si no encuentras ninguna oferta real y vigente, dilo claramente: no inventes ofertas de relleno.
-
+ 
 Responde EXCLUSIVAMENTE con un JSON (sin texto antes ni despues, sin \`\`\`), con esta forma exacta:
 {"encontrado":true|false,"ofertas":[{"oferta":"...","ubicacion":"...","superficieHa":"...","precioTotal":"...","precioHa":"...","url":"...","fuente":"..."}]}
-
+ 
 Si encontrado es false, deja "ofertas" como un array vacío.`;
-
+ 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: {
@@ -698,25 +698,25 @@ Si encontrado es false, deja "ofertas" como un array vacío.`;
         tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 10 }]
       })
     });
-
+ 
     if (!response.ok) {
       const errText = await response.text();
       console.error('Anthropic API error (buscar-comparables):', response.status, errText);
       return res.status(502).json({ ok: false, mensaje: 'Error de la API de Claude al buscar.', detail: errText.substring(0, 500) });
     }
-
+ 
     const data = await response.json();
     const texto = (data.content || []).filter(b => b.type === 'text').map(b => b.text || '').join('\n').trim();
     const fuentesConsultadas = (data.content || [])
       .filter(b => b.type === 'web_search_tool_result')
       .flatMap(b => (Array.isArray(b.content) ? b.content : []))
       .map(r => r && r.url).filter(Boolean);
-
+ 
     const resultado = extraerJSON(texto);
     if (!resultado) {
       return res.json({ ok: false, mensaje: 'La búsqueda no devolvió una respuesta interpretable (o se cortó por longitud).', fuentesConsultadas });
     }
-
+ 
     const ofertasCrudas = Array.isArray(resultado.ofertas) ? resultado.ofertas : [];
     // Solo se aceptan ofertas con URL real (segunda capa de seguridad: sin URL, no se puede verificar -> se descarta)
     const ofertas = ofertasCrudas
@@ -731,60 +731,60 @@ Si encontrado es false, deja "ofertas" como un array vacío.`;
         url: String(o.url || '').trim(),
         fuente: String(o.fuente || '').trim()
       }));
-
+ 
     if (!resultado.encontrado || !ofertas.length) {
       return res.json({ ok: true, encontrado: false,
         mensaje: 'No se encontraron ofertas vigentes verificables para ' + comuna + '. Prueba ampliando a una comuna vecina, o agrega referencias manualmente.',
         fuentesConsultadas });
     }
-
+ 
     return res.json({ ok: true, encontrado: true, ofertas, fechaConsulta: new Date().toISOString().substring(0, 10), fuentesConsultadas });
   } catch (err) {
     console.error('Error en /buscar-comparables:', err);
     res.status(500).json({ ok: false, mensaje: 'Error del servidor: ' + err.message });
   }
 });
-
+ 
 // Cache en memoria de la lista de comunas de SimpleAPI (evita gastar consultas)
 const cacheComunas = { lista: null };
 const cacheBusquedas = {}; // resultados de buscar-rol por rol+comuna (24 h) para ahorrar cuota SimpleAPI
-
+ 
 app.post('/buscar-rol', async (req, res) => {
   const { rol, comuna } = req.body || {};
   if (!rol || !comuna) return res.status(400).json({ ok: false, error: 'Faltan rol y comuna' });
   if (!SIMPLEAPI_KEY) return res.json({ ok: false, error: 'Falta configurar SIMPLEAPI_KEY en Railway (Variables)' });
-
+ 
   const debug = [];
   const headers = { 'Authorization': SIMPLEAPI_KEY, 'Content-Type': 'application/json', 'Accept': 'application/json' };
   const rolLimpio = String(rol).trim();
   const comunaLimpia = String(comuna).trim();
-
+ 
   // Cache: si este rol+comuna ya se consulto con exito en las ultimas 24 h, no gastar cuota
   const claveCache = (rolLimpio + '|' + comunaLimpia).toLowerCase();
   const enCache = cacheBusquedas[claveCache];
   if (enCache && (Date.now() - enCache.t) < 24 * 3600 * 1000) {
     return res.json({ ...enCache.respuesta, cache: true });
   }
-
+ 
   const BASE = 'https://servicios.simpleapi.cl/api/mapas';
   const URL = SIMPLEAPI_URL || (BASE + '/buscar/rol');
-
+ 
   const partes = rolLimpio.split('-').map(s => s.trim());
   const manzana = partes[0] || '';
   const predio = partes[1] || '';
-
+ 
   const norm = s => (s || '').toString().trim().toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
+ 
   // Detecta el error transitorio del scraper de SimpleAPI contra el SII
   const esErrorComunas = (r) => {
     if (!r) return false;
     const msg = JSON.stringify(r).toLowerCase();
     return r.__status >= 400 && msg.includes('error al obtener comunas');
   };
-
+ 
   let resultado = null;
   let listaComunas = cacheComunas.lista;
-
+ 
   // ── Paso 1: intento directo con reintentos ──
   // "Error al obtener comunas" = fallo transitorio del lado de SimpleAPI/SII.
   // Reintentamos hasta 3 veces con pausa (respetando el limite de 5 consultas/min).
@@ -809,7 +809,7 @@ app.post('/buscar-rol', async (req, res) => {
     }
     break; // otro tipo de error: no insistir por la misma via
   }
-
+ 
   // ── Paso 3: resolver la comuna con el catalogo y buscar con el nombre/Id exacto ──
   if (!resultado && Array.isArray(listaComunas)) {
     const objetivo = norm(comunaLimpia);
@@ -833,7 +833,7 @@ app.post('/buscar-rol', async (req, res) => {
     const comunaNombre = found && (found.Comuna || found.comuna || found.Nombre || found.nombre);
     debug.push({ label: 'comuna-resuelta', comunaId: comunaId || 'NO ENCONTRADA', comunaNombre: comunaNombre || '-', buscado: objetivo, totalComunas: listaComunas.length,
       correccionAutomatica: corregidoDe ? ('"' + corregidoDe + '" no existe; se uso la comuna mas parecida: "' + comunaNombre + '"') : null });
-
+ 
     const bodies = [];
     if (comunaNombre) bodies.push({ comuna: comunaNombre, manzana, predio });
     if (comunaId !== undefined && comunaId !== null) bodies.push({ comuna: comunaId, manzana, predio });
@@ -843,7 +843,7 @@ app.post('/buscar-rol', async (req, res) => {
       if (r && r.__status === 200) { resultado = r; if (corregidoDe) resultado.__comunaCorregida = comunaNombre; break; }
     }
   }
-
+ 
   if (!resultado) {
     const huboTransitorio = debug.some(d => (d.snippet || '').toLowerCase().includes('error al obtener comunas'));
     const mensaje = huboTransitorio
@@ -851,11 +851,11 @@ app.post('/buscar-rol', async (req, res) => {
       : 'Ninguna ruta respondio con datos. Revisa el detalle.';
     return res.json({ ok: false, mensaje, debug });
   }
-
+ 
   // Mapeo flexible de campos (nombres reales confirmados de SimpleAPI Mapas)
   const cand = (resultado && (resultado.Datos || resultado.datos)) || (Array.isArray(resultado) ? resultado[0] : (resultado.data || resultado.predio || resultado.resultado || resultado));
   const g = (o, ...keys) => { for (const k of keys) { if (o && o[k] !== undefined && o[k] !== null && o[k] !== '') return o[k]; } return ''; };
-
+ 
   const datosMap = {
     avaluoFiscal: String(g(cand, 'ValorTotal', 'avaluo', 'avaluoTotal', 'avaluoFiscal')),
     avaluoAfecto: String(g(cand, 'ValorAfecto')),
@@ -871,26 +871,26 @@ app.post('/buscar-rol', async (req, res) => {
     lat: String(g(cand, 'PosicionX', 'lat', 'latitud')),
     lon: String(g(cand, 'PosicionY', 'lng', 'lon', 'longitud'))
   };
-
+ 
   console.log('SimpleAPI respuesta completa:', JSON.stringify(cand).substring(0, 2000));
-
+ 
   const vacio = !datosMap.avaluoFiscal && !datosMap.superficie && !datosMap.destino && !datosMap.lat;
   if (vacio) {
     debug.push({ label: 'RESPUESTA-COMPLETA (enviar a Claude para mapear campos)', respuesta: cand });
     return res.json({ ok: false, mensaje: 'El rol se encontro, pero los nombres de campos son distintos. Envia el detalle a Claude.', debug });
   }
-
+ 
   const respuestaOk = { ok: true, datos: datosMap, raw: cand, debug };
   cacheBusquedas[claveCache] = { t: Date.now(), respuesta: respuestaOk };
   res.json(respuestaOk);
 });
-
-
+ 
+ 
 // ──────── SUELOS AUTOMATICOS: CIREN Propiedades Rurales + Estudio Agrologico ────────
 const turf = require('@turf/turf');
 const XLSX = require('xlsx');
 const proj4 = require('proj4');
-
+ 
 const CIREN_BASE = 'https://esri.ciren.cl/server/rest/services';
 const CAPAS_REGION = [
   { id: 0, kw: ['ARICA'] }, { id: 1, kw: ['TARAPAC'] }, { id: 2, kw: ['ATACAMA'] },
@@ -903,9 +903,9 @@ const cacheSuelosCapas = { lista: null };
 const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
 const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
 const cacheUso = { svc: null, capas: null };
-
+ 
 const normU = s => (s || '').toString().replace(/[\u00a0\u2007\u202f]/g, ' ').trim().replace(/\s+/g, ' ').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
+ 
 function claseDesdeTexto(v){
   const t = normU(v).trim();
   const m = t.match(/^(VIII|VII|VI|V|IV|III|II|I)/);
@@ -914,18 +914,18 @@ function claseDesdeTexto(v){
   if (n) return ['I','II','III','IV','V','VI','VII','VIII'][parseInt(n[1])-1];
   return null;
 }
-
+ 
 const manejadorSuelos = async (req, res) => {
   const { rol, comuna, region } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
   if (!rol || !comuna) return res.status(400).json({ ok:false, error:'Faltan rol y comuna' });
-
+ 
   const debug = [];
   try {
     // 1) Capa regional de propiedades rurales
     const regionU = normU(region || '');
     const capa = CAPAS_REGION.find(cr => cr.kw.some(k => regionU.includes(k)));
     if (!capa) return res.json({ ok:false, mensaje:'No pude identificar la region "' + region + '". Completa la region en el formulario.', debug });
-
+ 
     // 2) Poligono del predio por rol + comuna
     const rolLimpio = String(rol).trim();
     const where = encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + normU(comuna) + "%'");
@@ -934,7 +934,7 @@ const manejadorSuelos = async (req, res) => {
     const rp = await fetch(urlPredio);
     const gj = await rp.json();
     debug.push({ paso:'predio', url: urlPredio, status: rp.status, features: (gj.features||[]).length });
-
+ 
     if (!gj.features || !gj.features.length) {
       // reintento sin filtro de comuna
       const url2 = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
@@ -960,13 +960,13 @@ const manejadorSuelos = async (req, res) => {
         caracteristicas:{}, camposDominante:null, capacidadUso:'NO AGRICOLA', notaClases:'', bbox:null, capaSueloId:null, capaPredioId:null, clasesSIIfiscal:null,
         fuente:'CIREN - IDE Minagri (referencial)', debug });
     }
-
+ 
     // Superficie SII registrada en el catastro (campo tipo "superfirea" del rol)
     const propsRol = gj.features[0].properties || {};
     const kSup = Object.keys(propsRol).find(k => /SUPERF/i.test(k) && propsRol[k] !== null && String(propsRol[k]).trim() !== '');
     const superficieSII = kSup ? (parseFloat(String(propsRol[kSup]).replace(',', '.')) || null) : null;
     debug.push({ paso:'superficie-sii', campo: kSup || 'no encontrado', valor: superficieSII });
-
+ 
     // Clasificacion de suelos SII (fiscal): campos rieNrea_ha / secNrea_ha del propio registro
     // del catastro de propiedades rurales (la misma tabla que muestra el visor de SIT Rural).
     // Es la clasificacion que el SII usa para el avaluo — NO es la capacidad de uso CIREN.
@@ -988,7 +988,7 @@ const manejadorSuelos = async (req, res) => {
       : null;
     debug.push({ paso:'clases-sii-fiscal', encontrado: !!clasesSIIfiscal, detalle: clasesSIIfiscal,
       nota: gj.features.length > 1 ? 'Rol en varias partes: la clasificacion fiscal se toma del primer registro (es del rol completo).' : undefined });
-
+ 
     let predio = gj.features[0];
     if (gj.features.length > 1) {
       // El rol puede venir en varias partes (paños separados): se unen todas para el analisis
@@ -1001,7 +1001,7 @@ const manejadorSuelos = async (req, res) => {
       } catch (e) { debug.push({ paso:'predio-union-error', error: e.message }); }
     }
     const superficieHa = turf.area(predio) / 10000;
-
+ 
     // 3) Capas del estudio agrologico (cache)
     if (!cacheSuelosCapas.lista) {
       const rs = await fetch(CIREN_BASE + '/ESTUDIO_AGROLOGICO_SUELOS/MapServer?f=json');
@@ -1012,7 +1012,7 @@ const manejadorSuelos = async (req, res) => {
     let capaSuelo = cacheSuelosCapas.lista.find(l => capa.kw.some(k => normU(l.name).includes(k)));
     if (!capaSuelo && cacheSuelosCapas.lista.length === 1) capaSuelo = cacheSuelosCapas.lista[0];
     if (!capaSuelo) debug.push({ paso:'capa-suelo-no-existe', nota:'CIREN no tiene ninguna capa de suelo indexada para esta region; se omite la consulta CIREN y se intentara SIT Rural como respaldo mas abajo.' });
-
+ 
     // 4) Suelos que intersectan el predio (bbox del predio como filtro espacial)
     // Si no hay capa CIREN para la region, gsu queda vacio "a proposito" (sin consultar nada)
     // y el flujo sigue igual hacia SIT Rural mas abajo, en vez de cortarse aqui.
@@ -1026,7 +1026,7 @@ const manejadorSuelos = async (req, res) => {
       debug.push({ paso:'suelos', capa: capaSuelo.name, id: capaSuelo.id, status: rsu.status, features: (gsu.features||[]).length,
         camposEjemplo: gsu.features && gsu.features[0] ? Object.keys(gsu.features[0].properties||{}) : [] });
     }
-
+ 
     if (!gsu.features || !gsu.features.length) {
       // ANTES esto cortaba la funcion aqui mismo y nunca se llegaba a intentar SIT Rural.
       // Ahora se deja constancia en el debug y el flujo SIGUE: mas abajo, SIT Rural (6c)
@@ -1034,14 +1034,14 @@ const manejadorSuelos = async (req, res) => {
       // del todo tampoco encontraron nada, recien ahi se informa "sin datos" (ver notaClases).
       debug.push({ paso:'suelos-ciren-vacio', nota:'CIREN no tiene poligonos de suelo para este predio; se intentara SIT Rural como respaldo mas abajo.' });
     }
-
+ 
     // 5) Detectar campo de clase y de serie
     const props0 = (gsu.features[0] && gsu.features[0].properties) || {};
     const claveClase = Object.keys(props0).find(k => /capac|cus|clase|us[oe]?$/i.test(k) && claseDesdeTexto(props0[k])) ||
                        Object.keys(props0).find(k => claseDesdeTexto(props0[k]));
     const claveSerie = Object.keys(props0).find(k => /serie|nomserie|asociaci/i.test(k));
     debug.push({ paso:'campos', claveClase, claveSerie });
-
+ 
     // 6) Interseccion y hectareas por clase + lista de poligonos ordenada por superficie
     const clases = {};
     let serie = '';
@@ -1065,7 +1065,7 @@ const manejadorSuelos = async (req, res) => {
     intersecciones.sort((a, b) => b.ha - a.ha);
     const dominante = intersecciones.length ? intersecciones[0].f : null;
     const dominanteHa = intersecciones.length ? intersecciones[0].ha : 0;
-
+ 
     // 6b) Caracteristicas del suelo (v2): busca por NOMBRE y ALIAS de campo,
     // y traduce codigos usando los dominios oficiales de la capa CIREN (sin inventar valores)
     const caracteristicas = {};
@@ -1081,7 +1081,7 @@ const manejadorSuelos = async (req, res) => {
       debug.push({ paso:'meta-capa', totalCampos: fields.length, campos: fields.map(f => f.name + (f.alias && f.alias !== f.name ? ' (' + f.alias + ')' : '')).slice(0, 40) });
       const metaDe = {};
       for (const fm of fields) metaDe[fm.name] = fm;
-
+ 
       // Traduce codigo -> descripcion oficial si el campo tiene dominio de valores en CIREN
       const decodificar = (nombreCampo, valor) => {
         const fm = metaDe[nombreCampo];
@@ -1091,9 +1091,9 @@ const manejadorSuelos = async (req, res) => {
         }
         return String(valor).trim();
       };
-
+ 
       const esValorUtil = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
-
+ 
       const OBJETIVOS = [
         ['textura',      /TEXTURA|TEXTTEXT/i],
         ['profundidad',  /PROF/i],
@@ -1104,7 +1104,7 @@ const manejadorSuelos = async (req, res) => {
         ['ph',           /(^|_)PH($|_)|ACIDEZ/i],
         ['aptitud',      /APTITUD|APT/i]
       ];
-
+ 
       for (const [clave, rx] of OBJETIVOS) {
         // Campos candidatos: coinciden por nombre O por alias descriptivo
         const candidatos = fields.filter(fm => rx.test(fm.name) || rx.test(fm.alias || '')).map(fm => fm.name);
@@ -1116,7 +1116,7 @@ const manejadorSuelos = async (req, res) => {
           if (campo) { caracteristicas[clave] = decodificar(campo, dp[campo]); fuentePorCampo.caracteristicas = 'CIREN'; break; }
         }
       }
-
+ 
       if (!serie) {
         const rxS = /SERIE|ASOCIA/i;
         const candS = fields.filter(fm => rxS.test(fm.name) || rxS.test(fm.alias || '')).map(fm => fm.name);
@@ -1129,7 +1129,7 @@ const manejadorSuelos = async (req, res) => {
     } catch (e) {
       if (e.message !== '__sin_capa_ciren__') debug.push({ paso:'caracteristicas-error', error: e.message });
     }
-
+ 
     let respPlantaciones = null;
     let respFruticolaNota = '';
     let respCapaFrut = null;
@@ -1156,7 +1156,7 @@ const manejadorSuelos = async (req, res) => {
         debug.push({ paso:'sitrural-capas', status: rc.status, totalCapas: capas.length,
           capasSuelos: soloSuelos.length, ejemplos: soloSuelos.slice(0, 10).map(x => x.n + ' | ' + x.t) });
       }
-
+ 
       const objetivoCom = normU(comuna).replace(/\s+/g, '');
       // SIT Rural abrevia nombres de comuna ("Q.de Tilcoco", "Sn.Gregorio", "Pto.Natales"):
       // ademas del nombre completo, se calza por la palabra distintiva de la comuna.
@@ -1186,11 +1186,11 @@ const manejadorSuelos = async (req, res) => {
         .sort((a, b) => puntaje(b) - puntaje(a));
       debug.push({ paso:'sitrural-candidatas', comuna: comuna,
         capas: candidatasSit.slice(0, 8).map(x => puntaje(x) + ' | ' + x.n + ' | ' + x.t) });
-
+ 
       const bbS = turf.bbox(predio);
       const centro = turf.centroid(predio).geometry.coordinates; // [lon, lat]
       let usadaSit = null, featsSit = null;
-
+ 
       const traerJson = async (url, etiqueta) => {
         try {
           const r = await fetch(url);
@@ -1209,7 +1209,7 @@ const manejadorSuelos = async (req, res) => {
           return null;
         }
       };
-
+ 
       // ── Clasificacion SII (fiscal): capa "Propiedades rurales <comuna>" de SIT Rural.
       // Verificado contra el servidor: los campos rieN/secN NO existen en CIREN
       // (su capa de propiedades solo trae rol y comuna); viven unicamente en esta
@@ -1285,7 +1285,7 @@ const manejadorSuelos = async (req, res) => {
           }
         }
       } catch (e) { debug.push({ paso:'sitrural-prop-fiscal-error', error: e.message }); }
-
+ 
       for (const cand of candidatasSit.slice(0, 2)) {
         // 1) Preguntar al servidor el nombre real del campo de geometria y los atributos
         let geomName = 'the_geom';
@@ -1301,10 +1301,10 @@ const manejadorSuelos = async (req, res) => {
           }
           debug.push({ paso:'sitrural-describe', capa: cand.t, geometria: geomName, atributos: campos.slice(0, 40) });
         } catch (e) { debug.push({ paso:'sitrural-describe', capa: cand.t, error: e.message }); }
-
+ 
         const base = SIT_WFS + '?service=WFS&request=GetFeature&typeName=' + encodeURIComponent(cand.n) +
           '&outputFormat=application/json&maxFeatures=300';
-
+ 
         // 2) Metodos de filtro espacial en cascada hasta que uno funcione
         const intentos = [
           ['1.0 BBOX+CRS',   base + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
@@ -1320,7 +1320,7 @@ const manejadorSuelos = async (req, res) => {
         }
         if (featsSit) break;
       }
-
+ 
       if (featsSit) {
         debug.push({ paso:'sitrural-suelos', capa: usadaSit.t, features: featsSit.length,
           camposEjemplo: Object.keys(featsSit[0].properties || {}) });
@@ -1337,7 +1337,7 @@ const manejadorSuelos = async (req, res) => {
         interSit.sort((a, b) => b.ha - a.ha);
         debug.push({ paso:'sitrural-interseccion', poligonos: interSit.length,
           propsDominante: interSit.length ? interSit[0].f.properties : null });
-
+ 
         if (interSit.length) {
           const util = v => v !== null && v !== undefined && String(v).trim() !== '' && String(v).trim() !== '0';
           // Cubre nombres descriptivos (pendiente) y nombres CIREN de shapefile (textpend1, textph2, textapag1...)
@@ -1405,7 +1405,7 @@ const manejadorSuelos = async (req, res) => {
           const listaSeries = Object.entries(seriesHa).sort((x, y) => y[1] - x[1]).map(e => e[0]);
           if (listaSeries.length) { serie = listaSeries.join(', '); fuentePorCampo.serie = 'SIT Rural'; }
           debug.push({ paso:'sitrural-series', series: Object.entries(seriesHa).map(e => e[0] + ' (' + (Math.round(e[1]*10)/10) + ' ha)') });
-
+ 
           // Clase de capacidad de uso (I a VIII): mismo criterio que la capa CIREN principal
           // (campo cuyo nombre calza con /capac|cus|clase|us[oe]?$/i Y cuyo valor decodifica a
           // numero romano I-VIII), aplicado sobre CADA poligono para sumar hectareas por clase.
@@ -1423,12 +1423,17 @@ const manejadorSuelos = async (req, res) => {
           if (algunaSit) debug.push({ paso:'sitrural-ok', caracteristicas, serie });
         }
       }
-
+ 
       // 6d) Catastro Fruticola CIREN (SIT Rural): cuarteles frutales dentro del predio
       try {
-        const capaFrut = (cacheSitrural.capas || []).find(x => /FRUT/i.test(x.t) && esDeLaComuna(x));
+        // Se busca en el titulo Y en el nombre tecnico: algunas comunas publican la capa
+        // sin titulo descriptivo, y antes esas quedaban fuera.
+        const capaFrut = (cacheSitrural.capas || []).find(x => /FRUT/i.test(x.t + ' ' + x.n) && esDeLaComuna(x));
+        const otrasFrut = (cacheSitrural.capas || []).filter(x => /FRUT/i.test(x.t + ' ' + x.n)).slice(0, 6).map(x => x.n + ' | ' + x.t);
         if (capaFrut) respCapaFrut = capaFrut.n;
-        debug.push({ paso:'fruticola-capa', capa: capaFrut ? (capaFrut.n + ' | ' + capaFrut.t) : 'SIN CATASTRO FRUTICOLA PARA LA COMUNA' });
+        debug.push({ paso:'fruticola-capa', comuna: comuna,
+          capa: capaFrut ? (capaFrut.n + ' | ' + capaFrut.t) : 'SIN CATASTRO FRUTICOLA PARA LA COMUNA',
+          capasFruticolasDisponibles: capaFrut ? undefined : otrasFrut });
         if (capaFrut) {
           let geomF = 'thegeom';
           try {
@@ -1442,8 +1447,25 @@ const manejadorSuelos = async (req, res) => {
           } catch (e) {}
           const baseF = SIT_WFS + '?service=WFS&request=GetFeature&typeName=' + encodeURIComponent(capaFrut.n) +
             '&outputFormat=application/json&maxFeatures=500';
-          const cqlF = "BBOX(" + geomF + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')";
-          const jf = await traerJson(baseF + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' + encodeURIComponent(cqlF), 'fruticola ' + capaFrut.t);
+          // Cascada de metodos de filtro espacial, igual que en la capa de suelos: si el
+          // servidor rechaza uno, se intenta el siguiente en vez de quedar en silencio.
+          const intentosF = [
+            ['1.0 BBOX+CRS', baseF + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+              encodeURIComponent("BBOX(" + geomF + "," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')")],
+            ['1.0 BBOX ampliado', baseF + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+              encodeURIComponent("BBOX(" + geomF + "," + (bbS[0]-0.003) + "," + (bbS[1]-0.003) + "," + (bbS[2]+0.003) + "," + (bbS[3]+0.003) + ",'EPSG:4326')")],
+            ['1.1 bbox lon-lat', baseF + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[0], bbS[1], bbS[2], bbS[3], 'EPSG:4326'].join(',')],
+            ['1.1 bbox lat-lon', baseF + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[1], bbS[0], bbS[3], bbS[2], 'urn:x-ogc:def:crs:EPSG:4326'].join(',')],
+            ['1.0 geometria the_geom', baseF + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
+              encodeURIComponent("BBOX(the_geom," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')")]
+          ];
+          let jf = null;
+          for (const [etq, url] of intentosF) {
+            const r = await traerJson(url, 'fruticola ' + capaFrut.t + ' | ' + etq);
+            if (r && r.features && r.features.length) { jf = r; debug.push({ paso:'fruticola-metodo', funciono: etq, features: r.features.length }); break; }
+          }
+          if (!jf) debug.push({ paso:'fruticola-sin-resultado', geometriaDetectada: geomF,
+            nota: 'Los 5 metodos de consulta devolvieron vacio. O el predio no tiene cuarteles catastrados, o la capa usa otro campo de geometria.' });
           if (jf && jf.features && jf.features.length) {
             debug.push({ paso:'fruticola-campos', campos: Object.keys(jf.features[0].properties || {}) });
             const utilF = v => v !== null && v !== undefined && String(v).trim() !== '';
@@ -1564,13 +1586,13 @@ const manejadorSuelos = async (req, res) => {
         }
       } catch (e) { debug.push({ paso:'fruticola-error', error: e.message }); }
     } catch (e) { debug.push({ paso:'sitrural-error', error: e.message }); }
-
+ 
     if (dominante) {
       camposDominante = dominante.properties || {};
       debug.push({ paso:'dominante', ha: Math.round(dominanteHa*100)/100, propiedades: camposDominante });
     }
     Object.keys(clases).forEach(k => clases[k] = Math.round(clases[k] * 100) / 100);
-
+ 
     // 7) Uso actual del suelo y vegetacion (catastro CONAF/IDE) - descubrimiento automatico del servicio
     const usos = {};
     try {
@@ -1617,7 +1639,7 @@ const manejadorSuelos = async (req, res) => {
         }
       }
     } catch(e) { debug.push({ paso:'uso-error', error: e.message }); }
-
+ 
     // Diagnostico claro cuando las clases vienen vacias
     let notaClases = '';
     if (!Object.keys(clases).length && gsu.features && gsu.features.length) {
@@ -1627,7 +1649,7 @@ const manejadorSuelos = async (req, res) => {
     } else if (!Object.keys(clases).length) {
       notaClases = 'Ni CIREN ni SIT Rural tienen datos de clase de suelo publicados para este predio (zona sin levantamiento agrologico disponible). Completa la clasificacion manualmente con el certificado de avaluo o criterio profesional en terreno.';
     }
-
+ 
     const ordenRom = ['I','II','III','IV','V','VI','VII','VIII'];
     const capacidadUso = ordenRom.filter(r => clases[r] > 0).join('-');
     let predioGeo = null;
@@ -1635,16 +1657,16 @@ const manejadorSuelos = async (req, res) => {
       const simple = turf.simplify(predio, { tolerance: 0.00008, highQuality: false });
       predioGeo = simple.geometry;
     } catch (e) { try { predioGeo = predio.geometry; } catch (e2) {} }
-
+ 
     // Fuente REAL de los datos (honesto): puede ser solo CIREN, solo SIT Rural, o una
     // mezcla (ej. clase vino de SIT Rural pero uso de suelo vino de CONAF/CIREN aparte).
     const fuentesUsadas = [...new Set(Object.values(fuentePorCampo).filter(Boolean))];
     const fuenteSuelo = fuentesUsadas.length === 0 ? 'Sin datos de suelo' :
       fuentesUsadas.length === 1 ? fuentesUsadas[0] : fuentesUsadas.join(' + ');
     debug.push({ paso:'fuente-real-suelo', fuentePorCampo, resumen: fuenteSuelo });
-
+ 
     res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, clasesSIIfiscal, fuente:'CIREN - IDE Minagri (referencial)', fuenteSuelo, fuentePorCampo, debug });
-
+ 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
     debug.push({ paso:'error-general', error: err.message });
@@ -1653,7 +1675,7 @@ const manejadorSuelos = async (req, res) => {
 };
 app.post('/suelos-rol', manejadorSuelos);
 app.get('/suelos-rol', manejadorSuelos); // permite probar por link: /suelos-rol?rol=75-32&comuna=galvarino
-
+ 
 // ──────── DIAGNOSTICO SIT RURAL v2 (abrir en el navegador: /diag-sitrural) ────────
 // Lee el codigo de la pagina del visor SIT Rural y extrae las direcciones reales
 // (API y geoservidor) que usa internamente, ademas de probar rutas candidatas.
@@ -1669,19 +1691,19 @@ app.get('/diag-sitrural', async (req, res) => {
       return { status: r.status, tipo: r.headers.get('content-type') || '', texto };
     } catch (e) { clearTimeout(t); return { error: e.message, texto: '' }; }
   };
-
+ 
   // 1) Pagina principal del visor
   const base = 'https://visor.sitrural.cl';
   const pag = await traer(base + '/mapa');
   salida.mapa = { status: pag.status, tipo: pag.tipo, largo: pag.texto.length };
-
+ 
   const urlsAbs = [...new Set((pag.texto.match(/https?:\/\/[^"'\s<>\\)]+/g) || []))].slice(0, 40);
   salida.urlsEnPagina = urlsAbs;
-
+ 
   const scripts = [...new Set((pag.texto.match(/src\s*=\s*["']([^"']+\.js[^"']*)["']/g) || [])
     .map(s => s.replace(/src\s*=\s*["']/, '').replace(/["']$/, '')))].slice(0, 6);
   salida.scripts = scripts;
-
+ 
   // 2) Leer los archivos JS del visor y extraer pistas
   salida.pistas = [];
   for (const s of scripts) {
@@ -1701,7 +1723,7 @@ app.get('/diag-sitrural', async (req, res) => {
     }
     salida.pistas.push({ script: urlS, largo: js.texto.length, urls, rutasApi: rutas, contextoGeo: geo });
   }
-
+ 
   // 3) Rutas candidatas directas
   const candidatas = [
     base + '/geoserver/ows?service=WFS&version=1.0.0&request=GetCapabilities',
@@ -1721,7 +1743,7 @@ app.get('/diag-sitrural', async (req, res) => {
   }
   res.json(salida);
 });
-
+ 
 app.post('/distancias', async (req, res) => {
   const { lat, lon, comuna } = req.body || {};
   if (!lat || !lon) return res.status(400).json({ ok:false, error:'Faltan coordenadas' });
@@ -1729,7 +1751,7 @@ app.post('/distancias', async (req, res) => {
   const la = parseFloat(String(lat).replace(',','.'));
   const lo = parseFloat(String(lon).replace(',','.'));
   const SCL = { lat: -33.4372, lon: -70.6506 }; // Plaza de Armas, Santiago
-
+ 
   const ruta = async (aLat, aLon, bLat, bLon, etiqueta) => {
     try {
       const u = 'https://router.project-osrm.org/route/v1/driving/' + aLon + ',' + aLat + ';' + bLon + ',' + bLat + '?overview=false';
@@ -1744,9 +1766,9 @@ app.post('/distancias', async (req, res) => {
     const recta = 2 * R * Math.asin(Math.sqrt(h));
     return { km: Math.round(recta * 1.25 * 10) / 10, min: null, estimado: true };
   };
-
+ 
   const santiago = await ruta(la, lo, SCL.lat, SCL.lon, 'ruta-santiago');
-
+ 
   // Centro comunal via Nominatim (geocodificador OpenStreetMap, gratis)
   let comunaDist = null, comunaNombre = null, accesoTxt = null;
   if (comuna) {
@@ -1781,10 +1803,10 @@ app.post('/distancias', async (req, res) => {
       }
     } catch(e) { debug.push({ paso: 'geocodificar-error', error: e.message }); }
   }
-
+ 
   res.json({ ok:true, santiago, comuna: comunaDist, comunaNombre, acceso: accesoTxt, debug });
 });
-
+ 
 // ──────── DESLINDES REFERENCIALES: roles vecinos CIREN + vias OpenStreetMap ────────
 app.post('/deslindes', async (req, res) => {
   const { bbox, capaPredioId, rol } = req.body || {};
@@ -1832,7 +1854,7 @@ app.post('/deslindes', async (req, res) => {
   }
   res.json({ ok:true, ...resultado, nota:'Deslindes referenciales (catastro CIREN + OpenStreetMap). Validar con titulos de dominio.', debug });
 });
-
+ 
 // ──────── DERECHOS DE AGUA (DGA - Catastro Publico de Aguas) ────────
 // La DGA publica un Excel por region con los derechos concedidos (actualizacion mensual).
 // Se descarga una vez, se cachea en memoria y se cruza con el predio por coordenadas UTM.
@@ -1856,13 +1878,13 @@ const DGA_REGIONES = {
   'MAGALLANES': 'Derechos_Concedidos_XII_Region.xls'
 };
 const cacheDGA = {}; // filas por region
-
+ 
 const archivoRegion = (region) => {
   const r = normU(region);
   const k = Object.keys(DGA_REGIONES).find(x => r.includes(x) || x.includes(r));
   return k ? { clave: k, archivo: DGA_REGIONES[k] } : null;
 };
-
+ 
 const cargarDGA = async (region, debug, fresh) => {
   const info = archivoRegion(region);
   if (!info) return { error: 'Region no reconocida: ' + region };
@@ -1920,7 +1942,7 @@ const cargarDGA = async (region, debug, fresh) => {
     return { ...paquete, region: info.clave };
   } catch (e) { return { error: 'Error leyendo Excel DGA: ' + e.message }; }
 };
-
+ 
 // Diagnostico: muestra los nombres reales de columnas del Excel de la DGA
 app.get('/diag-dga', async (req, res) => {
   const region = req.query.region || 'ohiggins';
@@ -1935,8 +1957,8 @@ app.get('/diag-dga', async (req, res) => {
     debug
   });
 });
-
-
+ 
+ 
 // Busqueda de derechos: por comuna, por titular y por punto de captacion dentro del predio
 const manejadorDerechos = async (req, res) => {
   const { region, comuna, titular, bbox } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
@@ -1945,7 +1967,7 @@ const manejadorDerechos = async (req, res) => {
   const { filas, error } = await cargarDGA(region, debug, (req.query||{}).fresh);
   if (error) return res.json({ ok:false, error, debug });
   if (!filas.length) return res.json({ ok:false, error:'El Excel de la DGA vino vacio', debug });
-
+ 
   const cols = Object.keys(filas[0]);
   const col = (rx) => cols.find(k => rx.test(normU(k)));
   const C = {
@@ -1964,13 +1986,13 @@ const manejadorDerechos = async (req, res) => {
     nroRes:   col(/N.*RESOL|RESOLUCION|CODIGO.*EXPEDIENTE/)
   };
   debug.push({ paso:'dga-columnas', version:'v40', detectadas: C, totalColumnas: cols.length, primeros10Encabezados: cols.slice(0, 10) });
-
+ 
   const objComuna = normU(comuna || '');
   const objTitular = normU(titular || '');
   let candidatas = filas;
   if (objComuna && C.comuna) candidatas = candidatas.filter(f => normU(f[C.comuna]).includes(objComuna));
   debug.push({ paso:'dga-filtro-comuna', comuna: objComuna, resultado: candidatas.length });
-
+ 
   const num = v => parseFloat(String(v).replace(/\./g, '').replace(',', '.')) || 0;
   const mapear = (f, motivo) => {
     const g = (k) => (k && f[k] !== undefined && f[k] !== null) ? String(f[k]).replace(/\s+/g, ' ').trim() : '';
@@ -1996,7 +2018,7 @@ const manejadorDerechos = async (req, res) => {
       motivo
     };
   };
-
+ 
   // Conversion UTM -> lat/lon respetando el Datum del registro.
   // Critico: un punto PSAD56 leido como WGS84 se desvia ~200 m y caeria fuera del predio.
   const WGS84 = '+proj=longlat +datum=WGS84 +no_defs';
@@ -2040,7 +2062,7 @@ const manejadorDerechos = async (req, res) => {
     encontrados.push(...porTit);
     debug.push({ paso:'dga-por-titular', titular: objTitular, encontrados: porTit.length });
   }
-
+ 
   res.json({
     ok: true,
     derechos: encontrados.slice(0, 60),
@@ -2051,7 +2073,7 @@ const manejadorDerechos = async (req, res) => {
 };
 app.post('/derechos-agua', manejadorDerechos);
 app.get('/derechos-agua', manejadorDerechos); // prueba por link: /derechos-agua?region=ohiggins&comuna=quinta de tilcoco
-
+ 
 // ──────── PROXY DE IMAGENES SIT RURAL (para dibujar la capa fruticola en el plano) ────────
 app.get('/img-sitrural', async (req, res) => {
   try {
@@ -2064,7 +2086,7 @@ app.get('/img-sitrural', async (req, res) => {
     res.send(Buffer.from(await r.arrayBuffer()));
   } catch (e) { res.status(500).send(e.message); }
 });
-
+ 
 // ──────── ESCASEZ HIDRICA: decretos vigentes segun pagina oficial DGA ────────
 const cacheEscasez = { t: 0, decretos: null };
 app.get('/escasez', async (req, res) => {
@@ -2095,7 +2117,8 @@ app.get('/escasez', async (req, res) => {
       nota: 'Fuente: DGA (pagina oficial de decretos de escasez). Verificacion referencial por nombre de comuna/provincia/region.' });
   } catch (e) { res.json({ ok: false, error: e.message }); }
 });
-
+ 
 app.listen(PORT, () => {
   console.log(`Servidor Farm Brokers corriendo en puerto ${PORT}`);
 });
+ 
