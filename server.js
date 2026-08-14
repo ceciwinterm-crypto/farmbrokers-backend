@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v61 (catastro fruticola con cascada de consultas + respaldo en disco persistente)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v62 (catastro fruticola: cruce local cuando el filtro espacial del geoservidor falla)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -1456,16 +1456,41 @@ const manejadorSuelos = async (req, res) => {
               encodeURIComponent("BBOX(" + geomF + "," + (bbS[0]-0.003) + "," + (bbS[1]-0.003) + "," + (bbS[2]+0.003) + "," + (bbS[3]+0.003) + ",'EPSG:4326')")],
             ['1.1 bbox lon-lat', baseF + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[0], bbS[1], bbS[2], bbS[3], 'EPSG:4326'].join(',')],
             ['1.1 bbox lat-lon', baseF + '&version=1.1.0&srsName=EPSG:4326&bbox=' + [bbS[1], bbS[0], bbS[3], bbS[2], 'urn:x-ogc:def:crs:EPSG:4326'].join(',')],
-            ['1.0 geometria the_geom', baseF + '&version=1.0.0&srsName=EPSG:4326&CQL_FILTER=' +
-              encodeURIComponent("BBOX(the_geom," + bbS[0] + "," + bbS[1] + "," + bbS[2] + "," + bbS[3] + ",'EPSG:4326')")]
           ];
           let jf = null;
           for (const [etq, url] of intentosF) {
             const r = await traerJson(url, 'fruticola ' + capaFrut.t + ' | ' + etq);
             if (r && r.features && r.features.length) { jf = r; debug.push({ paso:'fruticola-metodo', funciono: etq, features: r.features.length }); break; }
           }
+
+          // ── Respaldo decisivo ──────────────────────────────────────────────
+          // Si el filtro espacial devuelve 0 SIN error, puede que el servidor no lo
+          // este aplicando bien (capa en otra proyeccion, indice espacial ausente).
+          // Se trae entonces la capa completa de la comuna, acotada, y el cruce con el
+          // predio se hace aca con turf, que no depende del servidor.
+          if (!jf) {
+            const rComp = await traerJson(SIT_WFS + '?service=WFS&request=GetFeature&typeName=' +
+              encodeURIComponent(capaFrut.n) + '&outputFormat=application/json&version=1.0.0&srsName=EPSG:4326&maxFeatures=6000',
+              'fruticola ' + capaFrut.t + ' | capa completa (cruce local)');
+            if (rComp && rComp.features && rComp.features.length) {
+              // Filtro previo por caja para no intersectar miles de poligonos
+              const cerca = rComp.features.filter(f => {
+                try {
+                  const b = turf.bbox(f);
+                  return !(b[2] < bbS[0] - 0.004 || b[0] > bbS[2] + 0.004 || b[3] < bbS[1] - 0.004 || b[1] > bbS[3] + 0.004);
+                } catch (e) { return false; }
+              });
+              debug.push({ paso:'fruticola-cruce-local', enLaComuna: rComp.features.length, cercaDelPredio: cerca.length,
+                nota: cerca.length ? 'El filtro espacial del servidor fallaba: el cruce se resolvio localmente.'
+                                   : 'La capa tiene cuarteles en la comuna, pero ninguno cerca de este predio.' });
+              if (cerca.length) jf = { features: cerca };
+            } else {
+              debug.push({ paso:'fruticola-capa-vacia', nota:'La capa fruticola de la comuna no devolvio ningun poligono.' });
+            }
+          }
+
           if (!jf) debug.push({ paso:'fruticola-sin-resultado', geometriaDetectada: geomF,
-            nota: 'Los 5 metodos de consulta devolvieron vacio. O el predio no tiene cuarteles catastrados, o la capa usa otro campo de geometria.' });
+            nota: 'Ni el filtro espacial ni el cruce local encontraron cuarteles: lo mas probable es que el predio no tenga plantaciones catastradas por CIREN.' });
           if (jf && jf.features && jf.features.length) {
             debug.push({ paso:'fruticola-campos', campos: Object.keys(jf.features[0].properties || {}) });
             const utilF = v => v !== null && v !== undefined && String(v).trim() !== '';
