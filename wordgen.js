@@ -109,12 +109,12 @@ function bloqueSeccion(b) {
   }
   const dentro = [new Paragraph({
     spacing: { before: 0, after: limpio(b.sub) ? 40 : 0 },
-    children: [new TextRun({ text: limpio(b.titulo).toUpperCase(), bold: true, size: 23, color: 'FFFFFF', font: FUENTE, characterSpacing: 24 })],
+    children: [new TextRun({ text: limpio(b.titulo).toUpperCase(), bold: true, size: 25, color: 'FFFFFF', font: FUENTE, characterSpacing: 24 })],
   })];
   if (limpio(b.sub)) {
     dentro.push(new Paragraph({
       spacing: { before: 0, after: 0 },
-      children: [new TextRun({ text: limpio(b.sub), italics: true, size: 16, color: VERDE_CLARO, font: TEXTO })],
+      children: [new TextRun({ text: limpio(b.sub), italics: true, size: 18, color: VERDE_CLARO, font: TEXTO })],
     }));
   }
   celdas.push(celda(dentro, { fill: VERDE, ancho: anchos[anchos.length - 1], margen: { top: 150, bottom: 150, left: 200, right: 160 } }));
@@ -127,7 +127,7 @@ function bloqueSub(b) {
   return [new Paragraph({
     spacing: { before: 280, after: 100 },
     border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: ORO, space: 4 } },
-    children: [new TextRun({ text: limpio(b.x).toUpperCase(), bold: true, size: 19, color: VERDE, font: FUENTE, characterSpacing: 20 })],
+    children: [new TextRun({ text: limpio(b.x).toUpperCase(), bold: true, size: 21, color: VERDE, font: FUENTE, characterSpacing: 20 })],
   })];
 }
 
@@ -135,7 +135,7 @@ function bloqueParrafo(b) {
   return [new Paragraph({
     alignment: AlignmentType.JUSTIFIED,
     spacing: { before: 60, after: 140, line: 300 },
-    children: [new TextRun({ text: limpio(b.x), size: 21, color: TINTA, font: TEXTO })],
+    children: [new TextRun({ text: limpio(b.x), size: 23, color: TINTA, font: TEXTO })],
   })];
 }
 
@@ -143,7 +143,7 @@ function bloqueNota(b) {
   return [new Paragraph({
     alignment: AlignmentType.JUSTIFIED,
     spacing: { before: 40, after: 120, line: 280 },
-    children: [new TextRun({ text: limpio(b.x), italics: true, size: 17, color: GRIS, font: TEXTO })],
+    children: [new TextRun({ text: limpio(b.x), italics: true, size: 19, color: GRIS, font: TEXTO })],
   })];
 }
 
@@ -151,7 +151,7 @@ function bloquePie(b) {   // pie de figura
   return [new Paragraph({
     alignment: AlignmentType.CENTER,
     spacing: { before: 40, after: 180 },
-    children: [new TextRun({ text: limpio(b.x), italics: true, size: 16, color: GRIS, font: TEXTO })],
+    children: [new TextRun({ text: limpio(b.x), italics: true, size: 18, color: GRIS, font: TEXTO })],
   })];
 }
 
@@ -161,8 +161,8 @@ function bloqueCampo(b) {
     spacing: { before: 0, after: 0, line: 260 },
     border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: LINEA, space: 2 } },
     children: [
-      new TextRun({ text: limpio(b.k).toUpperCase() + ':  ', bold: true, size: 15, color: VERDE, font: FUENTE, characterSpacing: 14 }),
-      new TextRun({ text: limpio(b.v), size: 21, color: TINTA, font: TEXTO }),
+      new TextRun({ text: limpio(b.k).toUpperCase() + ':  ', bold: true, size: 17, color: VERDE, font: FUENTE, characterSpacing: 14 }),
+      new TextRun({ text: limpio(b.v), size: 23, color: TINTA, font: TEXTO }),
     ],
   })];
 }
@@ -171,9 +171,9 @@ function bloqueCampo(b) {
 function bloqueKpi(b) {
   const fila = new TableRow({ children: [celda([
     new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 20 },
-      children: [new TextRun({ text: limpio(b.v), bold: true, size: 26, color: VERDE, font: FUENTE })] }),
+      children: [new TextRun({ text: limpio(b.v), bold: true, size: 30, color: VERDE, font: FUENTE })] }),
     new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 0, after: 0 },
-      children: [new TextRun({ text: limpio(b.k).toUpperCase(), size: 14, color: GRIS, font: TEXTO, characterSpacing: 18 })] }),
+      children: [new TextRun({ text: limpio(b.k).toUpperCase(), size: 16, color: GRIS, font: TEXTO, characterSpacing: 18 })] }),
   ], { fill: HUESO, ancho: ANCHO, margen: { top: 120, bottom: 120, left: 120, right: 120 } })] });
   return [tablaLibre([fila], [ANCHO]), new Paragraph({ spacing: { after: 100 }, children: [] })];
 }
@@ -184,7 +184,7 @@ function bloqueLista(b) {
     numbering: { reference: b.ord ? 'lista-num' : 'lista-vin', level: 0 },
     alignment: AlignmentType.JUSTIFIED,
     spacing: { before: 30, after: 60, line: 280 },
-    children: [new TextRun({ text: limpio(it), size: 20, color: TINTA, font: TEXTO })],
+    children: [new TextRun({ text: limpio(it), size: 22, color: TINTA, font: TEXTO })],
   }));
 }
 
@@ -205,7 +205,7 @@ function bloqueTabla(b) {
       children: heads.map((h, i) => celda([new Paragraph({
         alignment: i === 0 ? AlignmentType.LEFT : AlignmentType.CENTER,
         spacing: { before: 0, after: 0 },
-        children: [new TextRun({ text: h.toUpperCase(), bold: true, size: 15, color: 'FFFFFF', font: FUENTE, characterSpacing: 16 })],
+        children: [new TextRun({ text: h.toUpperCase(), bold: true, size: 17, color: 'FFFFFF', font: FUENTE, characterSpacing: 16 })],
       })], { fill: VERDE, ancho: anchos[i], margen: { top: 110, bottom: 110, left: 110, right: 110 } })),
     }));
   }
@@ -217,10 +217,10 @@ function bloqueTabla(b) {
       celdas.push(celda([new Paragraph({
         alignment: j === 0 ? AlignmentType.LEFT : AlignmentType.CENTER,
         spacing: { before: 0, after: 0, line: 250 },
-        children: [new TextRun({ text: r[j] || '', size: 19, bold: destacada, color: destacada ? VERDE : TINTA, font: TEXTO })],
+        children: [new TextRun({ text: r[j] || '', size: 21, bold: destacada, color: destacada ? VERDE : TINTA, font: TEXTO })],
       })], { fill: fondo, ancho: anchos[j], margen: { top: 90, bottom: 90, left: 110, right: 110 } }));
     }
-    filas.push(new TableRow({ children: celdas }));
+    filas.push(new TableRow({ children: celdas, cantSplit: false }));
   });
 
   const tabla = new Table({
@@ -246,7 +246,9 @@ function bloqueImagen(b) {
   if (!d) return [];
   const { w, h, tipo } = medirImagen(d.buf);
   const MAX_W = 640;                       // puntos (~17,4 cm)
-  const MAX_H = b.alto === 'alto' ? 560 : 420;
+  // Los documentos anexos (certificados escaneados) deben poder leerse:
+  // ocupan el ancho completo y casi toda la altura util de la pagina.
+  const MAX_H = b.alto === 'doc' ? 880 : (b.alto === 'alto' ? 560 : 420);
   let ancho = MAX_W, alto = Math.round(MAX_W * h / w);
   if (alto > MAX_H) { alto = MAX_H; ancho = Math.round(MAX_H * w / h); }
   const ext = /jpe?g/i.test(d.mime) ? 'jpg' : (/gif/i.test(d.mime) ? 'gif' : 'png');
@@ -277,7 +279,7 @@ function portada(meta) {
   }));
   hijos.push(new Paragraph({
     spacing: { before: 160, after: 200 },
-    children: [new TextRun({ text: 'INFORME DE TASACIÓN', size: 17, color: VERDE_CLARO, font: TEXTO, characterSpacing: 48 })],
+    children: [new TextRun({ text: 'INFORME DE TASACIÓN', size: 19, color: 'E8EDEA', font: TEXTO, characterSpacing: 48 })],
   }));
   hijos.push(new Paragraph({
     spacing: { before: 0, after: 220 },
@@ -286,13 +288,13 @@ function portada(meta) {
   (meta.roles || []).forEach(r => {
     hijos.push(new Paragraph({
       spacing: { before: 0, after: 40 },
-      children: [new TextRun({ text: 'Rol N° ' + limpio(r.rol) + (r.comuna ? '  ·  ' + limpio(r.comuna) : ''), size: 19, color: VERDE_CLARO, font: TEXTO })],
+      children: [new TextRun({ text: 'Rol N° ' + limpio(r.rol) + (r.comuna ? '  ·  ' + limpio(r.comuna) : ''), size: 24, bold: true, color: 'FFFFFF', font: TEXTO })],
     }));
   });
   if (limpio(meta.region)) {
     hijos.push(new Paragraph({
       spacing: { before: 0, after: 0 },
-      children: [new TextRun({ text: limpio(meta.region), size: 19, color: VERDE_CLARO, font: TEXTO })],
+      children: [new TextRun({ text: limpio(meta.region), size: 22, color: 'E8EDEA', font: TEXTO })],
     }));
   }
 
@@ -318,9 +320,9 @@ function portada(meta) {
     bloque.push(tablaLibre([new TableRow({
       children: metas.map((x, i) => celda([
         new Paragraph({ spacing: { before: 0, after: 40 },
-          children: [new TextRun({ text: x[1].toUpperCase(), size: 13, color: GRIS, font: TEXTO, characterSpacing: 20 })] }),
+          children: [new TextRun({ text: x[1].toUpperCase(), size: 15, color: GRIS, font: TEXTO, characterSpacing: 20 })] }),
         new Paragraph({ spacing: { before: 0, after: 0 },
-          children: [new TextRun({ text: x[0], bold: true, size: 22, color: TINTA, font: FUENTE })] }),
+          children: [new TextRun({ text: x[0], bold: true, size: 25, color: TINTA, font: FUENTE })] }),
       ], { ancho: anchos[i], alinearV: VerticalAlign.TOP, margen: { top: 0, bottom: 0, left: 0, right: 200 } })),
     })], anchos));
   }
@@ -390,7 +392,7 @@ function generarDocx(bloques, meta = {}) {
     ] },
     title: 'Informe de Tasación' + (meta.predioNombre ? ' — ' + limpio(meta.predioNombre) : ''),
     description: 'Informe de tasación generado por la plataforma Farm Brokers Chile',
-    styles: { default: { document: { run: { font: TEXTO, size: 21, color: TINTA } } } },
+    styles: { default: { document: { run: { font: TEXTO, size: 23, color: TINTA } } } },
     sections: [{
       properties: { page: { margin: MARGEN } },
       footers: { default: pie },
