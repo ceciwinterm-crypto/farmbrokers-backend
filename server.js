@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v64 (catastro fruticola: cruce local, verificacion de coordenadas y aviso explicito al tasador)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v65 (leyenda oficial de las capas CIREN para explicar los colores del plano)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -122,6 +122,31 @@ app.post('/correlativo', (req, res) => {
 });
 
 // ─────────────────────────── GENERAR INFORME (IA) ───────────────────────────
+// ── Leyenda oficial de una capa de CIREN ───────────────────────────────────
+// Devuelve las etiquetas y colores tal como los publica el servicio, para
+// dibujarlas junto al plano. Asi el informe explica que significa cada color
+// sin que la plataforma invente ninguna equivalencia.
+app.post('/leyenda-ciren', async (req, res) => {
+  try {
+    const { servicio, capaId } = req.body || {};
+    if (!servicio) return res.status(400).json({ error: 'Falta el servicio' });
+    const url = CIREN_BASE + '/' + servicio + '/MapServer/legend?f=json';
+    const r = await fetch(url);
+    if (!r.ok) return res.status(502).json({ error: 'CIREN respondio ' + r.status });
+    const j = await r.json();
+    const capas = (j.layers || []).filter(L => capaId === undefined || capaId === null || L.layerId === capaId);
+    const entradas = [];
+    capas.forEach(L => (L.legend || []).forEach(e => {
+      if (e.label && String(e.label).trim()) {
+        entradas.push({ etiqueta: String(e.label).trim(), img: e.imageData || null, tipo: e.contentType || 'image/png' });
+      }
+    }));
+    res.json({ ok: true, capa: (capas[0] || {}).layerName || null, entradas: entradas.slice(0, 40) });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // ── Informe en Word NATIVO (.docx) ──────────────────────────────────────────
 // El frontend serializa el informe ya renderizado en bloques simples
 // (seccion, subtitulo, parrafo, tabla, imagen, lista...) y aqui se arman como
