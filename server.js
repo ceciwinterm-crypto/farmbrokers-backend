@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v65 (leyenda oficial de las capas CIREN para explicar los colores del plano)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v66 (fix: el catalogo de SIT Rural ya no queda vacio para siempre tras un corte; vence a las 6h y reintenta)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -126,6 +126,12 @@ app.post('/correlativo', (req, res) => {
 // Devuelve las etiquetas y colores tal como los publica el servicio, para
 // dibujarlas junto al plano. Asi el informe explica que significa cada color
 // sin que la plataforma invente ninguna equivalencia.
+// Vacia el catalogo de SIT Rural guardado en memoria (para recargarlo sin reiniciar)
+app.post('/sitrural-recargar', (req, res) => {
+  cacheSitrural.capas = null; cacheSitrural.desde = 0;
+  res.json({ ok: true, nota: 'Catalogo de SIT Rural vaciado: el proximo Suelos Auto lo descargara de nuevo.' });
+});
+
 app.post('/leyenda-ciren', async (req, res) => {
   try {
     const { servicio, capaId } = req.body || {};
@@ -926,7 +932,11 @@ const CAPAS_REGION = [
 ];
 const cacheSuelosCapas = { lista: null };
 const cacheMetaSuelos = {}; // metadata (alias y dominios) por capa de suelos
-const cacheSitrural = { capas: null }; // capas de suelos del geoservidor de SIT Rural
+// Catalogo de capas de SIT Rural. Se guarda en memoria con vencimiento: un catalogo
+// vacio o fallido NUNCA se guarda (antes, un corte momentaneo de SIT Rural dejaba el
+// catalogo vacio hasta el siguiente reinicio, y ninguna comuna encontraba capas).
+const cacheSitrural = { capas: null, desde: 0 };
+const CACHE_SIT_MS = 6 * 60 * 60 * 1000;   // 6 horas
 const cacheUso = { svc: null, capas: null };
 
 const normU = s => (s || '').toString().replace(/[\u00a0\u2007\u202f]/g, ' ').trim().replace(/\s+/g, ' ').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -1164,19 +1174,36 @@ const manejadorSuelos = async (req, res) => {
     // el <Title>. Se busca por titulo Y nombre, y la comuna por el prefijo/titulo.
     try {
       const SIT_WFS = 'https://visor.sitrural.cl/geoserver/ows';
-      if (!cacheSitrural.capas) {
-        const rc = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=GetCapabilities');
-        const xml = await rc.text();
-        const capas = [];
-        const rxFT = /<FeatureType[^>]*>([\s\S]*?)<\/FeatureType>/g;
-        let mft;
-        while ((mft = rxFT.exec(xml)) !== null) {
-          const bloque = mft[1];
-          const n = (bloque.match(/<Name>([^<]+)<\/Name>/) || [])[1] || '';
-          const t = (bloque.match(/<Title>([^<]*)<\/Title>/) || [])[1] || '';
-          if (n) capas.push({ n, t });
+      const cacheVencido = !cacheSitrural.capas || !cacheSitrural.capas.length ||
+                           (Date.now() - cacheSitrural.desde) > CACHE_SIT_MS;
+      if (cacheVencido) {
+        let capas = [], rcStatus = 0, errCap = null;
+        // Hasta 3 intentos: SIT Rural responde lento o falla de forma intermitente
+        for (let intento = 1; intento <= 3 && !capas.length; intento++) {
+          try {
+            const rc = await fetch(SIT_WFS + '?service=WFS&version=1.0.0&request=GetCapabilities');
+            rcStatus = rc.status;
+            const xml = await rc.text();
+            const rxFT = /<FeatureType[^>]*>([\s\S]*?)<\/FeatureType>/g;
+            let mft;
+            while ((mft = rxFT.exec(xml)) !== null) {
+              const bloque = mft[1];
+              const n = (bloque.match(/<Name>([^<]+)<\/Name>/) || [])[1] || '';
+              const t = (bloque.match(/<Title>([^<]*)<\/Title>/) || [])[1] || '';
+              if (n) capas.push({ n, t });
+            }
+            if (!capas.length) { errCap = 'respuesta sin capas (status ' + rc.status + ', ' + xml.length + ' bytes)'; await new Promise(r => setTimeout(r, 1500)); }
+          } catch (e) { errCap = e.message; await new Promise(r => setTimeout(r, 1500)); }
         }
-        cacheSitrural.capas = capas;
+        if (capas.length) {
+          cacheSitrural.capas = capas; cacheSitrural.desde = Date.now();
+        } else {
+          // No se guarda nada: el proximo Suelos Auto volvera a intentar.
+          debug.push({ paso:'sitrural-catalogo-fallo', intentos: 3, error: errCap,
+            nota: 'SIT Rural no entrego su catalogo de capas. Se reintentara en la proxima consulta. Si persiste, su servidor esta caido.' });
+          if (cacheSitrural.capas && cacheSitrural.capas.length) capas = cacheSitrural.capas; // usar el anterior aunque este vencido
+        }
+        const rc = { status: rcStatus };
         const soloSuelos = capas.filter(x => /suelo/i.test(x.t) || /suelo/i.test(x.n));
         debug.push({ paso:'sitrural-capas', status: rc.status, totalCapas: capas.length,
           capasSuelos: soloSuelos.length, ejemplos: soloSuelos.slice(0, 10).map(x => x.n + ' | ' + x.t) });
