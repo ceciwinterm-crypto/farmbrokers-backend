@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v69 (backend protegido con clave y tiempo limite en las consultas externas)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v70 (nombre del predio desde el catastro CIREN + backend protegido)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -1829,7 +1829,11 @@ const manejadorSuelos = async (req, res) => {
       fuentesUsadas.length === 1 ? fuentesUsadas[0] : fuentesUsadas.join(' + ');
     debug.push({ paso:'fuente-real-suelo', fuentePorCampo, resumen: fuenteSuelo });
 
-    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, clasesSIIfiscal, fuente:'CIREN - IDE Minagri (referencial)', fuenteSuelo, fuentePorCampo, debug });
+    const kNom = Object.keys(propsRol).find(k => /^nompred|^nom_pred|^nombre/i.test(k));
+    const nombrePredio = kNom ? String(propsRol[kNom] || '').trim() : '';
+    debug.push({ paso:'nombre-predio', campo: kNom || 'no encontrado', valor: nombrePredio || null });
+
+    res.json({ ok:true, superficieHa: superficieHa.toFixed(2), superficieSII: superficieSII, nombrePredio, predioGeo, clases, serie, usos, plantaciones: respPlantaciones, fruticolaNota: respFruticolaNota, capaFruticola: respCapaFrut, caracteristicas, camposDominante, capacidadUso, notaClases, bbox: turf.bbox(predio), capaSueloId: capaSuelo ? capaSuelo.id : null, capaPredioId: capa.id, clasesSIIfiscal, fuente:'CIREN - IDE Minagri (referencial)', fuenteSuelo, fuentePorCampo, debug });
 
   } catch (err) {
     console.error('Error /suelos-rol:', err);
