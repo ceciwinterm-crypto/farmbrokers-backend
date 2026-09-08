@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v68 (variantes ortograficas de comuna tambien al buscar el predio en CIREN)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v69 (backend protegido con clave y tiempo limite en las consultas externas)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -71,6 +71,30 @@ app.get('/', (req, res) => {
 const almacen = require('./almacen');
 const FB_CLAVE = process.env.FB_CLAVE;
 if (!FB_CLAVE) console.warn('AVISO: falta FB_CLAVE — el respaldo de tasaciones queda deshabilitado por seguridad');
+
+// ── Tiempo limite en TODAS las llamadas a servicios externos ───────────────
+// Sin esto, si CIREN o la DGA quedan colgados el servidor espera indefinidamente
+// y termina agotando sus conexiones. 25 s es holgado para estos servicios.
+const fetchOriginal = global.fetch;
+global.fetch = function (url, opciones) {
+  const o = opciones || {};
+  if (o.signal) return fetchOriginal(url, o);
+  return fetchOriginal(url, { ...o, signal: AbortSignal.timeout(o.timeoutMs || 25000) });
+};
+
+// ── Proteccion de los endpoints de datos ───────────────────────────────────
+// El backend queda expuesto en internet: sin esto, cualquiera con la URL puede
+// consumir la cuota de SimpleAPI y consultar propietarios y RUT.
+// Rutas publicas: solo la raiz (estado del servicio).
+const RUTAS_PUBLICAS = ['/'];
+app.use((req, res, next) => {
+  if (req.method === 'GET' && RUTAS_PUBLICAS.includes(req.path)) return next();
+  if (req.method === 'OPTIONS') return next();
+  if (!FB_CLAVE) return next();   // sin clave configurada, se comporta como antes
+  const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
+  if (String(dada) === String(FB_CLAVE)) return next();
+  return res.status(401).json({ error: 'Acceso no autorizado. Configura la clave de respaldo en Inicio → Respaldo en la nube.' });
+});
 
 function claveOk(req, res) {
   if (!FB_CLAVE) { res.status(503).json({ error: 'El respaldo no esta configurado en el servidor (falta FB_CLAVE).' }); return false; }
