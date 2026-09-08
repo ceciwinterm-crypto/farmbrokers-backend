@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v66 (fix: el catalogo de SIT Rural ya no queda vacio para siempre tras un corte; vence a las 6h y reintenta)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v67 (reconoce variantes ortograficas de comuna entre fuentes: Marchihue/Marchigue, etc.)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -941,6 +941,17 @@ const cacheUso = { svc: null, capas: null };
 
 const normU = s => (s || '').toString().replace(/[\u00a0\u2007\u202f]/g, ' ').trim().replace(/\s+/g, ' ').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+// Una misma comuna se escribe distinto en cada fuente: CIREN usa MARCHIHUE y
+// SIT Rural MARCHIGUE; hay decenas de casos asi (H/G, C/K, S/Z, con o sin acento).
+// Se compara una forma "fonetica" que unifica esas variantes ortograficas.
+const claveFonetica = s => normU(s)
+  .replace(/[^A-Z]/g, '')      // fuera espacios, guiones y diereses ya quitadas por normU
+  .replace(/[GH]U([EI])/g, 'U$1') // GUE/GUI y HUE/HUI convergen (Marchigue = Marchihue)
+  .replace(/QU/g, 'K').replace(/C([EI])/g, 'S$1').replace(/C/g, 'K')
+  .replace(/Z/g, 'S').replace(/V/g, 'B').replace(/Y/g, 'I')
+  .replace(/LL/g, 'I').replace(/H/g, '')      // MARCHIHUE y MARCHIGUE convergen
+  .replace(/(.)\1+/g, '$1');  // letras repetidas
+
 function claseDesdeTexto(v){
   const t = normU(v).trim();
   const m = t.match(/^(VIII|VII|VI|V|IV|III|II|I)/);
@@ -1220,6 +1231,9 @@ const manejadorSuelos = async (req, res) => {
         const tt = normU(x.t).replace(/[\s_\-\.]/g, '');
         if (nn.includes(objetivoCom) || tt.includes(objetivoCom)) return true;
         if (palabraClave.length >= 4 && (nn.includes(palabraClave) || tt.includes(palabraClave))) return true;
+        // Ultimo recurso: comparar sin las diferencias ortograficas entre fuentes
+        const objFon = claveFonetica(comuna);
+        if (objFon.length >= 5 && (claveFonetica(x.n).includes(objFon) || claveFonetica(x.t).includes(objFon))) return true;
         return false;
       };
       const esSuelo = (x) => /suelo/i.test(x.t) || /suelo/i.test(x.n);
