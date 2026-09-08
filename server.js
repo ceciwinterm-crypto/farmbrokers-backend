@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v70 (nombre del predio desde el catastro CIREN + backend protegido)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v71 (fix: la generacion del informe con IA ya no se corta por tiempo limite)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -79,7 +79,12 @@ const fetchOriginal = global.fetch;
 global.fetch = function (url, opciones) {
   const o = opciones || {};
   if (o.signal) return fetchOriginal(url, o);
-  return fetchOriginal(url, { ...o, signal: AbortSignal.timeout(o.timeoutMs || 25000) });
+  // Los servicios cartograficos deben responder rapido; la generacion del informe
+  // con IA se demora legitimamente varios minutos y NO debe cortarse.
+  const u = String(url || '');
+  const esIA = /api\.anthropic\.com/i.test(u);
+  const ms = o.timeoutMs || (esIA ? 600000 : 45000);
+  return fetchOriginal(url, { ...o, signal: AbortSignal.timeout(ms) });
 };
 
 // ── Proteccion de los endpoints de datos ───────────────────────────────────
