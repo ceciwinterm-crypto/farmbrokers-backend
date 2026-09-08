@@ -61,7 +61,7 @@ function extraerJSON(texto) {
 }
 
 app.get('/', (req, res) => {
-  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v67 (reconoce variantes ortograficas de comuna entre fuentes: Marchihue/Marchigue, etc.)', simpleapi: !!SIMPLEAPI_KEY });
+  res.json({ status: 'ok', service: 'Farm Brokers Tasacion API v68 (variantes ortograficas de comuna tambien al buscar el predio en CIREN)', simpleapi: !!SIMPLEAPI_KEY });
 });
 
 // ── RESPALDO DE TASACIONES EN DISCO PERSISTENTE ─────────────────────────────
@@ -982,6 +982,30 @@ const manejadorSuelos = async (req, res) => {
     debug.push({ paso:'predio', url: urlPredio, status: rp.status, features: (gj.features||[]).length });
 
     if (!gj.features || !gj.features.length) {
+      // Antes de soltar el filtro de comuna, se prueban las variantes ortograficas
+      // habituales entre fuentes: Marchigue/Marchihue, Coigueco/Coihueco, etc.
+      const base = normU(comuna);
+      const variantes = [...new Set([
+        base.replace(/GU([EI])/g, 'HU$1'),   // MARCHIGUE -> MARCHIHUE
+        base.replace(/HU([EI])/g, 'GU$1'),   // MARCHIHUE -> MARCHIGUE
+        base.replace(/G/g, 'H'), base.replace(/H/g, 'G'),
+      ])].filter(v => v && v !== base);
+      for (const v of variantes) {
+        const urlV = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
+          '/query?where=' + encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + v + "%'") +
+          '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+        const rv = await fetch(urlV);
+        const gv = await rv.json();
+        debug.push({ paso:'predio-variante', variante: v, status: rv.status, features: (gv.features||[]).length });
+        if (gv.features && gv.features.length) {
+          gj.features = gv.features;
+          debug.push({ paso:'predio-variante-ok', nota: 'La comuna figura en CIREN como "' + v + '". Se uso esa forma.' });
+          break;
+        }
+      }
+    }
+
+    if (!gj.features || !gj.features.length) {
       // reintento sin filtro de comuna
       const url2 = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
         "/query?where=" + encodeURIComponent("rol='" + rolLimpio + "'") + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
@@ -992,7 +1016,10 @@ const manejadorSuelos = async (req, res) => {
         // Seguridad: verificar que el rol encontrado sea realmente de la comuna solicitada.
         // Los numeros de rol se repiten entre comunas: analizar otro campo en silencio es inaceptable.
         const comEncontrada = String((gj2.features[0].properties || {}).desccomu || '').trim();
-        const calza = normU(comEncontrada).includes(normU(comuna)) || normU(comuna).includes(normU(comEncontrada));
+        // Se acepta la misma comuna escrita distinto entre fuentes (Marchigue / Marchihue)
+        const fA = claveFonetica(comEncontrada), fB = claveFonetica(comuna);
+        const calza = normU(comEncontrada).includes(normU(comuna)) || normU(comuna).includes(normU(comEncontrada)) ||
+                      (fA.length >= 5 && fB.length >= 5 && (fA.includes(fB) || fB.includes(fA)));
         if (!calza) {
           return res.json({ ok:false,
             mensaje:'⚠ El rol ' + rolLimpio + ' NO aparece en el catastro RURAL de ' + comuna + ' (existe un rol ' + rolLimpio + ' rural, pero en la comuna de ' + comEncontrada + '). Posibles causas: (1) el rol es URBANO — verifica en SII Mapas si dice Ubicacion: Urbana, en cuyo caso no corresponde a esta plataforma de predios agricolas; (2) el numero de rol o la comuna estan mal escritos.',
