@@ -6,7 +6,7 @@ const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: '60mb' }));   // el informe viaja con sus imagenes en base64
-
+app.use('/api/crm', require('./crm.cjs'))
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
 const SIMPLEAPI_KEY = process.env.SIMPLEAPI_KEY;
 const SIMPLEAPI_URL = process.env.SIMPLEAPI_URL; // opcional: fija la ruta exacta
