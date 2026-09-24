@@ -14,12 +14,13 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.0';
+const VERSION = 'crm-v3.2';
+const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
 
 // ───────────────────────── Catálogos ─────────────────────────
 const ETAPAS = {
-  campos: ['Prospección', 'Captación', 'Documentación', 'Mandato firmado', 'Publicado', 'En negociación', 'Vendido', 'Arrendado', 'Suspendido', 'Descartado'],
+  campos: ['Prospección', 'Captación', 'Documentación', 'Mandato firmado', 'Publicado', 'En negociación', 'Vendido', 'Arrendado', 'Suspendido', 'Retirado de la web', 'Descartado'],
   tasaciones: ['Solicitud', 'Cotizada', 'Aceptada', 'En terreno', 'Informe entregado', 'Pagada', 'Perdida'],
   clientes: ['Activo', 'Pausado', 'Compró', 'Descartado'],
 };
@@ -178,7 +179,7 @@ function fonoNorm(t) {
 // ───────────────────────── Esquemas ─────────────────────────
 const CAMPOS_CAMPO = ['codigo', 'nombre', 'tipo', 'etapa', 'region', 'sector', 'hectareas', 'agua', 'fuenteAgua', 'plantaciones', 'aptitud',
   'precioTexto', 'precioCLP', 'precioUF', 'observaciones', 'corredor', 'asociado', 'propietario', 'telefono', 'email', 'rol', 'linkWeb', 'linkPortal',
-  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla'];
+  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas'];
 const CAMPOS_CLIENTE = ['nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar'];
 const CAMPOS_TASACION = ['titulo', 'cliente', 'telefono', 'email', 'campoId', 'rol', 'comuna', 'codigo', 'etapa', 'honorariosUF', 'responsable', 'proximaAccion', 'proximaFecha'];
@@ -305,7 +306,7 @@ function calcularMatches(db) {
   const out = {};
   const clientes = db.clientes.filter((c) => c.etapa === 'Activo');
   for (const campo of db.campos) {
-    if (['Vendido', 'Descartado', 'Prospección'].includes(campo.etapa)) continue;
+    if (['Vendido', 'Descartado', 'Prospección', 'Retirado de la web'].includes(campo.etapa)) continue;
     const lista = [];
     for (const cli of clientes) { const r = evaluar(campo, cli); if (r) lista.push(r); }
     if (lista.length) out[campo.id] = lista.sort((a, b) => b.score - a.score);
@@ -443,7 +444,7 @@ router.use((req, res, next) => {
 router.get('/', (req, res) => {
   const db = leer();
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db) });
 });
 
@@ -930,5 +931,307 @@ router.post('/publico/:token/firmar', async (req, res) => {
   res.json(r);
 });
 
-router._interno = { bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+// ───────────────────────── Datos desde farmbrokers.cl (fotos, ficha y ubicación) ─────────────────────────
+function descargarTexto(url, redirecciones = 3) {
+  return new Promise((ok, mal) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'FarmBrokersCRM/1.0 (+https://farmbrokers.cl)', Accept: 'text/html,application/json' }, timeout: 15000 }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirecciones > 0) {
+        res.resume(); return ok(descargarTexto(new URL(res.headers.location, url).toString(), redirecciones - 1));
+      }
+      if (res.statusCode !== 200) { res.resume(); return mal(new Error(`La página respondió ${res.statusCode}.`)); }
+      let d = ''; res.setEncoding('utf8'); res.on('data', (c) => { d += c; if (d.length > 6e6) req.destroy(); }); res.on('end', () => ok(d));
+    });
+    req.on('timeout', () => req.destroy(new Error('La página tardó demasiado en responder.')));
+    req.on('error', mal);
+  });
+}
+const esFarmBrokers = (u) => { try { const x = new URL(u); return x.protocol === 'https:' && /^(www\.)?farmbrokers\.cl$/.test(x.hostname) && x.pathname.startsWith('/propiedad/'); } catch (e) { return false; } };
+const entidades = (t) => t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;|&#x27;|&rsquo;|&lsquo;/g, "'").replace(/&ldquo;|&rdquo;/g, '"')
+  .replace(/&ndash;|&#8211;/g, '–').replace(/&mdash;|&#8212;/g, '—').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
+function aLineas(html) {
+  return entidades(html.replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<(br|\/p|\/li|\/div|\/h[1-6]|\/tr|\/ul|\/section|\/article)[^>]*>/gi, '\n').replace(/<[^>]+>/g, ' '))
+    .split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+}
+const coordOk = (lat, lng) => lat < -17 && lat > -56.5 && lng < -66 && lng > -110;
+function buscarCoordenadas(html) {
+  const pruebas = [
+    /"lat(?:itude)?"\s*:\s*"?(-\d{1,2}\.\d{3,})"?\s*,\s*"(?:lng|long|longitude)"\s*:\s*"?(-\d{1,3}\.\d{3,})/i,
+    /data-lat(?:itude)?="(-\d{1,2}\.\d{3,})"[^>]*?data-(?:lng|long|longitude)="(-\d{1,3}\.\d{3,})"/i,
+    /fave_property_location[^0-9-]{0,40}(-\d{1,2}\.\d{3,})\s*,\s*(-\d{1,3}\.\d{3,})/i,
+    /maps\.google\.[a-z.]+\/[^"'\s]*?[?&@=](-\d{1,2}\.\d{3,})\s*,\s*(-\d{1,3}\.\d{3,})/i,
+    /google\.[a-z.]+\/maps[^"'\s]*?@(-\d{1,2}\.\d{3,}),(-\d{1,3}\.\d{3,})/i,
+  ];
+  for (const r of pruebas) { const m = html.match(r); if (m && coordOk(Number(m[1]), Number(m[2]))) return { lat: Number(m[1]), lng: Number(m[2]) }; }
+  return null;
+}
+function analizarPropiedad(html, url) {
+  const meta = (p) => { const m = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${p}["'][^>]+content=["']([^"']*)["']`, 'i')) || html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${p}["']`, 'i')); return m ? entidades(m[1]).trim() : ''; };
+  const lineas = aLineas(html);
+  const idx = (re, desde = 0) => { for (let i = desde; i < lineas.length; i++) if (re.test(lineas[i])) return i; return -1; };
+  // Galería: imágenes de la parte superior (antes de "Vista General" o de la descripción)
+  const iniG = Math.max(0, html.search(/pills-gallery|property-banner|top-gallery|<h1/i));
+  let finG = html.search(/Vista General|property-overview-wrap|property-description-wrap/i); if (finG <= iniG) finG = Math.min(html.length, iniG + 60000);
+  const reImg = /https?:\/\/(?:www\.)?farmbrokers\.cl\/wp-content\/uploads\/(20\d\d)\/(\d\d)\/[^"'\s)<>]+?\.(?:jpe?g|png|webp)/gi;
+  const fotos = []; const vistas = new Set();
+  for (const m of html.slice(iniG, finG).matchAll(reImg)) {
+    if (m[1] === '2023' && m[2] === '07') continue; // íconos y logos del sitio
+    const completa = m[0].replace(/-\d{2,4}x\d{2,4}(?=\.\w+$)/, '').replace(/^http:/, 'https:');
+    if (!vistas.has(completa)) { vistas.add(completa); fotos.push(completa); }
+  }
+  const og = meta('og:image'); if (og && !vistas.has(og)) fotos.unshift(og);
+  // Detalles (pares etiqueta-valor)
+  const detalle = {};
+  const iniD = idx(/^Detalles$/i); const desdeD = iniD >= 0 ? iniD : 0;
+  const claves = { 'ID de propiedad': 'id', Precio: 'precio', 'Tamaño de propiedad': 'superficie', 'Tipo de Propiedad': 'tipo', 'Estado de la propiedad': 'estado', Agua: 'agua', Plantaciones: 'plantaciones' };
+  for (let i = desdeD; i < Math.min(lineas.length, desdeD + 60); i++) {
+    for (const [etq, k] of Object.entries(claves)) {
+      if (detalle[k]) continue;
+      const m = lineas[i].match(new RegExp(`^${etq}\\s*:?\\s*(.*)$`, 'i'));
+      if (m) detalle[k] = m[1] || (lineas[i + 1] && !Object.keys(claves).some((c) => lineas[i + 1].startsWith(c)) ? lineas[i + 1] : '');
+    }
+    if (/^Información de contacto|^Anuncios Similares/i.test(lineas[i])) break;
+  }
+  if (!detalle.id) { const m = lineas.join('\n').match(/ID de propiedad:?\s*([A-Z0-9]{5,})/i); if (m) detalle.id = m[1]; }
+  // Descripción
+  const iD = idx(/^Descripción$/i), fD = iD >= 0 ? idx(/^(Dirección|Detalles|Características|Información de contacto)$/i, iD + 1) : -1;
+  const parrafos = iD >= 0 ? lineas.slice(iD + 1, fD > iD ? fD : iD + 40).filter((l) => !/^(Read More|Leer más|Ver más)$/i.test(l)) : [];
+  let comision = '';
+  const descripcion = parrafos.filter((l) => {
+    const c = l.match(/^-?\s*Comisi[oó]n:?\s*(.+)$/i); if (c) { comision = c[1]; return false; }
+    return !/^-?\s*Precio\s*:/i.test(l);
+  });
+  if (!comision) { const c = parrafos.join(' ').match(/Comisi[oó]n:?\s*([0-9.,]+\s*%[^.\n]*)/i); if (c) comision = c[1].trim(); }
+  // Dirección
+  const val = (etq) => { const i = idx(new RegExp(`^${etq}\\s*:`, 'i')); return i >= 0 ? lineas[i].replace(new RegExp(`^${etq}\\s*:\\s*`, 'i'), '') : ''; };
+  const h1 = (html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1];
+  const titulo = (h1 ? entidades(h1.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim() : '') || meta('og:title');
+  let direccion = '';
+  for (let i = 0; i < lineas.length - 1; i++) {
+    if (lineas[i] === titulo && /Regi[oó]n|,/.test(lineas[i + 1]) && !/^(Venta|Arriendo|Vendido|Destacado|Share)/i.test(lineas[i + 1])) { direccion = lineas[i + 1]; break; }
+  }
+  const mapsQ = (html.match(/maps\.google\.[a-z.]+\/\?q=([^"'&\s]+)/i) || [])[1];
+  return {
+    url, titulo, direccion, comuna: val('Comuna'), region: val('Región'), resumen: meta('og:description') || meta('description'),
+    fotos: fotos.slice(0, 24), descripcion, comision, detalle,
+    coordenadas: buscarCoordenadas(html), direccionMapa: mapsQ ? decodeURIComponent(mapsQ.replace(/\+/g, ' ')) : '',
+  };
+}
+async function coordenadasREST(url) {
+  try {
+    const slug = new URL(url).pathname.split('/').filter(Boolean).pop();
+    const j = JSON.parse(await descargarTexto(`https://farmbrokers.cl/wp-json/wp/v2/properties?slug=${encodeURIComponent(slug)}`));
+    const pm = j && j[0] && (j[0].property_meta || j[0].meta);
+    const loc = pm && (pm.fave_property_location || pm.houzez_geolocation_lat);
+    const txtLoc = Array.isArray(loc) ? loc[0] : loc;
+    const m = String(txtLoc || '').match(/(-\d{1,2}\.\d+)\s*,\s*(-\d{1,3}\.\d+)/);
+    if (m && coordOk(Number(m[1]), Number(m[2]))) return { lat: Number(m[1]), lng: Number(m[2]) };
+  } catch (e) { /* el sitio puede no exponer la API */ }
+  return null;
+}
+async function geocodificar(q) {
+  try {
+    const j = JSON.parse(await descargarTexto(`https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=cl&q=${encodeURIComponent(q)}`));
+    if (j && j[0] && coordOk(Number(j[0].lat), Number(j[0].lon))) return { lat: Number(j[0].lat), lng: Number(j[0].lon) };
+  } catch (e) { /* sin conexión al geocodificador */ }
+  return null;
+}
+const linkFB = (c) => [c.linkWeb, c.linkPortal].find((u) => esFarmBrokers(String(u || '').trim()));
+
+router.post('/campos/:id/web', async (req, res) => {
+  const campo = leer().campos.find((x) => x.id === req.params.id);
+  if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
+  const url = linkFB(campo);
+  if (!url) return res.status(400).json({ error: 'Este campo no tiene un link de farmbrokers.cl/propiedad/. Agrégalo en los datos del campo.' });
+  let web;
+  try { web = analizarPropiedad(await descargarTexto(url.trim()), url.trim()); }
+  catch (e) { return res.status(502).json({ error: `No se pudo leer la publicación: ${e.message}` }); }
+  let fuente = web.coordenadas ? 'publicacion' : '';
+  if (!web.coordenadas) { web.coordenadas = await coordenadasREST(url); if (web.coordenadas) fuente = 'publicacion'; }
+  if (!web.coordenadas) {
+    const q = web.direccionMapa || [web.comuna || campo.sector, web.region, 'Chile'].filter(Boolean).join(', ');
+    web.coordenadas = await geocodificar(q); if (web.coordenadas) fuente = 'comuna';
+  }
+  web.fuenteUbicacion = fuente; web.fecha = ahora();
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const c = db.campos.find((x) => x.id === req.params.id); if (!c) return null;
+    c.web = web;
+    if (!c.codigo && web.detalle.id) c.codigo = web.detalle.id;
+    registrar(db, autor, `Actualizó ${c.nombre} desde farmbrokers.cl (${web.fotos.length} fotos)`, { col: 'campos', id: c.id });
+    return c;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
+
+// ───────────────────────── Sincronización con farmbrokers.cl ─────────────────────────
+let traerPagina = descargarTexto; // reemplazable en pruebas
+const slugDe = (u) => { try { const x = new URL(String(u || '').trim()); if (!/^(www\.)?farmbrokers\.cl$/.test(x.hostname)) return ''; const m = x.pathname.match(/^\/propiedad\/([^/]+)/); return m ? decodeURIComponent(m[1]).toLowerCase() : ''; } catch (e) { return ''; } };
+const slugsCampo = (c) => [c.linkWeb, c.linkPortal, c.web && c.web.url].map(slugDe).filter(Boolean);
+const tituloDeSlug = (sl) => sl.replace(/-/g, ' ').replace(/\b\w/g, (x) => x.toUpperCase());
+const REGION_NOMBRE_A_CODIGO = [[/arica/i, 'XV'], [/tarapac/i, 'I'], [/antofagasta/i, 'II'], [/atacama/i, 'III'], [/coquimbo/i, 'IV'], [/valpara/i, 'V'], [/metropolitana/i, 'RM'],
+  [/higgins/i, 'VI'], [/maule/i, 'VII'], [/ñuble|nuble/i, 'XVI'], [/b[ií]o/i, 'VIII'], [/araucan/i, 'IX'], [/los r[ií]os/i, 'XIV'], [/los lagos/i, 'X'], [/ais[eé]n|ays[eé]n/i, 'XI'], [/magallanes/i, 'XII']];
+const regionDeNombre = (t) => { for (const [r, c] of REGION_NOMBRE_A_CODIGO) if (r.test(t || '')) return c; return ''; };
+
+async function listarSitio() {
+  const enVenta = new Map(), vendidos = new Set();
+  // 1) API de WordPress (si está disponible)
+  try {
+    const estados = {};
+    try { for (const t of JSON.parse(await traerPagina('https://farmbrokers.cl/wp-json/wp/v2/property_status?per_page=100&_fields=id,slug,name'))) estados[t.id] = `${t.slug} ${t.name}`; } catch (e) {}
+    for (let pag = 1; pag <= 20; pag++) {
+      let lista;
+      try { lista = JSON.parse(await traerPagina(`https://farmbrokers.cl/wp-json/wp/v2/properties?per_page=100&page=${pag}&_fields=slug,link,title,property_status`)); } catch (e) { break; }
+      if (!Array.isArray(lista) || !lista.length) break;
+      for (const p of lista) {
+        const sl = String(p.slug || slugDe(p.link)).toLowerCase(); if (!sl) continue;
+        const est = (p.property_status || []).map((id) => estados[id] || '').join(' ');
+        const titulo = entidades(String((p.title && p.title.rendered) || '')) || tituloDeSlug(sl);
+        if (/vend/i.test(est)) vendidos.add(sl);
+        enVenta.set(sl, { slug: sl, url: p.link || `https://farmbrokers.cl/propiedad/${sl}/`, titulo });
+      }
+      if (lista.length < 100) break;
+    }
+    if (enVenta.size >= 10) return { publicadas: enVenta, vendidos, fuente: 'api' };
+  } catch (e) {}
+  enVenta.clear(); vendidos.clear();
+  // 2) Mapa del sitio (Yoast) y 3) páginas de listado por estado
+  const agregar = (html, destino) => {
+    for (const m of html.matchAll(/https?:\/\/(?:www\.)?farmbrokers\.cl\/propiedad\/([^/"'<\s#?]+)\/?/gi)) {
+      const sl = decodeURIComponent(m[1]).toLowerCase();
+      if (!destino.has(sl)) destino.set(sl, { slug: sl, url: `https://farmbrokers.cl/propiedad/${sl}/`, titulo: tituloDeSlug(sl) });
+    }
+  };
+  let fuente = '';
+  for (const mapa of ['https://farmbrokers.cl/property-sitemap.xml', 'https://farmbrokers.cl/properties-sitemap.xml']) {
+    try { const xml = await traerPagina(mapa); agregar(xml, enVenta); if (enVenta.size) { fuente = 'sitemap'; break; } } catch (e) {}
+  }
+  const recorrer = async (estado, destino) => {
+    for (let pag = 1; pag <= 40; pag++) {
+      const antes = destino.size;
+      let html;
+      try { html = await traerPagina(`https://farmbrokers.cl/estado/${estado}/${pag > 1 ? `page/${pag}/` : ''}`); } catch (e) { break; }
+      const cuerpo = html.split(/Anuncios Similares|<footer/i)[0];
+      agregar(cuerpo, destino);
+      if (destino.size === antes) break;
+    }
+  };
+  const mapaVendidos = new Map(); await recorrer('vendido', mapaVendidos);
+  for (const sl of mapaVendidos.keys()) vendidos.add(sl);
+  if (!fuente) { await recorrer('en-venta', enVenta); await recorrer('arriendo', enVenta); for (const [k, v] of mapaVendidos) enVenta.set(k, v); fuente = 'listados'; }
+  return { publicadas: enVenta, vendidos, fuente };
+}
+
+let sincronizando = null;
+async function sincronizarWeb(autor = 'Sincronización web') {
+  if (sincronizando) return sincronizando;
+  sincronizando = (async () => {
+    const inicio = ahora();
+    let sitio;
+    try { sitio = await listarSitio(); } catch (e) { sitio = null; }
+    const db0 = leer();
+    const enlazados = db0.campos.filter((c) => slugsCampo(c).length);
+    const encontrados = enlazados.filter((c) => slugsCampo(c).some((sl) => sitio && sitio.publicadas.has(sl))).length;
+    if (!sitio || sitio.publicadas.size < 5 || (enlazados.length >= 6 && encontrados < enlazados.length * 0.5)) {
+      const error = !sitio || !sitio.publicadas.size ? 'No se pudo leer el listado de farmbrokers.cl. No se hicieron cambios.'
+        : `La web mostró ${sitio.publicadas.size} publicaciones y solo coinciden ${encontrados} de ${enlazados.length} campos enlazados. Por seguridad no se hicieron cambios.`;
+      await modificar((db) => { db.sync = { ...(db.sync || {}), fecha: inicio, error, nuevos: (db.sync && db.sync.nuevos) || [] }; });
+      return leer().sync;
+    }
+    // Confirmar retiros consultando cada página (404 = borrada)
+    const candidatos = enlazados.filter((c) => !['Retirado de la web', 'Vendido', 'Descartado'].includes(c.etapa) && ['Mandato firmado', 'Publicado', 'En negociación', 'Documentación', 'Arrendado', 'Suspendido'].includes(c.etapa)
+      && !slugsCampo(c).some((sl) => sitio.publicadas.has(sl)));
+    const borrados = new Set();
+    for (const c of candidatos.slice(0, 40)) {
+      try { await traerPagina(`https://farmbrokers.cl/propiedad/${slugsCampo(c)[0]}/`); }
+      catch (e) { if (/respondi[oó] (404|410)/.test(e.message)) borrados.add(c.id); }
+    }
+    const enCRM0 = new Set(db0.campos.flatMap(slugsCampo));
+    const sinTitulo = [...sitio.publicadas.values()].filter((p) => !enCRM0.has(p.slug) && !sitio.vendidos.has(p.slug) && p.titulo === tituloDeSlug(p.slug));
+    const titulosPrevios = new Map(((db0.sync && db0.sync.nuevos) || []).map((n) => [n.slug, n.titulo]));
+    for (const p of sinTitulo.slice(0, 30)) {
+      if (titulosPrevios.get(p.slug) && titulosPrevios.get(p.slug) !== tituloDeSlug(p.slug)) { p.titulo = titulosPrevios.get(p.slug); continue; }
+      try { const w = analizarPropiedad(await traerPagina(p.url), p.url); if (w.titulo) p.titulo = w.titulo; p.lugar = w.direccion || [w.comuna, w.region].filter(Boolean).join(', '); p.precio = w.detalle.precio || ''; } catch (e) {}
+    }
+    const res = await modificar((db) => {
+      const cambios = { retirados: [], vendidos: [], restaurados: [] };
+      for (const c of db.campos) {
+        const sls = slugsCampo(c); if (!sls.length) continue;
+        const nota = (t) => { c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: t }]; c.actualizado = ahora(); };
+        if (borrados.has(c.id)) {
+          nota(`Etapa: ${c.etapa} → Retirado de la web (la publicación ya no existe en farmbrokers.cl)`);
+          c.etapaAntesDeRetiro = c.etapa; c.etapa = 'Retirado de la web'; cambios.retirados.push(c.nombre);
+        } else if (sls.some((sl) => sitio.vendidos.has(sl)) && !['Vendido', 'Descartado'].includes(c.etapa)) {
+          nota(`Etapa: ${c.etapa} → Vendido (marcado como vendido en farmbrokers.cl)`); c.etapa = 'Vendido'; cambios.vendidos.push(c.nombre);
+        } else if (c.etapa === 'Retirado de la web' && sls.some((sl) => sitio.publicadas.has(sl) && !sitio.vendidos.has(sl))) {
+          const vuelve = c.etapaAntesDeRetiro || 'Publicado';
+          nota(`Etapa: Retirado de la web → ${vuelve} (volvió a publicarse en farmbrokers.cl)`); c.etapa = vuelve; cambios.restaurados.push(c.nombre);
+        }
+      }
+      const enCRM = new Set(db.campos.flatMap(slugsCampo));
+      const ignorados = new Set((db.sync && db.sync.ignorados) || []);
+      const nuevos = [...sitio.publicadas.values()].filter((p) => !enCRM.has(p.slug) && !sitio.vendidos.has(p.slug) && !ignorados.has(p.slug));
+      if (cambios.retirados.length) registrar(db, autor, `Retiró ${cambios.retirados.length === 1 ? 'un campo que ya no está' : `${cambios.retirados.length} campos que ya no están`} en la web: ${cambios.retirados.join(', ')}`, null);
+      if (cambios.vendidos.length) registrar(db, autor, `Marcó como vendidos (según la web): ${cambios.vendidos.join(', ')}`, null);
+      if (cambios.restaurados.length) registrar(db, autor, `Volvieron a publicarse en la web: ${cambios.restaurados.join(', ')}`, null);
+      db.sync = { fecha: inicio, fuente: sitio.fuente, publicadas: sitio.publicadas.size, vendidosWeb: sitio.vendidos.size, ...cambios, nuevos, ignorados: [...ignorados], error: '' };
+      return db.sync;
+    });
+    return res;
+  })();
+  try { return await sincronizando; } finally { sincronizando = null; }
+}
+const plural = (n, s, p) => `${n} ${n === 1 ? s : p || s + 's'}`;
+
+router.post('/sync', async (req, res) => {
+  try { res.json(await sincronizarWeb(usuarioDe(req))); } catch (e) { res.status(500).json({ error: `Error al sincronizar: ${e.message}` }); }
+});
+
+// Agregar al CRM un campo que está en la web
+router.post('/sync/agregar', async (req, res) => {
+  const slug = String((req.body || {}).slug || '').toLowerCase();
+  if (!/^[a-z0-9%_-]+$/i.test(slug)) return res.status(400).json({ error: 'Publicación no válida.' });
+  const url = `https://farmbrokers.cl/propiedad/${slug}/`;
+  let web;
+  try { web = analizarPropiedad(await traerPagina(url), url); } catch (e) { return res.status(502).json({ error: `No se pudo leer la publicación: ${e.message}` }); }
+  if (!web.coordenadas) web.coordenadas = await coordenadasREST(url);
+  web.fuenteUbicacion = web.coordenadas ? 'publicacion' : ''; web.fecha = ahora();
+  const autor = usuarioDe(req), d = web.detalle;
+  const r = await modificar((db) => {
+    if (db.campos.some((c) => slugsCampo(c).includes(slug))) return { error: 'Ese campo ya está en el CRM.' };
+    const precio = parsePrecio(d.precio || '');
+    const campo = { id: id(), ...limpiar('campos', {
+      nombre: web.titulo || tituloDeSlug(slug), codigo: d.id || '', tipo: tipoNorm(d.tipo), etapa: /vend/i.test(d.estado || '') ? 'Vendido' : 'Publicado',
+      region: regionDeNombre(web.region), sector: web.comuna, hectareas: parseHa(d.superficie), agua: d.agua || '', plantaciones: d.plantaciones || '',
+      ...precio, linkWeb: url, checklist: { publicacion: true, fotos: web.fotos.length > 0 },
+    }), web, historial: [{ fecha: ahora(), autor, texto: 'Agregado desde farmbrokers.cl' }], envios: [], creado: ahora(), actualizado: ahora() };
+    db.campos.push(campo);
+    if (db.sync) db.sync.nuevos = (db.sync.nuevos || []).filter((n) => n.slug !== slug);
+    registrar(db, autor, `Agregó ${campo.nombre} desde farmbrokers.cl`, { col: 'campos', id: campo.id });
+    return campo;
+  });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+
+// Marcar una publicación como "no agregar" (por ejemplo, ya existe con otro nombre)
+router.post('/sync/ignorar', async (req, res) => {
+  const slug = String((req.body || {}).slug || '').toLowerCase();
+  const r = await modificar((db) => {
+    db.sync = db.sync || { nuevos: [] };
+    db.sync.ignorados = [...new Set([...(db.sync.ignorados || []), slug])];
+    db.sync.nuevos = (db.sync.nuevos || []).filter((n) => n.slug !== slug);
+    return db.sync;
+  });
+  res.json(r);
+});
+
+// Revisión automática cada 6 horas (y un minuto después de arrancar el servidor)
+if (!process.env.CRM_SYNC_OFF) {
+  const tarea = () => { if (process.env.CRM_KEY) sincronizarWeb().catch(() => {}); };
+  setTimeout(tarea, 60 * 1000).unref();
+  setInterval(tarea, 6 * 3600 * 1000).unref();
+}
+
+router._interno = { sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
