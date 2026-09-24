@@ -2,6 +2,7 @@
 
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const app = express();
 
 app.use(cors());
@@ -92,19 +93,29 @@ global.fetch = function (url, opciones) {
 // consumir la cuota de SimpleAPI y consultar propietarios y RUT.
 // Rutas publicas: solo la raiz (estado del servicio).
 const RUTAS_PUBLICAS = ['/'];
+
+// Comparacion en tiempo constante: la clave es el unico control de acceso al backend,
+// una comparacion con === puede filtrar por temporizacion cuanto del prefijo coincide.
+function claveCoincide(dada, esperada) {
+  const a = Buffer.from(String(dada));
+  const b = Buffer.from(String(esperada));
+  if (a.length !== b.length) { crypto.timingSafeEqual(b, b); return false; } // igual costo, sin filtrar largo
+  return crypto.timingSafeEqual(a, b);
+}
+
 app.use((req, res, next) => {
   if (req.method === 'GET' && RUTAS_PUBLICAS.includes(req.path)) return next();
   if (req.method === 'OPTIONS') return next();
   if (!FB_CLAVE) return next();   // sin clave configurada, se comporta como antes
   const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
-  if (String(dada) === String(FB_CLAVE)) return next();
+  if (claveCoincide(dada, FB_CLAVE)) return next();
   return res.status(401).json({ error: 'Acceso no autorizado. Configura la clave de respaldo en Inicio → Respaldo en la nube.' });
 });
 
 function claveOk(req, res) {
   if (!FB_CLAVE) { res.status(503).json({ error: 'El respaldo no esta configurado en el servidor (falta FB_CLAVE).' }); return false; }
   const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
-  if (String(dada) !== String(FB_CLAVE)) { res.status(401).json({ error: 'Clave incorrecta.' }); return false; }
+  if (!claveCoincide(dada, FB_CLAVE)) { res.status(401).json({ error: 'Clave incorrecta.' }); return false; }
   return true;
 }
 
@@ -276,12 +287,8 @@ Manten cada campo conciso. El JSON completo debe ser valido y estar bien cerrado
     const text = (data.content || []).map(c => c.text || '').join('').trim();
     console.log('Respuesta IA (500 chars):', text.substring(0, 500));
 
-    const match = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim().match(/\{[\s\S]*\}/);
-    if (!match) return res.status(500).json({ error: 'Respuesta de IA no contenia JSON valido', raw: text.substring(0, 1000) });
-
-    let ia;
-    try { ia = JSON.parse(match[0]); }
-    catch (e) { return res.status(500).json({ error: 'JSON de IA mal formado: ' + e.message, raw: match[0].substring(0, 1000) }); }
+    const ia = extraerJSON(text);
+    if (!ia) return res.status(500).json({ error: 'Respuesta de IA no contenia JSON valido (o vino truncada)', raw: text.substring(0, 1000) });
 
     res.json({ ia });
   } catch (err) {
@@ -849,7 +856,7 @@ app.post('/buscar-rol', async (req, res) => {
   // "Error al obtener comunas" = fallo transitorio del lado de SimpleAPI/SII.
   // Reintentamos hasta 3 veces con pausa (respetando el limite de 5 consultas/min).
   const bodyDirecto = JSON.stringify({ comuna: comunaLimpia, manzana, predio });
-  for (let intento = 1; intento <= 2 && !resultado; intento++) {
+  for (let intento = 1; intento <= 3 && !resultado; intento++) {
     const r = await intentar(URL, { method: 'POST', headers, body: bodyDirecto }, debug, 'POST directo (intento ' + intento + ')');
     if (r && r.__status === 200) { resultado = r; break; }
     if (r && Array.isArray(r.data) && r.data.some(x => x.Comuna || x.comuna)) {
@@ -941,6 +948,8 @@ app.post('/buscar-rol', async (req, res) => {
   }
 
   const respuestaOk = { ok: true, datos: datosMap, raw: cand, debug };
+  // Antes de agregar, purgar vencidos: sin esto el cache crece sin limite mientras viva el proceso.
+  for (const k in cacheBusquedas) { if ((Date.now() - cacheBusquedas[k].t) >= 24 * 3600 * 1000) delete cacheBusquedas[k]; }
   cacheBusquedas[claveCache] = { t: Date.now(), respuesta: respuestaOk };
   res.json(respuestaOk);
 });
@@ -990,6 +999,10 @@ function claseDesdeTexto(v){
   return null;
 }
 
+// Escapa comillas simples antes de insertar un valor en un where SQL de ArcGIS:
+// sin esto, un rol o comuna con una comilla altera la sentencia enviada a CIREN.
+const escSQL = s => String(s).replace(/'/g, "''");
+
 const manejadorSuelos = async (req, res) => {
   const { rol, comuna, region } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
   if (!rol || !comuna) return res.status(400).json({ ok:false, error:'Faltan rol y comuna' });
@@ -1003,7 +1016,7 @@ const manejadorSuelos = async (req, res) => {
 
     // 2) Poligono del predio por rol + comuna
     const rolLimpio = String(rol).trim();
-    const where = encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + normU(comuna) + "%'");
+    const where = encodeURIComponent("rol='" + escSQL(rolLimpio) + "' AND UPPER(desccomu) LIKE '%" + escSQL(normU(comuna)) + "%'");
     const urlPredio = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
       '/query?where=' + where + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
     const rp = await fetch(urlPredio);
@@ -1021,7 +1034,7 @@ const manejadorSuelos = async (req, res) => {
       ])].filter(v => v && v !== base);
       for (const v of variantes) {
         const urlV = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
-          '/query?where=' + encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + v + "%'") +
+          '/query?where=' + encodeURIComponent("rol='" + escSQL(rolLimpio) + "' AND UPPER(desccomu) LIKE '%" + escSQL(v) + "%'") +
           '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
         const rv = await fetch(urlV);
         const gv = await rv.json();
@@ -1037,7 +1050,7 @@ const manejadorSuelos = async (req, res) => {
     if (!gj.features || !gj.features.length) {
       // reintento sin filtro de comuna
       const url2 = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
-        "/query?where=" + encodeURIComponent("rol='" + rolLimpio + "'") + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+        "/query?where=" + encodeURIComponent("rol='" + escSQL(rolLimpio) + "'") + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
       const rp2 = await fetch(url2);
       const gj2 = await rp2.json();
       debug.push({ paso:'predio-sin-comuna', status: rp2.status, features: (gj2.features||[]).length });
@@ -2154,13 +2167,23 @@ const manejadorDerechos = async (req, res) => {
     unidad:   col(/UNIDAD.*CAUDAL|UNIDAD/),
     tipoDer:  col(/TIPO.*DERECHO/),
     natur:    col(/NATURALEZA.*AGUA|NATURALEZA/),
+    clasFuente: col(/CLASIFICACION.*FUENTE|CLASIF.*FUENTE/),
     fuente:   col(/FUENTE|CAUCE/),
+    uso:      col(/USO.*AGUA|USO.*RECURSO|^USO$/),
     ejercicio:col(/EJERCICIO/),
+    accCauce: col(/ACCION.*CAUCE/),
+    accFuente:col(/ACCION.*FUENTE|N.*ACCIONES|ACCIONES/),
+    profundidad: col(/PROFUNDIDAD|PROF\b/),
     utmNorte: col(/UTM.*NORTE.*CAPTACION/) || col(/UTM.*NORTE/) || col(/NORTE/),
     utmEste:  col(/UTM.*ESTE.*CAPTACION/) || col(/UTM.*ESTE/) || col(/ESTE/),
     huso:     col(/HUSO/) || col(/DATUM/),
+    datum:    col(/DATUM/),
     fecha:    col(/FECHA.*RESOL/) || col(/FECHA/),
-    nroRes:   col(/N.*RESOL|RESOLUCION|CODIGO.*EXPEDIENTE/)
+    nroRes:   col(/N.*RESOL|RESOLUCION|CODIGO.*EXPEDIENTE/),
+    cbr:      col(/CONSERVADOR|C\.?B\.?R\.?(?!.*(FOJA|N|A.O))/),
+    fojas:    col(/FOJA/),
+    nroCBR:   col(/N.*C\.?B\.?R|NUMERO.*REGISTRO|REGISTRO.*CBR/),
+    anioCBR:  col(/A.?O.*C\.?B\.?R|C\.?B\.?R.*A.?O/)
   };
   debug.push({ paso:'dga-columnas', version:'v40', detectadas: C, totalColumnas: cols.length, primeros10Encabezados: cols.slice(0, 10) });
 
