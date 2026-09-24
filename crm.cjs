@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.2';
+const VERSION = 'crm-v3.3';
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
 
@@ -31,7 +31,11 @@ const CHECKLIST = [
   ['avaluo', 'Certificado de avalúo fiscal'], ['aguas', 'Inscripción derechos de agua'], ['plano', 'Plano o KMZ'],
   ['fotos', 'Fotos'], ['publicacion', 'Publicado en web'],
 ];
-const TIPOS = ['agricola', 'loteo', 'urbano', 'forestal', 'conservacion', 'energia'];
+const TIPOS_BASE = { agricola: 'Agrícola', loteo: 'Loteo', forestal: 'Forestal', conservacion: 'Conservación', urbano: 'Urbano',
+  agroindustrial: 'Agroindustrial', derechos_agua: 'Derechos de agua', energia: 'Energía' };
+let tiposExtra = {}; // tipos agregados por el equipo (se cargan desde el archivo del CRM)
+const todosLosTipos = () => ({ ...TIPOS_BASE, ...tiposExtra });
+const TIPOS = { includes: (k) => Object.prototype.hasOwnProperty.call(todosLosTipos(), k) };
 const REGIONES = ['XV', 'I', 'II', 'III', 'IV', 'V', 'RM', 'VI', 'VII', 'XVI', 'VIII', 'IX', 'XIV', 'X', 'XI', 'XII'];
 const CULTIVOS = {
   paltos: /\bpalt(o|os|a|as)\b/, citricos: /citric|limon|naranj|mandarin|clementin/, nogales: /nogal|nuez|nueces|chandler/,
@@ -161,6 +165,10 @@ function parseFechaMY(v) {
 function tipoNorm(t) {
   const s = norm(t);
   if (!s) return '';
+  for (const [k, l] of Object.entries(tiposExtra)) if (norm(l) === s || k === s) return k;
+  if (/agroindustr|industrial/.test(s)) return 'agroindustrial';
+  if (/derechos? de agua/.test(s)) return 'derechos_agua';
+  if (/subdivis/.test(s)) return 'loteo';
   if (/lote|parcela/.test(s)) return 'loteo';
   if (/urban/.test(s)) return 'urbano';
   if (/conserv/.test(s)) return 'conservacion';
@@ -236,6 +244,7 @@ function cultivosCampo(c) {
 const COMPAT = {
   agricola: { agricola: 10 }, loteo: { loteo: 10, urbano: 5, agricola: 3 }, urbano: { urbano: 10, loteo: 5 },
   forestal: { forestal: 10, conservacion: 5, agricola: 3 }, conservacion: { conservacion: 10, forestal: 5, agricola: 3 }, energia: { energia: 10, agricola: 3 },
+  agroindustrial: { agroindustrial: 10, agricola: 3 }, derechos_agua: { derechos_agua: 10 },
 };
 const NOMBRE_CULTIVO = { paltos: 'paltos', citricos: 'cítricos', nogales: 'nogales', cerezos: 'cerezos', avellanos: 'avellanos', almendros: 'almendros',
   manzanos: 'manzanos', perales: 'perales', carozos: 'carozos', uva_mesa: 'uva de mesa', vinas: 'viñas', olivos: 'olivos', berries: 'berries',
@@ -245,7 +254,7 @@ function evaluar(campo, cli, hoy = new Date()) {
   // tipo
   let sTipo;
   if (!cli.tipo) sTipo = 5;
-  else { sTipo = (COMPAT[cli.tipo] || {})[campo.tipo]; if (sTipo == null) return null; }
+  else { sTipo = (COMPAT[cli.tipo] || { [cli.tipo]: 10 })[campo.tipo]; if (sTipo == null) return null; }
   const razones = [], alertas = [];
   const textoCli = norm(`${cli.zona} ${cli.requerimiento} ${cli.observaciones}`);
   const lugares = lugaresDe(campo);
@@ -406,7 +415,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 function guardar(db) {
@@ -444,7 +453,7 @@ router.use((req, res, next) => {
 router.get('/', (req, res) => {
   const db = leer();
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db) });
 });
 
@@ -1233,5 +1242,173 @@ if (!process.env.CRM_SYNC_OFF) {
   setInterval(tarea, 6 * 3600 * 1000).unref();
 }
 
-router._interno = { sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+// ───────────────────────── Tipos de propiedad agregados por el equipo ─────────────────────────
+router.post('/tipos', async (req, res) => {
+  const nombre = txt((req.body || {}).nombre, 40);
+  if (nombre.length < 3) return res.status(400).json({ error: 'Escribe un nombre de al menos 3 letras.' });
+  const clave = norm(nombre).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
+  if (!clave) return res.status(400).json({ error: 'Nombre no válido.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const existente = Object.entries({ ...TIPOS_BASE, ...(db.tiposExtra || {}) }).find(([k, l]) => k === clave || norm(l) === norm(nombre));
+    if (existente) return { clave: existente[0], tipos: { ...TIPOS_BASE, ...(db.tiposExtra || {}) }, existia: true };
+    db.tiposExtra = { ...(db.tiposExtra || {}), [clave]: nombre.charAt(0).toUpperCase() + nombre.slice(1) };
+    tiposExtra = db.tiposExtra;
+    registrar(db, autor, `Agregó el tipo de propiedad "${db.tiposExtra[clave]}"`, null);
+    return { clave, tipos: todosLosTipos() };
+  });
+  res.json(r);
+});
+
+// ───────────────────────── Tasaciones guardadas desde la plataforma ─────────────────────────
+// Se leen del mismo disco donde almacen.js guarda cada tasación (carpeta "tasaciones").
+const DIR_TAS_PLATAFORMA = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'datos-locales'), 'tasaciones');
+const cacheTas = new Map(); // id -> { mtime, resumen }
+function resumenTasacion(reg) {
+  const f = reg.datos || {}, roles = Array.isArray(f.roles) ? f.roles : [];
+  const r0 = roles[0] || {}, d0 = r0.datos || {};
+  const sup = parseHa(f.superfTitulos) || roles.reduce((s, r) => s + (parseHa((r.datos || {}).superfSII) || 0), 0) || parseHa(f.superfGoogleEarth) || null;
+  const uf = parsePrecio(`UF ${String(f.valorComercialUF || '').replace(/[^\d.,]/g, '')}`).precioUF;
+  return {
+    id: reg.id, nombre: reg.nombre, guardado: reg.guardado, numero: f.numTasacion || '', predio: f.predioNombre || '',
+    roles: roles.map((r) => r.rol).filter(Boolean), comuna: r0.comuna || f.localidad || '', region: regionDeNombre(f.region) || regionCodigo(f.region),
+    hectareas: sup ? Math.round(sup * 100) / 100 : null, valorUF: uf || null, propietario: d0.propietario || '', solicitante: f.solicitante || '',
+  };
+}
+function listarTasacionesPlataforma() {
+  if (!fs.existsSync(DIR_TAS_PLATAFORMA)) return [];
+  const out = [];
+  for (const arch of fs.readdirSync(DIR_TAS_PLATAFORMA)) {
+    if (!/^[A-Za-z0-9_-]{1,64}\.json$/.test(arch)) continue;
+    const ruta = path.join(DIR_TAS_PLATAFORMA, arch);
+    try {
+      const mtime = fs.statSync(ruta).mtimeMs, id = arch.slice(0, -5);
+      const c = cacheTas.get(id);
+      if (c && c.mtime === mtime) { out.push(c.resumen); continue; }
+      const resumen = resumenTasacion(JSON.parse(fs.readFileSync(ruta, 'utf8')));
+      cacheTas.set(id, { mtime, resumen }); out.push(resumen);
+    } catch (e) { /* archivo dañado o a medio escribir: se omite */ }
+  }
+  return out.sort((a, b) => String(b.guardado).localeCompare(String(a.guardado)));
+}
+function textoLista(v) {
+  if (!v) return '';
+  try {
+    const a = JSON.parse(v);
+    if (Array.isArray(a)) return a.map((x) => (typeof x === 'object' && x ? Object.values(x).filter((y) => typeof y === 'string' || typeof y === 'number').join(' ') : String(x))).filter(Boolean).join('; ');
+    if (a && typeof a === 'object') return Object.entries(a).map(([k, x]) => `${k}: ${x}`).join('; ');
+  } catch (e) { /* texto normal */ }
+  return String(v);
+}
+
+router.get('/plataforma/tasaciones', (req, res) => {
+  const db = leer();
+  const lista = listarTasacionesPlataforma().map((t) => {
+    const campo = db.campos.find((c) => c.origenTasacion === t.id);
+    return { ...t, campoId: campo ? campo.id : null, campoNombre: campo ? campo.nombre : '' };
+  });
+  res.json({ tasaciones: lista, hayCarpeta: fs.existsSync(DIR_TAS_PLATAFORMA) });
+});
+
+// Convierte una tasación de la plataforma (su formulario) en campo del CRM, o completa el que ya existe
+function campoDesdeTasacion(db, reg, tid, autor, campoId = '') {
+  const f = reg.datos || {}, t = resumenTasacion(reg), d0 = ((f.roles || [])[0] || {}).datos || {};
+  const lat = parseFloat(String(f.coordLat || '').replace(',', '.')), lng = parseFloat(String(f.coordLon || '').replace(',', '.'));
+  const datosCampo = {
+    nombre: t.predio || String(reg.nombre || '').replace(/\s*\[[^\]]*\]\s*$/, '') || (t.comuna ? `Campo en ${t.comuna}` : 'Campo desde tasación'),
+    rol: t.roles.join(', '), sector: t.comuna, region: t.region, hectareas: t.hectareas,
+    propietario: t.propietario, email: f.email || '', agua: textoLista(f.recursosHidricos).slice(0, 380),
+    plantaciones: f.plantacionDesc || textoLista(f.plantacionesCIREN).slice(0, 380), aptitud: f.aptitud || '',
+    coordenadas: coordOk(lat, lng) ? `${lat}, ${lng}` : '',
+  };
+  const notas = [
+    `Tasación ${t.numero || reg.nombre || ''}${reg.guardado ? ` (${String(reg.guardado).slice(0, 10)})` : ''}.`,
+    f.valorComercialUF ? `Valor comercial según tasación: UF ${f.valorComercialUF}.` : '',
+    f.valorFacilVentaUF ? `Valor de fácil venta: UF ${f.valorFacilVentaUF}.` : '',
+    t.solicitante ? `Solicitante: ${t.solicitante}.` : '',
+    f.acceso ? `Acceso: ${f.acceso}` : '',
+  ].filter(Boolean).join('\n');
+  let campo = (campoId && db.campos.find((c) => c.id === campoId)) || db.campos.find((c) => c.origenTasacion === tid) || (t.numero ? db.campos.find((c) => c.origenTasacionNum === t.numero) : null);
+  const existia = !!campo;
+  const completados = [];
+  if (!campo) {
+    campo = { id: id(), ...limpiar('campos', { ...datosCampo, etapa: 'Captación', tipo: 'agricola', observaciones: notas, responsable: autor,
+      checklist: { avaluo: !!(d0.avaluoFiscal), plano: !!(f.prediosGeo) } }),
+      origenTasacion: tid, origenTasacionNum: t.numero || '', historial: [{ fecha: ahora(), autor, texto: `Creado desde la tasación ${t.numero || reg.nombre || ''}` }], envios: [], creado: ahora(), actualizado: ahora() };
+    db.campos.push(campo);
+  } else {
+    const limpio = limpiar('campos', { ...campo, ...Object.fromEntries(Object.entries(datosCampo).filter(([k, v]) => (campo[k] === '' || campo[k] == null) && v !== '' && v != null)) });
+    for (const k of Object.keys(datosCampo)) if ((campo[k] === '' || campo[k] == null) && limpio[k] !== '' && limpio[k] != null) { campo[k] = limpio[k]; completados.push(k); }
+    const valorNota = notas.split('\n').find((l) => l.startsWith('Valor comercial'));
+    if (valorNota && !String(campo.observaciones || '').includes(valorNota)) campo.observaciones = [campo.observaciones, valorNota].filter(Boolean).join('\n');
+    campo.origenTasacion = campo.origenTasacion || tid; campo.origenTasacionNum = campo.origenTasacionNum || t.numero || '';
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Actualizado desde la tasación ${t.numero || ''}${completados.length ? ` (completó: ${completados.join(', ')})` : ' (sin cambios)'}` }];
+    campo.actualizado = ahora();
+  }
+  // Seguimiento de la tasación en el CRM
+  const etapaTas = f.valorComercial || f.valorComercialUF ? 'Informe entregado' : 'En terreno';
+  let tas = db.tasaciones.find((x) => x.campoId === campo.id) || (t.numero ? db.tasaciones.find((x) => x.codigo && x.codigo === t.numero) : null);
+  if (tas) {
+    tas.campoId = campo.id; if (!tas.codigo && t.numero) tas.codigo = t.numero;
+    if (etapaTas === 'Informe entregado' && ETAPAS.tasaciones.indexOf(tas.etapa) < ETAPAS.tasaciones.indexOf('Informe entregado')) {
+      tas.historial = [...(tas.historial || []), { fecha: ahora(), autor, texto: `Etapa: ${tas.etapa} → Informe entregado` }]; tas.etapa = 'Informe entregado';
+    }
+    tas.actualizado = ahora();
+  } else {
+    tas = { id: id(), ...limpiar('tasaciones', { titulo: `Tasación ${campo.nombre}`, cliente: t.solicitante || t.propietario, email: f.email || '', campoId: campo.id,
+      rol: campo.rol, comuna: campo.sector, codigo: t.numero, etapa: etapaTas, responsable: autor }),
+      historial: [{ fecha: ahora(), autor, texto: 'Registrada desde la plataforma de tasaciones' }], envios: [], creado: ahora(), actualizado: ahora() };
+    db.tasaciones.push(tas);
+  }
+  registrar(db, autor, `${existia ? 'Actualizó' : 'Creó'} el campo ${campo.nombre} desde la tasación ${t.numero || reg.nombre || ''}`, { col: 'campos', id: campo.id });
+  return { campo, tasacion: tas, existia, completados };
+}
+
+router.post('/plataforma/tasaciones/:id/campo', async (req, res) => {
+  const tid = req.params.id;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(tid)) return res.status(400).json({ error: 'Tasación no válida.' });
+  let reg;
+  try { reg = JSON.parse(fs.readFileSync(path.join(DIR_TAS_PLATAFORMA, `${tid}.json`), 'utf8')); }
+  catch (e) { return res.status(404).json({ error: 'No se encontró esa tasación en la nube.' }); }
+  const autor = usuarioDe(req);
+  res.json(await modificar((db) => campoDesdeTasacion(db, reg, tid, autor)));
+});
+
+// Botón "Crear en CRM" de la plataforma: recibe los datos del formulario abierto (aunque no esté guardado)
+router.post('/plataforma/campo', async (req, res) => {
+  const b = req.body || {};
+  const datos = b.datos && typeof b.datos === 'object' ? b.datos : null;
+  if (!datos) return res.status(400).json({ error: 'No llegaron los datos de la tasación.' });
+  const tieneAlgo = datos.predioNombre || (Array.isArray(datos.roles) && datos.roles.some((r) => r && (r.rol || r.comuna))) || datos.localidad;
+  if (!tieneAlgo) return res.status(400).json({ error: 'Completa al menos el nombre del predio, un rol o la comuna antes de crear el campo.' });
+  const idOk = /^[A-Za-z0-9_-]{1,64}$/.test(String(b.tasacionId || ''));
+  const tid = idOk ? b.tasacionId : datos.numTasacion ? `num_${String(datos.numTasacion).replace(/[^A-Za-z0-9_-]/g, '')}` : `form_${Date.now()}`;
+  const reg = { id: tid, nombre: txt(b.nombre, 200) || datos.predioNombre || '', guardado: ahora(), datos };
+  const autor = usuarioDe(req);
+  res.json(await modificar((db) => campoDesdeTasacion(db, reg, tid, autor, txt(b.campoId, 60))));
+});
+
+// Crear un campo a partir de una tasación registrada en el CRM
+router.post('/tasaciones/:id/campo', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const tas = db.tasaciones.find((x) => x.id === req.params.id);
+    if (!tas) return null;
+    const previo = tas.campoId && db.campos.find((c) => c.id === tas.campoId);
+    if (previo) return { campo: previo, existia: true };
+    const campo = { id: id(), ...limpiar('campos', {
+      nombre: tas.titulo.replace(/^Tasaci[oó]n\s+(de\s+)?/i, '') || tas.titulo, etapa: 'Captación', tipo: 'agricola', rol: tas.rol, sector: tas.comuna,
+      propietario: tas.cliente, telefono: tas.telefono, email: tas.email, responsable: autor,
+      observaciones: `Creado desde la tasación ${tas.codigo || tas.titulo}.`,
+    }), historial: [{ fecha: ahora(), autor, texto: `Creado desde la tasación ${tas.codigo || tas.titulo}` }], envios: [], creado: ahora(), actualizado: ahora() };
+    db.campos.push(campo);
+    tas.campoId = campo.id;
+    tas.historial = [...(tas.historial || []), { fecha: ahora(), autor, texto: `Se creó el campo ${campo.nombre}` }];
+    registrar(db, autor, `Creó el campo ${campo.nombre} desde la tasación ${tas.codigo || tas.titulo}`, { col: 'campos', id: campo.id });
+    return { campo };
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
+});
+
+router._interno = { resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
