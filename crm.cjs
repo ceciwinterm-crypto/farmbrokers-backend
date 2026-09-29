@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.4';
+const VERSION = 'crm-v3.5';
 const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
@@ -918,6 +918,66 @@ router.delete('/campos/:id/archivos/:fid', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el archivo.' });
 });
 
+// ───────────────────────── Redactar la descripción para el cliente (IA) ─────────────────────────
+async function llamarClaude(prompt) {
+  if (global.__claudeMock) return global.__claudeMock(prompt);
+  const clave = process.env.ANTHROPIC_API_KEY;
+  if (!clave) throw new Error('Falta la variable ANTHROPIC_API_KEY en Railway.');
+  const r = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': clave, 'anthropic-version': '2023-06-01' },
+    body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 1400, messages: [{ role: 'user', content: prompt }] }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error((j.error && j.error.message) || `El servicio de IA respondió ${r.status}.`);
+  return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
+}
+function antecedentesCampo(c) {
+  const w = c.web || {}, d = w.detalle || {}, ti = c.tasacionInfo || {}, cap = c.captacion && c.captacion.datos;
+  const filas = [
+    ['Nombre', c.nombre], ['Tipo de propiedad', (todosLosTipos()[c.tipo] || c.tipo)], ['Comuna o sector', c.sector], ['Región', c.region],
+    ['Superficie', d.superficie || (c.hectareas ? `${c.hectareas} ha` : '')], ['Superficie según plano', c.geo ? `${c.geo.areaHa} ha` : ''],
+    ['Derechos de agua', d.agua || c.agua], ['Fuente del agua', c.fuenteAgua], ['Plantaciones', d.plantaciones || c.plantaciones], ['Aptitud', c.aptitud],
+    ['Infraestructura', c.infraestructura || (cap && cap.infraestructura)], ['Acceso', c.acceso || ti.acceso],
+    ['Distancia a Santiago', ti.distSantiago], ['Distancia a la comuna', ti.distComuna], ['Altitud', ti.altitud],
+    ['Suelos (tasación)', ti.suelos], ['Clima (tasación)', ti.clima], ['Recursos hídricos (tasación)', ti.aguas], ['Escasez hídrica', ti.escasez],
+    ['Construcciones (tasación)', ti.construcciones], ['Instalaciones (tasación)', ti.instalaciones], ['Usos de suelo (tasación)', ti.usos],
+    ['Plantaciones (tasación)', ti.plantaciones], ['Conclusión de la tasación', ti.conclusion],
+    ['Deslindes y accesos (propietario)', cap ? cap.predios.map((p) => p.descripcion).filter(Boolean).join('; ') : ''],
+    ['Loteo', cap ? cap.predios.filter((p) => p.tipo === 'loteo' && p.lotes).map((p) => `${p.lotes} lotes${p.m2Lote ? ` de ${p.m2Lote} m²` : ''}${p.planoSAG ? ', plano SAG aprobado' : ''}`).join('; ') : ''],
+  ].filter(([, v]) => v && String(v).trim());
+  const web = w.descripcion && w.descripcion.length ? w.descripcion.join('\n') : '';
+  return { filas, web };
+}
+router.post('/campos/:id/redactar', async (req, res) => {
+  const db = leer();
+  const base = db.campos.find((x) => x.id === req.params.id);
+  if (!base) return res.status(404).json({ error: 'No se encontró el campo.' });
+  // Usa también lo que el usuario tenga escrito sin guardar
+  const campo = { ...base, ...limpiar('campos', { ...base, ...((req.body || {}).campo || {}) }), web: base.web, geo: base.geo, captacion: base.captacion, tasacionInfo: base.tasacionInfo };
+  const { filas, web } = antecedentesCampo(campo);
+  if (filas.length < 4 && !web) return res.status(400).json({ error: 'Hay muy pocos datos del campo para redactar. Completa superficie, agua, plantaciones o aptitud, o vincula la publicación o la tasación.' });
+  const prompt = `Eres redactor comercial de Farm Brokers Chile, corredora de campos agrícolas. Escribe la descripción de este campo para la ficha que se entrega a un posible comprador.
+
+Reglas:
+- Usa SOLO los antecedentes de abajo. No inventes cifras, distancias, cultivos, calidades ni ventajas que no estén escritas. Si un dato no está, no lo menciones.
+- Español de Chile, tono profesional y cercano, sin exageraciones ni signos de exclamación.
+- No incluyas precio, comisión, nombres de propietarios, RUT, rol SII ni datos de contacto.
+- Formato: un párrafo inicial de 2 o 3 oraciones que presente el campo. Luego párrafos breves que empiecen con una etiqueta y dos puntos, en este orden y solo si hay datos: "Superficie:", "Suelos:", "Aguas:", "Plantaciones:", "Clima:", "Infraestructura:", "Acceso:". Puedes agregar "Potencial:" solo si los antecedentes mencionan aptitud o conclusión.
+- Si hay una lista de elementos (por ejemplo varios derechos de agua), escríbelos en líneas que empiecen con "- ".
+- Entre 120 y 280 palabras. Devuelve solo el texto, sin títulos ni comentarios.
+
+Antecedentes del campo:
+${filas.map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 1500)}`).join('\n')}
+${web ? `\nDescripción publicada en farmbrokers.cl (úsala como base de estilo y datos):\n${web.slice(0, 4000)}` : ''}`;
+  try {
+    const texto = (await llamarClaude(prompt)).replace(/\*\*/g, '').replace(/^#+\s*/gm, '').replace(/\n{2,}/g, '\n').trim();
+    const autor = usuarioDe(req);
+    await modificar((d2) => { registrar(d2, autor, `Redactó con IA la descripción de ${campo.nombre}`, { col: 'campos', id: campo.id }); });
+    res.json({ texto });
+  } catch (e) { res.status(502).json({ error: `No se pudo redactar: ${e.message}` }); }
+});
+
 // ── Propietario (sin clave del equipo, solo con el link)
 router.get('/publico/:token', (req, res) => {
   const campo = buscarPorToken(leer(), req.params.token);
@@ -1116,8 +1176,15 @@ function analizarPropiedad(html, url) {
   }
   if (!detalle.id) { const m = lineas.join('\n').match(/ID de propiedad:?\s*([A-Z0-9]{5,})/i); if (m) detalle.id = m[1]; }
   // Descripción
-  const iD = idx(/^Descripción$/i), fD = iD >= 0 ? idx(/^(Dirección|Detalles|Características|Información de contacto)$/i, iD + 1) : -1;
-  const parrafos = iD >= 0 ? lineas.slice(iD + 1, fD > iD ? fD : iD + 40).filter((l) => !/^(Read More|Leer más|Ver más)$/i.test(l)) : [];
+  const iD = idx(/^Descripci[oó]n\b.{0,20}$/i), fD = iD >= 0 ? idx(/^(Dirección|Detalles|Características|Información de contacto|Video|Mapa|Galería)\b/i, iD + 1) : -1;
+  let parrafos = iD >= 0 ? lineas.slice(iD + 1, fD > iD ? fD : iD + 40).filter((l) => !/^(Read More|Leer más|Ver más|Mostrar más)$/i.test(l)) : [];
+  if (!parrafos.length) {
+    // Alternativa: el bloque de descripción del tema, aunque no tenga título
+    const m = html.match(/id=["']property-description-wrap["'][\s\S]*?(?=id=["']property-(?:address|detail|features|video|map)|<footer)/i);
+    if (m) parrafos = aLineas(m[0].replace(/^[^>]*>/, '')).filter((l) => !/^(Descripci[oó]n|Read More|Leer más|Ver más)$/i.test(l));
+  }
+  const resumenMeta = meta('og:description') || meta('description');
+  if (!parrafos.length && resumenMeta) parrafos = [resumenMeta];
   let comision = '';
   const descripcion = parrafos.filter((l) => {
     const c = l.match(/^-?\s*Comisi[oó]n:?\s*(.+)$/i); if (c) { comision = c[1]; return false; }
@@ -1434,6 +1501,17 @@ function campoDesdeTasacion(db, reg, tid, autor, campoId = '') {
     plantaciones: f.plantacionDesc || textoLista(f.plantacionesCIREN).slice(0, 380), aptitud: f.aptitud || '',
     coordenadas: coordOk(lat, lng) ? `${lat}, ${lng}` : '', acceso: txt(f.acceso, 400),
   };
+  const L = (v) => textoLista(v).trim();
+  const infoTas = {
+    suelos: [f.seriesSuelo && `Serie ${f.seriesSuelo}`, f.textura && `textura ${f.textura}`, f.profundidad && `profundidad ${f.profundidad}`, f.drenaje && `drenaje ${f.drenaje}`,
+      f.pendiente && `pendiente ${f.pendiente}`, f.erosion && `erosión ${f.erosion}`, f.capacidadUso && `capacidad de uso ${f.capacidadUso}`].filter(Boolean).join(', '),
+    clima: txt(f.climaTxt, 1200), aguas: L(f.recursosHidricos).slice(0, 1200), escasez: txt(f.escasezTxt, 400),
+    construcciones: [f.construcciones && !/no posee construcciones/i.test(f.construcciones) ? f.construcciones : '', L(f.construccionesLista)].filter(Boolean).join('. ').slice(0, 1200),
+    instalaciones: L(f.instalacionesLista).slice(0, 800), usos: L(f.usosCIREN).slice(0, 800), plantaciones: [f.plantacionDesc, L(f.plantacionesCIREN)].filter(Boolean).join('. ').slice(0, 800),
+    deslindes: [f.deslindeN && `Norte: ${f.deslindeN}`, f.deslindeS && `Sur: ${f.deslindeS}`, f.deslindeO && `Oriente: ${f.deslindeO}`, f.deslindeP && `Poniente: ${f.deslindeP}`].filter(Boolean).join('; ').slice(0, 800),
+    distSantiago: txt(f.distSantiago, 80), distComuna: txt(f.distComuna, 80), altitud: txt(f.altitud, 40), acceso: txt(f.acceso, 400),
+    conclusion: txt(f.guiaConclusion, 1500), numero: t.numero || '',
+  };
   let geoTas = null;
   try { const lista = JSON.parse(f.prediosGeo || '[]'); geoTas = armarGeo((Array.isArray(lista) ? lista : [lista]).flatMap((x) => anillosDeGeoJSON(x && x.type ? x : x && x.g)), 'tasacion'); } catch (e) { geoTas = null; }
   const notas = [
@@ -1476,6 +1554,7 @@ function campoDesdeTasacion(db, reg, tid, autor, campoId = '') {
     db.tasaciones.push(tas);
   }
   if (geoTas && !(campo.geo && campo.geo.fuente === 'kmz')) { aplicarGeo(campo, geoTas); if (existia) completados.push('plano del predio'); }
+  if (Object.values(infoTas).some((v) => v && v !== infoTas.numero)) { campo.tasacionInfo = infoTas; if (existia) completados.push('antecedentes de la tasación'); }
   registrar(db, autor, `${existia ? 'Actualizó' : 'Creó'} el campo ${campo.nombre} desde la tasación ${t.numero || reg.nombre || ''}`, { col: 'campos', id: campo.id });
   return { campo, tasacion: tas, existia, completados };
 }
@@ -1526,5 +1605,5 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
