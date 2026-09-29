@@ -14,7 +14,8 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.3';
+const VERSION = 'crm-v3.4';
+const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
 
@@ -187,7 +188,7 @@ function fonoNorm(t) {
 // ───────────────────────── Esquemas ─────────────────────────
 const CAMPOS_CAMPO = ['codigo', 'nombre', 'tipo', 'etapa', 'region', 'sector', 'hectareas', 'agua', 'fuenteAgua', 'plantaciones', 'aptitud',
   'precioTexto', 'precioCLP', 'precioUF', 'observaciones', 'corredor', 'asociado', 'propietario', 'telefono', 'email', 'rol', 'linkWeb', 'linkPortal',
-  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas'];
+  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso'];
 const CAMPOS_CLIENTE = ['nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar'];
 const CAMPOS_TASACION = ['titulo', 'cliente', 'telefono', 'email', 'campoId', 'rol', 'comuna', 'codigo', 'etapa', 'honorariosUF', 'responsable', 'proximaAccion', 'proximaFecha'];
@@ -197,7 +198,7 @@ function limpiar(col, b, previo = {}) {
   const fecha = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : '');
   if (col === 'campos') {
     const r = {};
-    for (const k of CAMPOS_CAMPO) r[k] = txt(o[k], k === 'observaciones' ? 4000 : 400);
+    for (const k of CAMPOS_CAMPO) r[k] = txt(o[k], k === 'descripcionFicha' ? 8000 : ['observaciones', 'infraestructura'].includes(k) ? 4000 : 400);
     r.tipo = TIPOS.includes(o.tipo) ? o.tipo : tipoNorm(o.tipo) || 'agricola';
     r.etapa = ETAPAS.campos.includes(o.etapa) ? o.etapa : 'Captación';
     r.region = regionCodigo(o.region);
@@ -725,6 +726,7 @@ function volcarAlCampo(campo, d) {
   const aguas = ps.filter((p) => p.tieneAgua && p.aguaDetalle).map((p) => p.aguaDetalle);
   set('agua', aguas.length ? aguas.join('; ') : 'Sin derechos de agua');
   if (ps.some((p) => p.tipo === 'loteo')) campo.tipo = 'loteo';
+  set('infraestructura', d.infraestructura);
 }
 
 function publicoDe(campo) {
@@ -806,6 +808,116 @@ router.get('/campos/:id/archivos/:fid', (req, res) => {
   fs.createReadStream(ruta).pipe(res);
 });
 
+// ───────────────────────── Plano del predio (KMZ, KML o polígonos de la tasación) ─────────────────────────
+function leerZip(buf) {
+  // Lector mínimo de ZIP (un KMZ es un ZIP con un archivo .kml adentro)
+  let eocd = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 70000); i--) if (buf.readUInt32LE(i) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('El archivo KMZ está dañado.');
+  const total = buf.readUInt16LE(eocd + 10); let p = buf.readUInt32LE(eocd + 16);
+  const salida = [];
+  for (let n = 0; n < total && p + 46 <= buf.length; n++) {
+    if (buf.readUInt32LE(p) !== 0x02014b50) break;
+    const metodo = buf.readUInt16LE(p + 10), tam = buf.readUInt32LE(p + 20);
+    const lnom = buf.readUInt16LE(p + 28), lext = buf.readUInt16LE(p + 30), lcom = buf.readUInt16LE(p + 32), local = buf.readUInt32LE(p + 42);
+    const nombre = buf.slice(p + 46, p + 46 + lnom).toString('utf8');
+    p += 46 + lnom + lext + lcom;
+    if (!/\.kml$/i.test(nombre)) continue;
+    const ini = local + 30 + buf.readUInt16LE(local + 26) + buf.readUInt16LE(local + 28);
+    const datos = buf.slice(ini, ini + tam);
+    salida.push(metodo === 8 ? zlib.inflateRawSync(datos) : datos);
+  }
+  if (!salida.length) throw new Error('El KMZ no trae un archivo KML adentro.');
+  return salida.map((b) => b.toString('utf8')).join('\n');
+}
+function anillosDeKML(kml) {
+  const anillos = [];
+  const coords = (t) => t.trim().split(/\s+/).map((c) => c.split(',').map(Number)).filter((c) => c.length >= 2 && coordOk(c[1], c[0])).map((c) => [c[0], c[1]]);
+  for (const m of kml.matchAll(/<outerBoundaryIs>[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>/gi)) { const a = coords(m[1]); if (a.length >= 3) anillos.push(a); }
+  if (!anillos.length) for (const m of kml.matchAll(/<LineString>[\s\S]*?<coordinates>([\s\S]*?)<\/coordinates>/gi)) { const a = coords(m[1]); if (a.length >= 3) anillos.push(a); }
+  return anillos;
+}
+function anillosDeGeoJSON(g) {
+  if (!g) return [];
+  if (g.type === 'Feature') return anillosDeGeoJSON(g.geometry);
+  if (g.type === 'FeatureCollection') return (g.features || []).flatMap(anillosDeGeoJSON);
+  if (g.type === 'Polygon') return [g.coordinates[0]];
+  if (g.type === 'MultiPolygon') return g.coordinates.map((p) => p[0]);
+  return [];
+}
+function areaHaAnillo(a) {
+  const R = 6378137, rad = Math.PI / 180; let s = 0;
+  for (let i = 0; i < a.length; i++) { const [x1, y1] = a[i], [x2, y2] = a[(i + 1) % a.length]; s += (x2 - x1) * rad * (2 + Math.sin(y1 * rad) + Math.sin(y2 * rad)); }
+  return Math.abs((s * R * R) / 2) / 10000;
+}
+function armarGeo(anillos, fuente) {
+  anillos = anillos.map((a) => a.filter((c) => Array.isArray(c) && coordOk(Number(c[1]), Number(c[0]))).map((c) => [Number(c[0]), Number(c[1])])).filter((a) => a.length >= 3).slice(0, 60);
+  if (!anillos.length) return null;
+  const reducir = (a) => { if (a.length <= 500) return a; const paso = Math.ceil(a.length / 500); return a.filter((_, i) => i % paso === 0); };
+  anillos = anillos.map(reducir);
+  const todos = anillos.flat();
+  const bbox = [Math.min(...todos.map((c) => c[0])), Math.min(...todos.map((c) => c[1])), Math.max(...todos.map((c) => c[0])), Math.max(...todos.map((c) => c[1]))];
+  const areaHa = Math.round(anillos.reduce((t, a) => t + areaHaAnillo(a), 0) * 100) / 100;
+  return { fuente, anillos: anillos.map((a) => a.map(([x, y]) => [Math.round(x * 1e6) / 1e6, Math.round(y * 1e6) / 1e6])), bbox, areaHa, centro: { lat: (bbox[1] + bbox[3]) / 2, lng: (bbox[0] + bbox[2]) / 2 }, fecha: ahora() };
+}
+function geoDeArchivo(buf, nombre) {
+  const esZip = buf.length > 4 && buf.readUInt32LE(0) === 0x04034b50;
+  const kml = esZip ? leerZip(buf) : buf.toString('utf8');
+  if (!/<kml|<Placemark|<coordinates/i.test(kml)) throw new Error('No parece un archivo KMZ o KML de Google Earth.');
+  const g = armarGeo(anillosDeKML(kml), 'kmz');
+  if (!g) throw new Error('El archivo no tiene el contorno del predio (polígonos) dibujado.');
+  g.archivo = nombre;
+  return g;
+}
+const esPlano = (a) => a.tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre || '');
+function aplicarGeo(campo, g) {
+  campo.geo = g;
+  if (!campo.coordenadas) campo.coordenadas = `${g.centro.lat.toFixed(6)}, ${g.centro.lng.toFixed(6)}`;
+  campo.checklist = { ...(campo.checklist || {}), plano: true };
+}
+
+// Archivos subidos por el equipo desde la ficha del campo
+router.post('/campos/:id/archivo', async (req, res) => {
+  const b = req.body || {};
+  const tipo = TIPOS_ARCHIVO.includes(b.tipo) ? b.tipo : 'otro';
+  const buf = Buffer.from(String(b.base64 || '').replace(/^data:[^,]*,/, ''), 'base64');
+  if (!buf.length) return res.status(400).json({ error: 'El archivo está vacío.' });
+  if (buf.length > 20 * 1024 * 1024) return res.status(413).json({ error: 'El archivo supera los 20 MB.' });
+  const nombreArch = txt(b.nombre, 160).replace(/[\\/]/g, '_') || tipo;
+  let g = null, avisoGeo = '';
+  if (tipo === 'kmz' || /\.(kmz|kml)$/i.test(nombreArch)) { try { g = geoDeArchivo(buf, nombreArch); } catch (e) { avisoGeo = e.message; } }
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    const a = { id: crypto.randomBytes(8).toString('hex'), tipo: g ? 'kmz' : tipo, nombre: nombreArch, mime: txt(b.mime, 100), tamano: buf.length, fecha: ahora(), origen: 'equipo', autor };
+    fs.mkdirSync(path.join(ARCHIVOS, campo.id), { recursive: true });
+    fs.writeFileSync(path.join(ARCHIVOS, campo.id, a.id), buf);
+    campo.archivos = [...(campo.archivos || []), a];
+    const marca = { plano: 'plano', foto: 'fotos', dominio: 'dominio', hipotecas: 'hipotecas', avaluo: 'avaluo', aguas: 'aguas' }[a.tipo];
+    if (marca) campo.checklist = { ...(campo.checklist || {}), [marca]: true };
+    if (g) aplicarGeo(campo, g);
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Subió ${a.nombre}${g ? ` (plano del predio: ${g.anillos.length} ${g.anillos.length === 1 ? 'polígono' : 'polígonos'}, ${g.areaHa.toLocaleString('es-CL')} ha)` : ''}` }];
+    campo.actualizado = ahora();
+    return campo;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
+  res.json({ campo: r, avisoGeo });
+});
+
+router.delete('/campos/:id/archivos/:fid', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    const a = (campo.archivos || []).find((x) => x.id === req.params.fid); if (!a) return null;
+    campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
+    try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
+    if (campo.geo && campo.geo.fuente === 'kmz' && campo.geo.archivo === a.nombre) delete campo.geo;
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eliminó el archivo ${a.nombre}` }];
+    return campo;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el archivo.' });
+});
+
 // ── Propietario (sin clave del equipo, solo con el link)
 router.get('/publico/:token', (req, res) => {
   const campo = buscarPorToken(leer(), req.params.token);
@@ -869,6 +981,7 @@ router.post('/publico/:token/archivo', async (req, res) => {
     campo.archivos = [...(campo.archivos || []), a];
     const marca = { kmz: 'plano', plano: 'plano', foto: 'fotos', dominio: 'dominio', hipotecas: 'hipotecas', avaluo: 'avaluo', aguas: 'aguas' }[tipo];
     if (marca) campo.checklist = { ...(campo.checklist || {}), [marca]: true };
+    if (tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre)) { try { aplicarGeo(campo, geoDeArchivo(buf, a.nombre)); } catch (e) { /* plano en PDF u otro formato */ } }
     return { ok: true, archivo: { id: a.id, tipo: a.tipo, nombre: a.nombre, tamano: a.tamano, fecha: a.fecha } };
   });
   if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
@@ -1319,8 +1432,10 @@ function campoDesdeTasacion(db, reg, tid, autor, campoId = '') {
     rol: t.roles.join(', '), sector: t.comuna, region: t.region, hectareas: t.hectareas,
     propietario: t.propietario, email: f.email || '', agua: textoLista(f.recursosHidricos).slice(0, 380),
     plantaciones: f.plantacionDesc || textoLista(f.plantacionesCIREN).slice(0, 380), aptitud: f.aptitud || '',
-    coordenadas: coordOk(lat, lng) ? `${lat}, ${lng}` : '',
+    coordenadas: coordOk(lat, lng) ? `${lat}, ${lng}` : '', acceso: txt(f.acceso, 400),
   };
+  let geoTas = null;
+  try { const lista = JSON.parse(f.prediosGeo || '[]'); geoTas = armarGeo((Array.isArray(lista) ? lista : [lista]).flatMap((x) => anillosDeGeoJSON(x && x.type ? x : x && x.g)), 'tasacion'); } catch (e) { geoTas = null; }
   const notas = [
     `Tasación ${t.numero || reg.nombre || ''}${reg.guardado ? ` (${String(reg.guardado).slice(0, 10)})` : ''}.`,
     f.valorComercialUF ? `Valor comercial según tasación: UF ${f.valorComercialUF}.` : '',
@@ -1360,6 +1475,7 @@ function campoDesdeTasacion(db, reg, tid, autor, campoId = '') {
       historial: [{ fecha: ahora(), autor, texto: 'Registrada desde la plataforma de tasaciones' }], envios: [], creado: ahora(), actualizado: ahora() };
     db.tasaciones.push(tas);
   }
+  if (geoTas && !(campo.geo && campo.geo.fuente === 'kmz')) { aplicarGeo(campo, geoTas); if (existia) completados.push('plano del predio'); }
   registrar(db, autor, `${existia ? 'Actualizó' : 'Creó'} el campo ${campo.nombre} desde la tasación ${t.numero || reg.nombre || ''}`, { col: 'campos', id: campo.id });
   return { campo, tasacion: tas, existia, completados };
 }
@@ -1410,5 +1526,5 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
