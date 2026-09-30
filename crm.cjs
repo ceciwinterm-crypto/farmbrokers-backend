@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.7';
+const VERSION = 'crm-v3.8';
 const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
@@ -1325,7 +1325,9 @@ function descargarTexto(url, redirecciones = 3) {
   });
 }
 const esFarmBrokers = (u) => { try { const x = new URL(u); return x.protocol === 'https:' && /^(www\.)?farmbrokers\.cl$/.test(x.hostname) && x.pathname.startsWith('/propiedad/'); } catch (e) { return false; } };
-const entidades = (t) => t.replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;|&#x27;|&rsquo;|&lsquo;/g, "'").replace(/&ldquo;|&rdquo;/g, '"')
+const ENT = { aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', Aacute: 'Á', Eacute: 'É', Iacute: 'Í', Oacute: 'Ó', Uacute: 'Ú', ntilde: 'ñ', Ntilde: 'Ñ',
+  uuml: 'ü', Uuml: 'Ü', ordm: 'º', ordf: 'ª', deg: '°', sup2: '²', sup3: '³', laquo: '«', raquo: '»', hellip: '…', iexcl: '¡', iquest: '¿', middot: '·', bull: '•' };
+const entidades = (t) => t.replace(/&([A-Za-z]+\d?);/g, (m, k) => (ENT[k] !== undefined ? ENT[k] : m)).replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16))).replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#0?39;|&#x27;|&rsquo;|&lsquo;/g, "'").replace(/&ldquo;|&rdquo;/g, '"')
   .replace(/&ndash;|&#8211;/g, '–').replace(/&mdash;|&#8212;/g, '—').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
 function aLineas(html) {
   return entidades(html.replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ')
@@ -1377,9 +1379,10 @@ function analizarPropiedad(html, url) {
   let parrafos = iD >= 0 ? lineas.slice(iD + 1, fD > iD ? fD : iD + 40).filter((l) => !/^(Read More|Leer más|Ver más|Mostrar más)$/i.test(l)) : [];
   if (!parrafos.length) {
     // Alternativa: el bloque de descripción del tema, aunque no tenga título
-    const m = html.match(/id=["']property-description-wrap["'][\s\S]*?(?=id=["']property-(?:address|detail|features|video|map)|<footer)/i);
-    if (m) parrafos = aLineas(m[0].replace(/^[^>]*>/, '')).filter((l) => !/^(Descripci[oó]n|Read More|Leer más|Ver más)$/i.test(l));
+    const m = html.match(/property-description-wrap[\s\S]*?(?=<[^>]*property-(?:address|detail|features|video|map|floor|walkscore|contact)[\w-]*|<footer)/i);
+    if (m) parrafos = aLineas(m[0].replace(/^[^>]*>/, '').replace(/<[^>]*$/, '')).filter((l) => !/^(Descripci[oó]n|Read More|Leer más|Ver más)$/i.test(l));
   }
+  parrafos = parrafos.filter((l) => !/<\/?[a-z][^>]*$|^<|class=["']|id=["']/i.test(l)).map((l) => l.replace(/<[^>]*>?/g, '').trim()).filter(Boolean);
   const resumenMeta = meta('og:description') || meta('description');
   if (!parrafos.length && resumenMeta) parrafos = [resumenMeta];
   let comision = '';
