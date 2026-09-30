@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.8';
+const VERSION = 'crm-v3.9';
 const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
@@ -1331,7 +1331,7 @@ const entidades = (t) => t.replace(/&([A-Za-z]+\d?);/g, (m, k) => (ENT[k] !== un
   .replace(/&ndash;|&#8211;/g, '–').replace(/&mdash;|&#8212;/g, '—').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)));
 function aLineas(html) {
   return entidades(html.replace(/<(script|style|noscript)[\s\S]*?<\/\1>/gi, ' ')
-    .replace(/<(br|\/p|\/li|\/div|\/h[1-6]|\/tr|\/ul|\/section|\/article)[^>]*>/gi, '\n').replace(/<[^>]+>/g, ' '))
+    .replace(/<li[^>]*>/gi, '\n• ').replace(/<(br|\/p|\/li|\/div|\/h[1-6]|\/tr|\/ul|\/ol|\/section|\/article)[^>]*>/gi, '\n').replace(/<[^>]+>/g, ' '))
     .split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
 const coordOk = (lat, lng) => lat < -17 && lat > -56.5 && lng < -66 && lng > -110;
@@ -1348,7 +1348,8 @@ function buscarCoordenadas(html) {
 }
 function analizarPropiedad(html, url) {
   const meta = (p) => { const m = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${p}["'][^>]+content=["']([^"']*)["']`, 'i')) || html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${p}["']`, 'i')); return m ? entidades(m[1]).trim() : ''; };
-  const lineas = aLineas(html);
+  const lineasV = aLineas(html); // con viñetas, solo para la descripción
+  const lineas = lineasV.map((l) => l.replace(/^•\s*/, ''));
   const idx = (re, desde = 0) => { for (let i = desde; i < lineas.length; i++) if (re.test(lineas[i])) return i; return -1; };
   // Galería: imágenes de la parte superior (antes de "Vista General" o de la descripción)
   const iniG = Math.max(0, html.search(/pills-gallery|property-banner|top-gallery|<h1/i));
@@ -1376,7 +1377,7 @@ function analizarPropiedad(html, url) {
   if (!detalle.id) { const m = lineas.join('\n').match(/ID de propiedad:?\s*([A-Z0-9]{5,})/i); if (m) detalle.id = m[1]; }
   // Descripción
   const iD = idx(/^Descripci[oó]n\b.{0,20}$/i), fD = iD >= 0 ? idx(/^(Dirección|Detalles|Características|Información de contacto|Video|Mapa|Galería)\b/i, iD + 1) : -1;
-  let parrafos = iD >= 0 ? lineas.slice(iD + 1, fD > iD ? fD : iD + 40).filter((l) => !/^(Read More|Leer más|Ver más|Mostrar más)$/i.test(l)) : [];
+  let parrafos = iD >= 0 ? lineasV.slice(iD + 1, fD > iD ? fD : iD + 40).filter((l) => !/^(Read More|Leer más|Ver más|Mostrar más)$/i.test(l)) : [];
   if (!parrafos.length) {
     // Alternativa: el bloque de descripción del tema, aunque no tenga título
     const m = html.match(/property-description-wrap[\s\S]*?(?=<[^>]*property-(?:address|detail|features|video|map|floor|walkscore|contact)[\w-]*|<footer)/i);
@@ -1386,10 +1387,19 @@ function analizarPropiedad(html, url) {
   const resumenMeta = meta('og:description') || meta('description');
   if (!parrafos.length && resumenMeta) parrafos = [resumenMeta];
   let comision = '';
-  const descripcion = parrafos.filter((l) => {
-    const c = l.match(/^-?\s*Comisi[oó]n:?\s*(.+)$/i); if (c) { comision = c[1]; return false; }
-    return !/^-?\s*Precio\s*:/i.test(l);
-  });
+  const descripcion = [];
+  for (let i = 0; i < parrafos.length; i++) {
+    const l = parrafos[i];
+    const c = l.match(/^[-•]?\s*Comisi[oó]n\s*:?\s*(.*)$/i);
+    if (c) {
+      let v = c[1].trim();
+      if (!/\d/.test(v) && parrafos[i + 1] && /\d\s*%/.test(parrafos[i + 1])) { v = parrafos[i + 1].trim(); i++; }
+      if (/\d/.test(v)) comision = v.replace(/\.$/, '');
+      continue;
+    }
+    if (/^[-•]?\s*Precio\s*:/i.test(l)) continue;
+    descripcion.push(l);
+  }
   if (!comision) { const c = parrafos.join(' ').match(/Comisi[oó]n:?\s*([0-9.,]+\s*%[^.\n]*)/i); if (c) comision = c[1].trim(); }
   // Dirección
   const val = (etq) => { const i = idx(new RegExp(`^${etq}\\s*:`, 'i')); return i >= 0 ? lineas[i].replace(new RegExp(`^${etq}\\s*:\\s*`, 'i'), '') : ''; };
