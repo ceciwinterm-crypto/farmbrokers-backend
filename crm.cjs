@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.6';
+const VERSION = 'crm-v3.7';
 const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
@@ -444,7 +444,7 @@ const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ?
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/publico/')) return next();
+  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/')) return next();
   const clave = process.env.CRM_KEY;
   if (!clave) return res.status(500).json({ error: 'Falta la variable CRM_KEY en Railway.' });
   if (req.get('x-crm-key') !== clave) return res.status(401).json({ error: 'Clave del equipo incorrecta.' });
@@ -454,7 +454,7 @@ router.use((req, res, next) => {
 router.get('/', (req, res) => {
   const db = leer();
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, acuerdo: textoAcuerdo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db) });
 });
 
@@ -976,6 +976,203 @@ ${web ? `\nDescripción publicada en farmbrokers.cl (úsala como base de estilo 
     await modificar((d2) => { registrar(d2, autor, `Redactó con IA la descripción de ${campo.nombre}`, { col: 'campos', id: campo.id }); });
     res.json({ texto });
   } catch (e) { res.status(502).json({ error: `No se pudo redactar: ${e.message}` }); }
+});
+
+// ───────────────────────── Carga masiva de KMZ ─────────────────────────
+function nombreKML(buf) {
+  try { const esZip = buf.readUInt32LE(0) === 0x04034b50; const kml = esZip ? leerZip(buf) : buf.toString('utf8'); const m = kml.match(/<name>\s*(?:<!\[CDATA\[)?([^<\]]{2,120})/i); return m ? entidades(m[1]).trim() : ''; }
+  catch (e) { return ''; }
+}
+const distKm = (a, b) => { const r = Math.PI / 180, dl = (b.lat - a.lat) * r, dn = (b.lng - a.lng) * r; const x = Math.sin(dl / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) ** 2; return 12742 * Math.asin(Math.sqrt(x)); };
+function coordsCampo(c) {
+  const m = String(c.coordenadas || '').match(/(-\d{1,2}\.\d+)\s*,\s*(-\d{1,3}\.\d+)/);
+  if (m) return { lat: Number(m[1]), lng: Number(m[2]) };
+  if (c.web && c.web.coordenadas && c.web.fuenteUbicacion !== 'comuna') return c.web.coordenadas;
+  return null;
+}
+function sugerirCampo(campos, nombreArchivo, nombreInterno, g) {
+  const texto = norm(`${nombreArchivo} ${nombreInterno}`).replace(/[_.-]+/g, ' ');
+  const textoSinEsp = texto.replace(/\s+/g, '');
+  const porCodigo = campos.find((c) => c.codigo && c.codigo.length >= 5 && textoSinEsp.includes(norm(c.codigo).replace(/\s+/g, '')));
+  if (porCodigo) return { campoId: porCodigo.id, motivo: `ID ${porCodigo.codigo} en el nombre` };
+  const porNombre = campos.filter((c) => norm(c.nombre).length >= 4 && texto.includes(norm(c.nombre).replace(/[_.-]+/g, ' ')))
+    .sort((a, b) => b.nombre.length - a.nombre.length)[0];
+  if (porNombre) return { campoId: porNombre.id, motivo: `nombre "${porNombre.nombre}"` };
+  if (g) {
+    const cerca = campos.map((c) => ({ c, p: coordsCampo(c) })).filter((x) => x.p).map((x) => ({ ...x, d: distKm(x.p, g.centro) })).sort((a, b) => a.d - b.d)[0];
+    if (cerca && cerca.d <= 4) return { campoId: cerca.c.id, motivo: `ubicación a ${cerca.d < 1 ? 'menos de 1' : Math.round(cerca.d)} km` };
+    const sector = campos.find((c) => norm(c.sector).length >= 4 && texto.includes(norm(c.sector)));
+    if (sector) return { campoId: sector.id, motivo: `comuna ${sector.sector} en el nombre (revisar)`, dudoso: true };
+  }
+  return null;
+}
+router.post('/kmz/analizar', (req, res) => {
+  const lista = Array.isArray((req.body || {}).archivos) ? req.body.archivos.slice(0, 30) : [];
+  const campos = leer().campos.filter((c) => c.etapa !== 'Descartado');
+  res.json({ resultados: lista.map((a) => {
+    const nombre = txt(a.nombre, 160);
+    try {
+      const buf = Buffer.from(String(a.base64 || '').replace(/^data:[^,]*,/, ''), 'base64');
+      const g = geoDeArchivo(buf, nombre);
+      const interno = nombreKML(buf);
+      return { nombre, ok: true, areaHa: g.areaHa, poligonos: g.anillos.length, nombreInterno: interno, centro: g.centro, sugerencia: sugerirCampo(campos, nombre, interno, g) };
+    } catch (e) { return { nombre, ok: false, error: e.message }; }
+  }) });
+});
+
+// ───────────────────────── Plano con acuerdo de confidencialidad ─────────────────────────
+const ACUERDO_BASE = `ACUERDO DE CONFIDENCIALIDAD
+
+Quien suscribe, en adelante "el Interesado", declara recibir de FARM BROKERS CHILE SPA, rol único tributario N° 77.089.307-0, en adelante "el Corredor", información sobre la propiedad {CAMPO}, en adelante "la Propiedad", incluyendo su plano, su ubicación exacta y el archivo KMZ, con el solo fin de evaluar su eventual compra.
+
+1. El Interesado se obliga a mantener la más estricta confidencialidad respecto de la información recibida, y a no divulgarla, copiarla ni entregarla a terceros sin autorización previa, expresa y por escrito del Corredor, salvo a sus asesores directos, quienes quedarán sujetos a la misma obligación.
+
+2. El Interesado se obliga a no contactar directamente al propietario de la Propiedad ni a terceros relacionados con ella para negociar su compra, y a canalizar toda gestión a través del Corredor.
+
+3. Si el Interesado, o una persona o sociedad relacionada con él, adquiere la Propiedad dentro de los 24 meses siguientes a la fecha de este acuerdo, reconoce que la conoció por intermedio del Corredor, quien tendrá derecho a la comisión correspondiente.
+
+4. La información se entrega de manera referencial y deberá ser verificada por el Interesado.
+
+El Interesado acepta este acuerdo en forma electrónica, con los datos y la fecha que se registran al momento de su aceptación.`;
+const textoAcuerdo = (db) => (db.config && db.config.acuerdo) || ACUERDO_BASE;
+const acuerdoPara = (db, campo) => textoAcuerdo(db).replace(/\{CAMPO\}/g, (campo.web && campo.web.titulo) || campo.nombre);
+
+router.put('/config/acuerdo', async (req, res) => {
+  const t = txt((req.body || {}).texto, 20000);
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.config = { ...(db.config || {}), acuerdo: t && t !== ACUERDO_BASE ? t : '' };
+    registrar(db, autor, t ? 'Actualizó el texto del acuerdo de confidencialidad' : 'Restauró el texto base del acuerdo de confidencialidad', null);
+    return { acuerdo: textoAcuerdo(db) };
+  });
+  res.json(r);
+});
+
+router.post('/campos/:id/compartir', async (req, res) => {
+  const b = req.body || {};
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    if (!campo.geo) return { error: 'Este campo no tiene plano. Sube primero su KMZ.' };
+    const cli = b.clienteId ? db.clientes.find((x) => x.id === b.clienteId) : null;
+    const dias = Math.max(1, Math.min(365, Math.round(Number(b.dias) || 15)));
+    const c = {
+      token: crypto.randomBytes(16).toString('hex'), clienteId: cli ? cli.id : '', destinatario: txt(b.nombre, 160) || (cli ? cli.nombre : ''),
+      email: txt(b.email, 160) || (cli ? emailsCli(cli)[0] || '' : ''), telefono: txt(b.telefono, 40) || (cli ? cli.telefono : ''),
+      creado: ahora(), creadoPor: autor, vence: new Date(Date.now() + dias * 864e5).toISOString(), descarga: b.descarga !== false, activo: true,
+      aceptacion: null, descargas: [], vistas: 0,
+    };
+    if (!c.destinatario) return { error: 'Indica a quién le envías el plano.' };
+    campo.compartidos = [...(campo.compartidos || []), c];
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Creó un link de plano con confidencialidad para ${c.destinatario} (vence en ${dias} días)` }];
+    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Se le preparó el plano de ${campo.nombre} con acuerdo de confidencialidad` }];
+    registrar(db, autor, `Preparó el plano de ${campo.nombre} para ${c.destinatario}`, { col: 'campos', id: campo.id });
+    return campo;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+});
+const emailsCli = (c) => String(c.email || '').match(/[^\s,;<>]+@[^\s,;<>]+\.[a-z]{2,}/gi) || [];
+
+router.post('/campos/:id/compartir/:token/desactivar', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    const c = (campo.compartidos || []).find((x) => x.token === req.params.token); if (!c) return null;
+    c.activo = false;
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Desactivó el link de plano de ${c.destinatario}` }];
+    return campo;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el link.' });
+});
+
+function buscarCompartido(db, token) {
+  if (!/^[a-f0-9]{32}$/.test(token)) return null;
+  for (const campo of db.campos) { const c = (campo.compartidos || []).find((x) => x.token === token); if (c) return { campo, c }; }
+  return null;
+}
+function publicoPlano(db, campo, c) {
+  const vencido = Date.now() > new Date(c.vence).getTime();
+  const disponible = c.activo && !vencido && !!campo.geo;
+  const texto = acuerdoPara(db, campo);
+  return {
+    titulo: (campo.web && campo.web.titulo) || campo.nombre, lugar: [campo.sector, REGION_TEXTO[campo.region]].filter(Boolean).join(', '),
+    destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !campo.geo ? 'El plano ya no está disponible.' : '',
+    acuerdo: texto, hash: hashBloques([texto, campo.id]), descarga: c.descarga,
+    aceptacion: c.aceptacion ? { nombre: c.aceptacion.nombre, rut: c.aceptacion.rut, fecha: c.aceptacion.fecha, codigo: c.aceptacion.hash.slice(0, 12).toUpperCase() } : null,
+    plano: c.aceptacion && disponible ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro } : null,
+  };
+}
+router.get('/publico-plano/:token', async (req, res) => {
+  const r = await modificar((db) => { const x = buscarCompartido(db, req.params.token); if (!x) return null; x.c.vistas = (x.c.vistas || 0) + 1; return publicoPlano(db, x.campo, x.c); });
+  r ? res.json(r) : res.status(404).json({ error: 'Este link no es válido. Pide uno nuevo a Farm Brokers.' });
+});
+router.post('/publico-plano/:token/aceptar', async (req, res) => {
+  const b = req.body || {};
+  const r = await modificar((db) => {
+    const x = buscarCompartido(db, req.params.token); if (!x) return null;
+    const { campo, c } = x;
+    const pub = publicoPlano(db, campo, c);
+    if (!pub.disponible) return { error: pub.motivo };
+    if (c.aceptacion) return pub;
+    if (b.hash !== pub.hash) return { error: 'El texto del acuerdo cambió. Recarga la página y vuelve a leerlo.' };
+    if (b.acepto !== true) return { error: 'Debes marcar que aceptas el acuerdo.' };
+    const nombre = txt(b.nombre, 160), rut = txt(b.rut, 20), email = txt(b.email, 160);
+    if (nombre.length < 3) return { error: 'Escribe tu nombre completo.' };
+    if (!rutValido(rut)) return { error: 'El RUT no es válido.' };
+    c.aceptacion = { nombre, rut: rutFormato(rut), email, fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash: pub.hash, texto: pub.acuerdo };
+    const quien = `${nombre} (cliente)`;
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó el acuerdo de confidencialidad y accedió al plano (RUT ${c.aceptacion.rut}, código ${pub.hash.slice(0, 12).toUpperCase()})` }];
+    const cli = c.clienteId && db.clientes.find((y) => y.id === c.clienteId);
+    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó la confidencialidad y vio el plano de ${campo.nombre}` }];
+    registrar(db, quien, `Aceptó la confidencialidad del plano de ${campo.nombre}`, { col: 'campos', id: campo.id });
+    return publicoPlano(db, campo, c);
+  });
+  if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+
+// KMZ personalizado: lleva grabado a quién se entregó
+const TABLA_CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = (buf) => { let c = 0xffffffff; for (let i = 0; i < buf.length; i++) c = TABLA_CRC[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+function zipUno(nombre, datos) {
+  const n = Buffer.from(nombre), comp = zlib.deflateRawSync(datos), crc = crc32(datos);
+  const loc = Buffer.alloc(30); loc.writeUInt32LE(0x04034b50, 0); loc.writeUInt16LE(20, 4); loc.writeUInt16LE(8, 8); loc.writeUInt32LE(crc, 14); loc.writeUInt32LE(comp.length, 18); loc.writeUInt32LE(datos.length, 22); loc.writeUInt16LE(n.length, 26);
+  const cen = Buffer.alloc(46); cen.writeUInt32LE(0x02014b50, 0); cen.writeUInt16LE(20, 4); cen.writeUInt16LE(20, 6); cen.writeUInt16LE(8, 10); cen.writeUInt32LE(crc, 16); cen.writeUInt32LE(comp.length, 20); cen.writeUInt32LE(datos.length, 24); cen.writeUInt16LE(n.length, 28);
+  const fin = Buffer.alloc(22); fin.writeUInt32LE(0x06054b50, 0); fin.writeUInt16LE(1, 8); fin.writeUInt16LE(1, 10); fin.writeUInt32LE(46 + n.length, 12); fin.writeUInt32LE(30 + n.length + comp.length, 16);
+  return Buffer.concat([loc, n, comp, cen, n, fin]);
+}
+const escXml = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function kmlPersonalizado(campo, c) {
+  const a = c.aceptacion, titulo = (campo.web && campo.web.titulo) || campo.nombre;
+  const marca = `CONFIDENCIAL. Entregado por Farm Brokers Chile a ${a.nombre}, RUT ${a.rut}, el ${a.fecha.slice(0, 10)}. Uso sujeto al acuerdo de confidencialidad aceptado (código ${a.hash.slice(0, 12).toUpperCase()}). Prohibida su difusión.`;
+  let kml = '';
+  const archivo = campo.geo.archivo && (campo.archivos || []).find((x) => x.nombre === campo.geo.archivo);
+  if (archivo) { try { const buf = fs.readFileSync(path.join(ARCHIVOS, campo.id, archivo.id)); kml = buf.readUInt32LE(0) === 0x04034b50 ? leerZip(buf) : buf.toString('utf8'); } catch (e) { kml = ''; } }
+  if (kml && /<Document[^>]*>/i.test(kml)) return kml.replace(/<Document([^>]*)>/i, `<Document$1><description>${escXml(marca)}</description>`);
+  const pol = campo.geo.anillos.map((r) => `<Polygon><outerBoundaryIs><LinearRing><coordinates>${r.map(([x, y]) => `${x},${y},0`).join(' ')}</coordinates></LinearRing></outerBoundaryIs></Polygon>`).join('');
+  return `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${escXml(titulo)} (confidencial)</name><description>${escXml(marca)}</description>`
+    + `<Style id="predio"><LineStyle><color>ff5ad6ff</color><width>3</width></LineStyle><PolyStyle><color>335ad6ff</color></PolyStyle></Style>`
+    + `<Placemark><name>${escXml(titulo)}</name><description>${escXml(marca)}</description><styleUrl>#predio</styleUrl><MultiGeometry>${pol}</MultiGeometry></Placemark></Document></kml>`;
+}
+router.get('/publico-plano/:token/kmz', async (req, res) => {
+  const r = await modificar((db) => {
+    const x = buscarCompartido(db, req.params.token); if (!x) return null;
+    const { campo, c } = x, pub = publicoPlano(db, campo, c);
+    if (!pub.disponible || !c.aceptacion) return { error: pub.motivo || 'Primero debes aceptar el acuerdo de confidencialidad.' };
+    if (!c.descarga) return { error: 'Este plano se puede ver en línea, pero no descargar.' };
+    c.descargas = [...(c.descargas || []), { fecha: ahora(), ip: ipDe(req) }];
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: `${c.aceptacion.nombre} (cliente)`, texto: 'Descargó el KMZ personalizado del plano' }];
+    registrar(db, `${c.aceptacion.nombre} (cliente)`, `Descargó el KMZ de ${campo.nombre}`, { col: 'campos', id: campo.id });
+    return { kml: kmlPersonalizado(campo, c), nombre: `${norm(pub.titulo).replace(/[^a-z0-9]+/g, '-')}-confidencial.kmz` };
+  });
+  if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
+  if (r.error) return res.status(409).json(r);
+  res.set('Content-Type', 'application/vnd.google-earth.kmz');
+  res.set('Content-Disposition', `attachment; filename="${r.nombre}"`);
+  res.send(zipUno('doc.kml', Buffer.from(r.kml, 'utf8')));
 });
 
 // ── Propietario (sin clave del equipo, solo con el link)
@@ -1681,5 +1878,5 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
