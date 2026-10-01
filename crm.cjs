@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v3.9';
+const VERSION = 'crm-v4.0';
 const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
@@ -444,7 +444,7 @@ const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ?
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/')) return next();
+  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path === '/publico-img') return next();
   const clave = process.env.CRM_KEY;
   if (!clave) return res.status(500).json({ error: 'Falta la variable CRM_KEY en Railway.' });
   if (req.get('x-crm-key') !== clave) return res.status(401).json({ error: 'Clave del equipo incorrecta.' });
@@ -1175,6 +1175,43 @@ router.get('/publico-plano/:token/kmz', async (req, res) => {
   res.send(zipUno('doc.kml', Buffer.from(r.kml, 'utf8')));
 });
 
+// ───────────────────────── Imágenes para el PDF (fotos de la web y mapas) ─────────────────────────
+// El navegador solo puede copiar imágenes de otros sitios al PDF si llegan con permiso (CORS); este puente las entrega así.
+const HOSTS_IMG = [/(^|\.)farmbrokers\.cl$/, /^server\.arcgisonline\.com$/, /^([abc]\.)?tile\.openstreetmap\.org$/];
+function descargarBinario(url, redirecciones = 3) {
+  return new Promise((ok, mal) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'FarmBrokersCRM/1.0 (+https://farmbrokers.cl)' }, timeout: 15000 }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirecciones > 0) { res.resume(); return ok(descargarBinario(new URL(res.headers.location, url).toString(), redirecciones - 1)); }
+      if (res.statusCode !== 200) { res.resume(); return mal(new Error(`respondió ${res.statusCode}`)); }
+      const partes = []; let total = 0;
+      res.on('data', (c) => { total += c.length; if (total > 12 * 1024 * 1024) req.destroy(new Error('imagen demasiado grande')); else partes.push(c); });
+      res.on('end', () => ok({ buf: Buffer.concat(partes), tipo: res.headers['content-type'] || 'image/jpeg' }));
+    });
+    req.on('timeout', () => req.destroy(new Error('tiempo agotado')));
+    req.on('error', mal);
+  });
+}
+let traerBinario = descargarBinario;
+const cacheImg = new Map(); let pesoCache = 0;
+router.get('/publico-img', async (req, res) => {
+  let u;
+  try { u = new URL(String(req.query.u || '')); } catch (e) { return res.status(400).end(); }
+  if (u.protocol !== 'https:' || !HOSTS_IMG.some((r) => r.test(u.hostname))) return res.status(403).end();
+  const clave = u.toString();
+  let item = cacheImg.get(clave);
+  if (!item || Date.now() - item.t > 24 * 3600 * 1000) {
+    try { const r = await traerBinario(clave); if (!/^image\//.test(r.tipo)) return res.status(415).end(); item = { ...r, t: Date.now() }; }
+    catch (e) { return res.status(502).end(); }
+    cacheImg.set(clave, item); pesoCache += item.buf.length;
+    while (pesoCache > 80 * 1024 * 1024 && cacheImg.size) { const [k, v] = cacheImg.entries().next().value; cacheImg.delete(k); pesoCache -= v.buf.length; }
+  }
+  res.set('Content-Type', item.tipo);
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Cross-Origin-Resource-Policy', 'cross-origin');
+  res.send(item.buf);
+});
+
 // ── Propietario (sin clave del equipo, solo con el link)
 router.get('/publico/:token', (req, res) => {
   const campo = buscarPorToken(leer(), req.params.token);
@@ -1891,5 +1928,5 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
