@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v4.0';
+const VERSION = 'crm-v4.1';
 const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
@@ -1413,16 +1413,25 @@ function analizarPropiedad(html, url) {
   }
   if (!detalle.id) { const m = lineas.join('\n').match(/ID de propiedad:?\s*([A-Z0-9]{5,})/i); if (m) detalle.id = m[1]; }
   // Descripción
-  const iD = idx(/^Descripci[oó]n\b.{0,20}$/i), fD = iD >= 0 ? idx(/^(Dirección|Detalles|Características|Información de contacto|Video|Mapa|Galería)\b/i, iD + 1) : -1;
-  let parrafos = iD >= 0 ? lineasV.slice(iD + 1, fD > iD ? fD : iD + 40).filter((l) => !/^(Read More|Leer más|Ver más|Mostrar más)$/i.test(l)) : [];
-  if (!parrafos.length) {
+  // Puede haber varios "Descripción" (por ejemplo, en el menú de pestañas): se usa el que tiene texto de verdad
+  const limpiarP = (arr) => arr.filter((l) => !/^(Read More|Leer más|Ver más|Mostrar más)$/i.test(l))
+    .filter((l) => !/<\/?[a-z][^>]*$|^<|class=["']|id=["']/i.test(l)).map((l) => l.replace(/<[^>]*>?/g, '').trim())
+    .filter((l) => l && !/^[•\s]*$/.test(l));
+  const texto = (arr) => arr.join(' ').replace(/[•\s]/g, '').length;
+  let parrafos = [];
+  for (let iD = 0; iD < lineas.length; iD++) {
+    if (!/^Descripci[oó]n\b.{0,20}$/i.test(lineas[iD])) continue;
+    const fD = idx(/^(Dirección|Detalles|Características|Información de contacto|Video|Mapa|Galería)\b/i, iD + 1);
+    const cand = limpiarP(lineasV.slice(iD + 1, fD > iD ? fD : iD + 60));
+    if (texto(cand) > texto(parrafos)) parrafos = cand;
+  }
+  if (texto(parrafos) < 40) {
     // Alternativa: el bloque de descripción del tema, aunque no tenga título
     const m = html.match(/property-description-wrap[\s\S]*?(?=<[^>]*property-(?:address|detail|features|video|map|floor|walkscore|contact)[\w-]*|<footer)/i);
-    if (m) parrafos = aLineas(m[0].replace(/^[^>]*>/, '').replace(/<[^>]*$/, '')).filter((l) => !/^(Descripci[oó]n|Read More|Leer más|Ver más)$/i.test(l));
+    if (m) { const cand = limpiarP(aLineas(m[0].replace(/^[^>]*>/, '').replace(/<[^>]*$/, '')).filter((l) => !/^(Descripci[oó]n|Read More|Leer más|Ver más)$/i.test(l))); if (texto(cand) > texto(parrafos)) parrafos = cand; }
   }
-  parrafos = parrafos.filter((l) => !/<\/?[a-z][^>]*$|^<|class=["']|id=["']/i.test(l)).map((l) => l.replace(/<[^>]*>?/g, '').trim()).filter(Boolean);
   const resumenMeta = meta('og:description') || meta('description');
-  if (!parrafos.length && resumenMeta) parrafos = [resumenMeta];
+  if (texto(parrafos) < 40 && resumenMeta) parrafos = [resumenMeta];
   let comision = '';
   const descripcion = [];
   for (let i = 0; i < parrafos.length; i++) {
@@ -1480,7 +1489,7 @@ router.post('/campos/:id/web', async (req, res) => {
   const url = linkFB(campo);
   if (!url) return res.status(400).json({ error: 'Este campo no tiene un link de farmbrokers.cl/propiedad/. Agrégalo en los datos del campo.' });
   let web;
-  try { web = analizarPropiedad(await descargarTexto(url.trim()), url.trim()); }
+  try { web = analizarPropiedad(await traerPagina(url.trim()), url.trim()); }
   catch (e) { return res.status(502).json({ error: `No se pudo leer la publicación: ${e.message}` }); }
   let fuente = web.coordenadas ? 'publicacion' : '';
   if (!web.coordenadas) { web.coordenadas = await coordenadasREST(url); if (web.coordenadas) fuente = 'publicacion'; }
