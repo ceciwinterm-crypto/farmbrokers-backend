@@ -14,7 +14,9 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v4.5';
+const VERSION = 'crm-v4.6';
+// Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
+const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
 const PERFILES_BASE = [
   { id: 'exportadora', nombre: 'Exportadora', descripcion: 'Campo productivo, listo para operar y exportar.' },
@@ -478,7 +480,7 @@ router.use((req, res, next) => {
 router.get('/', (req, res) => {
   const db = leer();
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db) });
 });
 
@@ -1287,11 +1289,11 @@ router.post('/campos/:id/ficha-pdf', async (req, res) => {
     for (const f of previas.slice(0, -4)) { try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, `ficha-${f.token}.pdf`)); } catch (e) {} } // guarda las 5 últimas
     campo.fichasPdf = [...previas.slice(-4), { token, fecha: ahora(), autor, tamano: buf.length, vistas: 0 }];
     campo.fichaPdf = campo.fichasPdf[campo.fichasPdf.length - 1];
-    return { token, fecha: campo.fichaPdf.fecha };
+    return { token, fecha: campo.fichaPdf.fecha, link: FICHAS_URL ? `${FICHAS_URL}/f/${token}` : '' };
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
 });
-router.get('/publico-ficha/:token', async (req, res) => {
+async function servirFicha(req, res) {
   const t = String(req.params.token || '').replace(/\.pdf$/i, '');
   if (!/^[a-f0-9]{32}$/.test(t)) return res.status(404).send('Ficha no encontrada.');
   const r = await modificar((db) => {
@@ -1309,7 +1311,13 @@ router.get('/publico-ficha/:token', async (req, res) => {
   res.set('Content-Disposition', `inline; filename="${encodeURIComponent(nombre)}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
   res.set('Cache-Control', 'private, max-age=300');
   fs.createReadStream(ruta).pipe(res);
-});
+}
+router.get('/publico-ficha/:token', servirFicha);
+// Rutas cortas para la dirección propia: fichas.farmbrokers.cl/f/<código>
+const cortos = express.Router();
+cortos.get('/f/:token', servirFicha);
+cortos.get('/', (req, res, next) => (/^fichas\./i.test(req.hostname || '') ? res.redirect(302, 'https://farmbrokers.cl') : next()));
+router.cortos = cortos;
 
 // ───────────────────────── Perfiles de comprador ─────────────────────────
 router.post('/perfiles', async (req, res) => {
