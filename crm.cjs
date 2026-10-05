@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v4.6';
+const VERSION = 'crm-v5.0';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -461,10 +461,31 @@ function modificar(fn) {
   cola = p.catch(() => {});
   return p;
 }
+function nombreRef(db, ref) {
+  if (!ref || !ref.col || !db[ref.col]) return '';
+  const x = db[ref.col].find((y) => y.id === ref.id);
+  return x ? (x.nombre || x.titulo || '') : '';
+}
+// Registro permanente de lo que hizo cada persona (track record)
+function auditar(db, autor, accion, ref, detalle) {
+  db.auditoria = db.auditoria || [];
+  db.auditoria.push({ fecha: ahora(), autor, accion, ref: ref ? { col: ref.col, id: ref.id, nombre: ref.nombre || nombreRef(db, ref) } : null, detalle: detalle || [] });
+  if (db.auditoria.length > 60000) db.auditoria.splice(0, db.auditoria.length - 60000);
+}
 function registrar(db, autor, texto, ref) {
   db.actividad.unshift({ fecha: ahora(), autor, texto, ref });
   if (db.actividad.length > 500) db.actividad.length = 500;
+  auditar(db, autor, texto, ref);
 }
+function notificar(db, para, texto, ref, de) {
+  if (!para || para === de) return;
+  db.notificaciones = db.notificaciones || [];
+  db.notificaciones.push({ id: id(), para, texto, ref: ref || null, fecha: ahora(), leida: false, de: de || '' });
+  if (db.notificaciones.length > 5000) db.notificaciones.splice(0, db.notificaciones.length - 5000);
+}
+const ADMIN_KEY = String(process.env.CRM_ADMIN_KEY || '');
+const esAdmin = (req) => !!ADMIN_KEY && req.get('x-crm-admin') === ADMIN_KEY;
+const adminsDe = (db) => ((db.config && db.config.admins) || []);
 const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ? x.nombre : x.titulo) || 'sin nombre';
 
 // ───────────────────────── Rutas ─────────────────────────
@@ -479,9 +500,13 @@ router.use((req, res, next) => {
 
 router.get('/', (req, res) => {
   const db = leer();
+  const yo = usuarioDe(req);
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
     cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
-    actividad: db.actividad.slice(0, 150), matches: calcularMatches(db) });
+    actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
+    tareas: db.tareas || [], notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
+    solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
+    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {} });
 });
 
 for (const col of ['campos', 'clientes', 'tasaciones']) {
@@ -515,6 +540,10 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
       if (upd.proximaAccion !== prev.proximaAccion || upd.proximaFecha !== prev.proximaFecha) {
         if (upd.proximaAccion) historial.push({ fecha: ahora(), autor, texto: `Próxima acción: ${upd.proximaAccion}${upd.proximaFecha ? ` (${upd.proximaFecha})` : ''}` });
       }
+      const IGNORAR = ['historial', 'actualizado', 'checklist', 'etapa'];
+      const ver = (v) => (Array.isArray(v) ? v.join(', ') : v == null ? '' : String(v));
+      const cambios = Object.keys(upd).filter((k) => !IGNORAR.includes(k) && ver(prev[k]) !== ver(upd[k])).map((k) => ({ campo: k, antes: ver(prev[k]).slice(0, 300), despues: ver(upd[k]).slice(0, 300) }));
+      if (cambios.length) auditar(db, autor, `Editó ${etiqueta(col, upd)}`, { col, id: prev.id, nombre: etiqueta(col, upd) }, cambios);
       db[col][i] = { ...prev, ...upd, historial, actualizado: ahora() };
       return db[col][i];
     });
@@ -536,15 +565,17 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
   });
 
   router.delete(`/${col}/:id`, async (req, res) => {
-    const autor = usuarioDe(req);
+    const autor = usuarioDe(req), admin = esAdmin(req);
     const r = await modificar((db) => {
       const x = db[col].find((y) => y.id === req.params.id);
       if (!x) return false;
+      if (!admin) return solicitarEliminacion(db, autor, { col, id: x.id, nombre: etiqueta(col, x), singular }, txt((req.body || {}).motivo, 300));
       db[col] = db[col].filter((y) => y.id !== req.params.id);
-      registrar(db, autor, `Eliminó ${singular} ${etiqueta(col, x)}`, null);
-      return true;
+      registrar(db, autor, `Eliminó ${singular} ${etiqueta(col, x)}`, { col, id: x.id, nombre: etiqueta(col, x) });
+      return { ok: true };
     });
-    r ? res.json({ ok: true }) : res.status(404).json({ error: `No se encontró el ${singular}.` });
+    if (!r) return res.status(404).json({ error: `No se encontró el ${singular}.` });
+    res.status(r.pendiente ? 202 : 200).json(r);
   });
 }
 
@@ -922,6 +953,7 @@ router.post('/campos/:id/archivo', async (req, res) => {
     const marca = { plano: 'plano', foto: 'fotos', dominio: 'dominio', hipotecas: 'hipotecas', avaluo: 'avaluo', aguas: 'aguas' }[a.tipo];
     if (marca) campo.checklist = { ...(campo.checklist || {}), [marca]: true };
     if (g) aplicarGeo(campo, g);
+    auditar(db, autor, `Subió el archivo ${a.nombre}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Subió ${a.nombre}${g ? ` (plano del predio: ${g.anillos.length} ${g.anillos.length === 1 ? 'polígono' : 'polígonos'}, ${g.areaHa.toLocaleString('es-CL')} ha)` : ''}` }];
     campo.actualizado = ahora();
     return campo;
@@ -931,17 +963,20 @@ router.post('/campos/:id/archivo', async (req, res) => {
 });
 
 router.delete('/campos/:id/archivos/:fid', async (req, res) => {
-  const autor = usuarioDe(req);
+  const autor = usuarioDe(req), admin = esAdmin(req);
   const r = await modificar((db) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
     const a = (campo.archivos || []).find((x) => x.id === req.params.fid); if (!a) return null;
+    if (!admin) return solicitarEliminacion(db, autor, { col: 'archivo', id: a.id, campoId: campo.id, nombre: `${a.nombre} (de ${campo.nombre})`, singular: 'archivo' }, txt((req.body || {}).motivo, 300));
+    auditar(db, autor, `Eliminó el archivo ${a.nombre}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
     campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
     try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
     if (campo.geo && campo.geo.fuente === 'kmz' && campo.geo.archivo === a.nombre) delete campo.geo;
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eliminó el archivo ${a.nombre}` }];
     return campo;
   });
-  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el archivo.' });
+  if (!r) return res.status(404).json({ error: 'No se encontró el archivo.' });
+  res.status(r.pendiente ? 202 : 200).json(r);
 });
 
 // ───────────────────────── Redactar la descripción para el cliente (IA) ─────────────────────────
@@ -1364,6 +1399,185 @@ router.delete('/perfiles/:id', async (req, res) => {
     return { perfiles: db.perfiles, quitados: n };
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el perfil.' });
+});
+
+// ───────────────────────── Equipo: administradora, tareas, notificaciones, solicitudes y reporte ─────────────────────────
+function solicitarEliminacion(db, autor, ref, motivo) {
+  db.solicitudes = db.solicitudes || [];
+  const ya = db.solicitudes.find((x) => x.estado === 'pendiente' && x.ref.col === ref.col && x.ref.id === ref.id);
+  if (ya) return { pendiente: true, solicitud: ya, mensaje: 'Ya hay una solicitud pendiente para eliminar esto.' };
+  const sol = { id: id(), tipo: 'eliminar', ref, motivo: motivo || '', solicitadoPor: autor, fecha: ahora(), estado: 'pendiente' };
+  db.solicitudes.push(sol);
+  if (db.solicitudes.length > 2000) db.solicitudes.splice(0, db.solicitudes.length - 2000);
+  auditar(db, autor, `Pidió eliminar ${ref.singular} ${ref.nombre}`, ref.col === 'archivo' ? { col: 'campos', id: ref.campoId } : { col: ref.col, id: ref.id, nombre: ref.nombre });
+  for (const a of adminsDe(db)) notificar(db, a, `${autor} pide eliminar ${ref.singular} ${ref.nombre}`, { solicitud: sol.id }, autor);
+  return { pendiente: true, solicitud: sol, mensaje: 'Se envió la solicitud. La administradora debe aprobar la eliminación.' };
+}
+function ejecutarEliminacion(db, sol, autor) {
+  const r = sol.ref;
+  if (r.col === 'archivo') {
+    const campo = db.campos.find((x) => x.id === r.campoId); if (!campo) return false;
+    const a = (campo.archivos || []).find((x) => x.id === r.id); if (!a) return false;
+    campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
+    try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
+    if (campo.geo && campo.geo.fuente === 'kmz' && campo.geo.archivo === a.nombre) delete campo.geo;
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eliminó el archivo ${a.nombre} (pedido por ${sol.solicitadoPor})` }];
+    auditar(db, autor, `Eliminó el archivo ${a.nombre}, pedido por ${sol.solicitadoPor}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
+    return true;
+  }
+  if (!db[r.col]) return false;
+  const x = db[r.col].find((y) => y.id === r.id); if (!x) return false;
+  db[r.col] = db[r.col].filter((y) => y.id !== r.id);
+  registrar(db, autor, `Eliminó ${r.singular} ${r.nombre}, pedido por ${sol.solicitadoPor}`, { col: r.col, id: r.id, nombre: r.nombre });
+  return true;
+}
+router.post('/admin/verificar', async (req, res) => {
+  if (!ADMIN_KEY) return res.status(400).json({ error: 'Falta la variable CRM_ADMIN_KEY en Railway.' });
+  if (!esAdmin(req)) return res.status(401).json({ error: 'La clave de administradora no es correcta.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.config = { ...(db.config || {}), admins: [...new Set([...adminsDe(db), autor])] };
+    auditar(db, autor, 'Activó el modo administradora en su navegador', null);
+    return { ok: true, admins: db.config.admins };
+  });
+  res.json(r);
+});
+router.post('/solicitudes/:id/:accion', async (req, res) => {
+  if (!['aprobar', 'rechazar'].includes(req.params.accion)) return res.status(404).end();
+  if (!esAdmin(req)) return res.status(403).json({ error: 'Solo la administradora puede aprobar o rechazar.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const sol = (db.solicitudes || []).find((x) => x.id === req.params.id); if (!sol) return null;
+    if (sol.estado !== 'pendiente') return { error: 'Esta solicitud ya fue resuelta.' };
+    if (req.params.accion === 'aprobar') {
+      const hecho = ejecutarEliminacion(db, sol, autor);
+      sol.estado = hecho ? 'aprobada' : 'sin efecto';
+    } else {
+      sol.estado = 'rechazada';
+      auditar(db, autor, `Rechazó eliminar ${sol.ref.singular} ${sol.ref.nombre} (pedido por ${sol.solicitadoPor})`, null);
+    }
+    sol.resueltaPor = autor; sol.resuelta = ahora(); sol.comentario = txt((req.body || {}).comentario, 300);
+    notificar(db, sol.solicitadoPor, `${autor} ${sol.estado === 'rechazada' ? 'rechazó' : 'aprobó'} eliminar ${sol.ref.singular} ${sol.ref.nombre}${sol.comentario ? `: ${sol.comentario}` : ''}`, null, autor);
+    return { ok: true, solicitud: sol };
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró la solicitud.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+
+// Tareas
+const ESTADOS_TAREA = ['pendiente', 'en curso', 'hecha'];
+router.post('/tareas', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req);
+  const titulo = txt(b.titulo, 200), para = txt(b.asignadoA, 80);
+  if (titulo.length < 3) return res.status(400).json({ error: 'Escribe qué hay que hacer.' });
+  if (!para) return res.status(400).json({ error: 'Elige a quién se la asignas.' });
+  const r = await modificar((db) => {
+    const ref = b.ref && b.ref.col && db[b.ref.col] && db[b.ref.col].find((x) => x.id === b.ref.id) ? { col: b.ref.col, id: b.ref.id, nombre: nombreRef(db, b.ref) } : null;
+    const t = { id: id(), titulo, detalle: txt(b.detalle, 2000), asignadoA: para, creadoPor: autor, fecha: ahora(), vence: /^\d{4}-\d{2}-\d{2}$/.test(b.vence || '') ? b.vence : '',
+      estado: 'pendiente', ref, comentarios: [] };
+    db.tareas = [...(db.tareas || []), t];
+    if (ref) { const x = db[ref.col].find((y) => y.id === ref.id); x.historial = [...(x.historial || []), { fecha: ahora(), autor, texto: `Tarea para ${para}: ${titulo}` }]; }
+    registrar(db, autor, `Asignó a ${para} la tarea “${titulo}”${ref ? ` (${ref.nombre})` : ''}`, ref);
+    notificar(db, para, `${autor} te asignó una tarea: ${titulo}${ref ? ` (${ref.nombre})` : ''}`, { tarea: t.id }, autor);
+    return t;
+  });
+  res.json(r);
+});
+router.put('/tareas/:id', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const t = (db.tareas || []).find((x) => x.id === req.params.id); if (!t) return null;
+    const antes = { ...t };
+    if (b.estado && ESTADOS_TAREA.includes(b.estado)) t.estado = b.estado;
+    if (b.titulo) t.titulo = txt(b.titulo, 200);
+    if (b.asignadoA) t.asignadoA = txt(b.asignadoA, 80);
+    if (b.vence !== undefined) t.vence = /^\d{4}-\d{2}-\d{2}$/.test(b.vence || '') ? b.vence : '';
+    if (t.estado === 'hecha' && antes.estado !== 'hecha') {
+      t.hechaEn = ahora(); t.hechaPor = autor;
+      registrar(db, autor, `Completó la tarea “${t.titulo}”`, t.ref);
+      notificar(db, t.creadoPor, `${autor} completó la tarea: ${t.titulo}`, { tarea: t.id }, autor);
+      if (t.ref && db[t.ref.col]) { const x = db[t.ref.col].find((y) => y.id === t.ref.id); if (x) x.historial = [...(x.historial || []), { fecha: ahora(), autor, texto: `Completó la tarea: ${t.titulo}` }]; }
+    } else if (t.estado !== antes.estado) auditar(db, autor, `Cambió la tarea “${t.titulo}” a ${t.estado}`, t.ref);
+    if (t.asignadoA !== antes.asignadoA) { auditar(db, autor, `Reasignó la tarea “${t.titulo}” a ${t.asignadoA}`, t.ref); notificar(db, t.asignadoA, `${autor} te asignó una tarea: ${t.titulo}`, { tarea: t.id }, autor); }
+    return t;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tarea.' });
+});
+router.post('/tareas/:id/comentario', async (req, res) => {
+  const texto = txt((req.body || {}).texto, 2000), autor = usuarioDe(req);
+  if (!texto) return res.status(400).json({ error: 'El comentario está vacío.' });
+  const r = await modificar((db) => {
+    const t = (db.tareas || []).find((x) => x.id === req.params.id); if (!t) return null;
+    t.comentarios = [...(t.comentarios || []), { fecha: ahora(), autor, texto }];
+    auditar(db, autor, `Comentó la tarea “${t.titulo}”: ${texto.slice(0, 80)}`, t.ref);
+    for (const p of new Set([t.creadoPor, t.asignadoA])) notificar(db, p, `${autor} comentó la tarea “${t.titulo}”: ${texto.slice(0, 80)}`, { tarea: t.id }, autor);
+    return t;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tarea.' });
+});
+router.delete('/tareas/:id', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const t = (db.tareas || []).find((x) => x.id === req.params.id); if (!t) return null;
+    if (t.creadoPor !== autor && !esAdmin(req)) return { error: 'Solo quien creó la tarea o la administradora puede borrarla.' };
+    db.tareas = db.tareas.filter((x) => x.id !== t.id);
+    auditar(db, autor, `Borró la tarea “${t.titulo}”`, t.ref);
+    return { ok: true };
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró la tarea.' });
+  if (r.error) return res.status(403).json(r);
+  res.json(r);
+});
+
+// Notificaciones
+router.post('/notificaciones/leidas', async (req, res) => {
+  const yo = usuarioDe(req), ids = Array.isArray((req.body || {}).ids) ? req.body.ids : null;
+  await modificar((db) => { for (const n of db.notificaciones || []) if (n.para === yo && (!ids || ids.includes(n.id))) n.leida = true; });
+  res.json({ ok: true });
+});
+
+// Contacto de cada persona del equipo (para avisarle por WhatsApp o correo)
+router.put('/equipo/contacto', async (req, res) => {
+  const b = req.body || {}, nombre = txt(b.nombre, 80), autor = usuarioDe(req);
+  if (!nombre) return res.status(400).json({ error: 'Falta el nombre.' });
+  const r = await modificar((db) => {
+    db.config = { ...(db.config || {}), contactos: { ...((db.config || {}).contactos || {}), [nombre]: { telefono: txt(b.telefono, 40), email: txt(b.email, 160) } } };
+    auditar(db, autor, `Actualizó el contacto de ${nombre}`, null);
+    return { contactos: db.config.contactos };
+  });
+  res.json(r);
+});
+
+// Reporte del equipo: qué hizo cada persona
+router.get('/reporte', (req, res) => {
+  const db = leer();
+  const q = req.query || {};
+  const desde = /^\d{4}-\d{2}-\d{2}$/.test(q.desde || '') ? new Date(`${q.desde}T00:00:00`).getTime() : 0;
+  const hasta = /^\d{4}-\d{2}-\d{2}$/.test(q.hasta || '') ? new Date(`${q.hasta}T23:59:59`).getTime() : Infinity;
+  const persona = txt(q.persona, 80), col = txt(q.col, 20), buscar = norm(q.q || '');
+  const lista = (db.auditoria || []).filter((a) => {
+    const t = new Date(a.fecha).getTime();
+    if (t < desde || t > hasta) return false;
+    if (persona && a.autor !== persona) return false;
+    if (col && (!a.ref || a.ref.col !== col)) return false;
+    if (buscar && !norm(`${a.accion} ${a.ref ? a.ref.nombre : ''} ${(a.detalle || []).map((d) => `${d.campo} ${d.antes} ${d.despues}`).join(' ')}`).includes(buscar)) return false;
+    return true;
+  });
+  const resumen = {};
+  for (const a of lista) {
+    const r = resumen[a.autor] = resumen[a.autor] || { persona: a.autor, acciones: 0, ediciones: 0, campos: new Set(), envios: 0, tareasHechas: 0, ultima: '' };
+    r.acciones++; if (a.detalle && a.detalle.length) r.ediciones++;
+    if (a.ref && a.ref.col === 'campos') r.campos.add(a.ref.id);
+    if (/^Envió/.test(a.accion)) r.envios++;
+    if (/^Completó la tarea/.test(a.accion)) r.tareasHechas++;
+    if (a.fecha > r.ultima) r.ultima = a.fecha;
+  }
+  res.json({
+    total: lista.length,
+    resumen: Object.values(resumen).map((r) => ({ ...r, campos: r.campos.size })).sort((a, b) => b.acciones - a.acciones),
+    registros: lista.slice(-3000).reverse(),
+  });
 });
 
 // ── Propietario (sin clave del equipo, solo con el link)
