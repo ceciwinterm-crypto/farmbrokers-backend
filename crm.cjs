@@ -14,7 +14,17 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v4.2';
+const VERSION = 'crm-v4.5';
+// Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
+const PERFILES_BASE = [
+  { id: 'exportadora', nombre: 'Exportadora', descripcion: 'Campo productivo, listo para operar y exportar.' },
+  { id: 'agrado', nombre: 'Agrado', descripcion: 'Campo bonito para vivir o descansar, por ejemplo de unas 20 ha.' },
+  { id: 'conservacion', nombre: 'Conservación', descripcion: 'Naturaleza, bosque nativo o protección.' },
+  { id: 'loteo', nombre: 'Loteo', descripcion: 'Para subdividir o parcelar.' },
+];
+let perfilesActuales = PERFILES_BASE;
+const perfilesDe = (db) => (Array.isArray(db.perfiles) ? db.perfiles : PERFILES_BASE);
+const limpiarPerfiles = (v) => [...new Set((Array.isArray(v) ? v : []).map(String).filter((x) => /^[a-z0-9_-]{2,40}$/.test(x)))].slice(0, 10);
 const zlib = require('zlib');
 const https = require('https');
 const ARCHIVOS = path.join(DIR, 'archivos');
@@ -189,8 +199,8 @@ function fonoNorm(t) {
 // ───────────────────────── Esquemas ─────────────────────────
 const CAMPOS_CAMPO = ['codigo', 'nombre', 'tipo', 'etapa', 'region', 'sector', 'hectareas', 'agua', 'fuenteAgua', 'plantaciones', 'aptitud',
   'precioTexto', 'precioCLP', 'precioUF', 'observaciones', 'corredor', 'asociado', 'propietario', 'telefono', 'email', 'rol', 'linkWeb', 'linkPortal',
-  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso'];
-const CAMPOS_CLIENTE = ['nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
+  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles'];
+const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar'];
 const CAMPOS_TASACION = ['titulo', 'cliente', 'telefono', 'email', 'campoId', 'rol', 'comuna', 'codigo', 'etapa', 'honorariosUF', 'responsable', 'proximaAccion', 'proximaFecha'];
 
@@ -206,6 +216,7 @@ function limpiar(col, b, previo = {}) {
     r.hectareas = num(o.hectareas); r.precioCLP = num(o.precioCLP); r.precioUF = num(o.precioUF);
     r.proximaFecha = fecha(o.proximaFecha);
     r.checklist = {}; for (const [k] of CHECKLIST) r.checklist[k] = !!(o.checklist || {})[k];
+    r.perfiles = limpiarPerfiles(o.perfiles);
     return r;
   }
   if (col === 'clientes') {
@@ -214,6 +225,8 @@ function limpiar(col, b, previo = {}) {
     r.tipo = TIPOS.includes(o.tipo) ? o.tipo : tipoNorm(o.tipo);
     r.regiones = (Array.isArray(o.regiones) ? o.regiones : parseRegiones(o.regiones)).map(regionCodigo).filter(Boolean);
     r.cultivos = (Array.isArray(o.cultivos) ? o.cultivos : []).filter((c) => CULTIVOS[c] || c === 'frutales');
+    r.fechaAlta = /^\d{4}-\d{2}(-\d{2})?$/.test(previo.fechaAlta || '') ? previo.fechaAlta : /^\d{4}-\d{2}(-\d{2})?$/.test(o.fechaAlta || '') ? o.fechaAlta : '';
+    r.perfiles = limpiarPerfiles(o.perfiles);
     r.haMin = num(o.haMin); r.haMax = num(o.haMax);
     r.operacion = o.operacion === 'arriendo' ? 'arriendo' : 'compra';
     r.etapa = ETAPAS.clientes.includes(o.etapa) ? o.etapa : 'Activo';
@@ -301,8 +314,18 @@ function evaluar(campo, cli, hoy = new Date()) {
     }
   }
 
-  if (!hitZona && conocidos < 2) return null;
-  const score = sTipo + sLugar + sCult + sSup;
+  // Perfil de comprador: si ambos lo tienen y no comparten ninguno, el cliente busca otra cosa
+  let sPerfil = 0;
+  const pc = campo.perfiles || [], pk = cli.perfiles || [];
+  if (pc.length && pk.length) {
+    const comunes = pk.filter((x) => pc.includes(x));
+    if (!comunes.length) return null;
+    sPerfil = 12;
+    const nombres = comunes.map((x) => (perfilesActuales.find((p) => p.id === x) || {}).nombre || x);
+    razones.unshift(`Perfil ${nombres.join(', ')}`);
+  }
+  if (!hitZona && conocidos < 2 && !sPerfil) return null;
+  const score = Math.min(100, sTipo + sLugar + sCult + sSup + sPerfil);
   if (score < 55) return null;
   if (cli.operacion === 'arriendo') alertas.push('Busca arriendo');
   if (cli.presupuesto) razones.push(`Presupuesto: ${cli.presupuesto}`);
@@ -361,7 +384,7 @@ function importarHojas(hojas) {
         const presupuesto = mP && (mP[2] || mP[3]) ? mP[0] : '';
         const faltan = [!regiones.length && !zona, !cultivos.length, haMin == null && haMax == null].filter(Boolean).length;
         const c = nuevo({
-          nombre, requerimiento: req, observaciones: obs, zona, regiones, cultivos, haMin, haMax, presupuesto: txt(presupuesto, 200),
+          nombre, requerimiento: req, observaciones: obs, zona, regiones, cultivos, haMin, haMax, presupuesto: txt(presupuesto, 200), fechaAlta: parseFechaMY(colFecha >= 0 ? f[colFecha] : ''),
           tipo: tipoNorm(get(f, m, 'tipo')), operacion: /arriend/.test(norm(req)) ? 'arriendo' : 'compra',
           contactoNombre: esFono ? '' : contacto, telefono: esFono ? contacto : '', email: txt(get(f, m, 'email'), 400),
           corredor: txt(get(f, m, 'corredor'), 40), mailing: txt(get(f, m, 'lista mailing'), 60),
@@ -417,7 +440,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 function guardar(db) {
@@ -445,7 +468,7 @@ const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ?
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path === '/publico-img') return next();
+  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/')) return next();
   const clave = process.env.CRM_KEY;
   if (!clave) return res.status(500).json({ error: 'Falta la variable CRM_KEY en Railway.' });
   if (req.get('x-crm-key') !== clave) return res.status(401).json({ error: 'Clave del equipo incorrecta.' });
@@ -455,7 +478,7 @@ router.use((req, res, next) => {
 router.get('/', (req, res) => {
   const db = leer();
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, acuerdo: textoAcuerdo(db), alias: aliasNombres, equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db) });
 });
 
@@ -466,7 +489,7 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
     const autor = usuarioDe(req);
     const d = limpiar(col, req.body || {});
     if (!etiqueta(col, d) || etiqueta(col, d) === 'sin nombre') return res.status(400).json({ error: `El ${singular} necesita un nombre.` });
-    const nuevo = { id: id(), ...d, historial: [{ fecha: ahora(), autor, texto: `Creado en etapa ${d.etapa}` }], envios: [], creado: ahora(), actualizado: ahora() };
+    const nuevo = { id: id(), ...d, ...(col === 'clientes' && !d.fechaAlta ? { fechaAlta: new Date().toLocaleDateString('en-CA') } : {}), historial: [{ fecha: ahora(), autor, texto: `Creado en etapa ${d.etapa}` }], envios: [], creado: ahora(), actualizado: ahora() };
     await modificar((db) => { db[col].push(nuevo); registrar(db, autor, `Creó ${singular} ${etiqueta(col, d)}`, { col, id: nuevo.id }); });
     res.json(nuevo);
   });
@@ -1247,6 +1270,92 @@ router.post('/equipo/renombrar', async (req, res) => {
     return { cambiados: n, alias: aliasNombres, equipo: personasEquipo(db) };
   });
   res.json(r);
+});
+
+// ───────────────────────── Ficha PDF con link para enviar ─────────────────────────
+router.post('/campos/:id/ficha-pdf', async (req, res) => {
+  const buf = Buffer.from(String((req.body || {}).base64 || '').replace(/^data:[^,]*,/, ''), 'base64');
+  if (buf.length < 500 || buf.slice(0, 4).toString() !== '%PDF') return res.status(400).json({ error: 'El PDF llegó vacío o dañado.' });
+  if (buf.length > 25 * 1024 * 1024) return res.status(413).json({ error: 'La ficha pesa demasiado.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    const token = crypto.randomBytes(16).toString('hex');
+    fs.mkdirSync(path.join(ARCHIVOS, campo.id), { recursive: true });
+    fs.writeFileSync(path.join(ARCHIVOS, campo.id, `ficha-${token}.pdf`), buf);
+    const previas = campo.fichasPdf || [];
+    for (const f of previas.slice(0, -4)) { try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, `ficha-${f.token}.pdf`)); } catch (e) {} } // guarda las 5 últimas
+    campo.fichasPdf = [...previas.slice(-4), { token, fecha: ahora(), autor, tamano: buf.length, vistas: 0 }];
+    campo.fichaPdf = campo.fichasPdf[campo.fichasPdf.length - 1];
+    return { token, fecha: campo.fichaPdf.fecha };
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
+router.get('/publico-ficha/:token', async (req, res) => {
+  const t = String(req.params.token || '').replace(/\.pdf$/i, '');
+  if (!/^[a-f0-9]{32}$/.test(t)) return res.status(404).send('Ficha no encontrada.');
+  const r = await modificar((db) => {
+    for (const c of db.campos) {
+      const f = (c.fichasPdf || []).find((x) => x.token === t);
+      if (f) { f.vistas = (f.vistas || 0) + 1; f.ultimaVista = ahora(); return { campo: c, f }; }
+    }
+    return null;
+  });
+  if (!r) return res.status(404).send('Esta ficha ya no está disponible. Pide una nueva a Farm Brokers: contacto@farmbrokers.cl');
+  const ruta = path.join(ARCHIVOS, r.campo.id, `ficha-${t}.pdf`);
+  if (!fs.existsSync(ruta)) return res.status(404).send('Esta ficha ya no está disponible.');
+  const nombre = `Ficha ${((r.campo.web && r.campo.web.titulo) || r.campo.nombre).replace(/[^\wÁÉÍÓÚáéíóúÑñ .,-]/g, '')} - Farm Brokers.pdf`;
+  res.set('Content-Type', 'application/pdf');
+  res.set('Content-Disposition', `inline; filename="${encodeURIComponent(nombre)}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
+  res.set('Cache-Control', 'private, max-age=300');
+  fs.createReadStream(ruta).pipe(res);
+});
+
+// ───────────────────────── Perfiles de comprador ─────────────────────────
+router.post('/perfiles', async (req, res) => {
+  const nombre = txt((req.body || {}).nombre, 40), descripcion = txt((req.body || {}).descripcion, 240);
+  if (nombre.length < 2) return res.status(400).json({ error: 'Escribe el nombre del perfil.' });
+  const idP = norm(nombre).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40);
+  if (idP.length < 2) return res.status(400).json({ error: 'Ese nombre no sirve. Usa letras y números.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.perfiles = perfilesDe(db).slice();
+    if (db.perfiles.some((p) => p.id === idP)) return { error: 'Ya existe un perfil con ese nombre.' };
+    db.perfiles.push({ id: idP, nombre: nombre.charAt(0).toUpperCase() + nombre.slice(1), descripcion });
+    perfilesActuales = db.perfiles;
+    registrar(db, autor, `Creó el perfil de comprador "${nombre}"`, null);
+    return { perfiles: db.perfiles, id: idP };
+  });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+router.put('/perfiles/:id', async (req, res) => {
+  const nombre = txt((req.body || {}).nombre, 40), descripcion = txt((req.body || {}).descripcion, 240);
+  if (nombre.length < 2) return res.status(400).json({ error: 'Escribe el nombre del perfil.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.perfiles = perfilesDe(db).map((p) => ({ ...p }));
+    const p = db.perfiles.find((x) => x.id === req.params.id); if (!p) return null;
+    const antes = p.nombre; p.nombre = nombre; p.descripcion = descripcion;
+    perfilesActuales = db.perfiles;
+    if (antes !== nombre) registrar(db, autor, `Cambió el perfil "${antes}" por "${nombre}"`, null);
+    return { perfiles: db.perfiles };
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el perfil.' });
+});
+router.delete('/perfiles/:id', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.perfiles = perfilesDe(db).slice();
+    const p = db.perfiles.find((x) => x.id === req.params.id); if (!p) return null;
+    db.perfiles = db.perfiles.filter((x) => x.id !== p.id);
+    let n = 0;
+    for (const col of ['campos', 'clientes']) for (const x of db[col]) if ((x.perfiles || []).includes(p.id)) { x.perfiles = x.perfiles.filter((y) => y !== p.id); n++; }
+    perfilesActuales = db.perfiles;
+    registrar(db, autor, `Eliminó el perfil "${p.nombre}" (estaba en ${n} ${n === 1 ? 'registro' : 'registros'})`, null);
+    return { perfiles: db.perfiles, quitados: n };
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el perfil.' });
 });
 
 // ── Propietario (sin clave del equipo, solo con el link)
