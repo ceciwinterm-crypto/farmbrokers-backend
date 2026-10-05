@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v5.0';
+const VERSION = 'crm-v5.1';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -501,6 +501,11 @@ router.use((req, res, next) => {
 router.get('/', (req, res) => {
   const db = leer();
   const yo = usuarioDe(req);
+  const visto = ((db.config || {}).vistos || {})[yo];
+  if (yo !== 'Equipo' && (!visto || Date.now() - new Date(visto).getTime() > 10 * 60 * 1000)) {
+    db.config = { ...(db.config || {}), vistos: { ...((db.config || {}).vistos || {}), [yo]: ahora() } };
+    modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
+  }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
     cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
@@ -1276,10 +1281,17 @@ router.get('/publico-img', async (req, res) => {
 // ───────────────────────── Nombres del equipo ─────────────────────────
 function personasEquipo(db) {
   const cuenta = {};
-  const sumar = (n) => { if (n && !/\((propietario|cliente)\)$/.test(n) && !['Importación', 'Sistema', 'Sincronización web', 'Equipo'].includes(n)) cuenta[n] = (cuenta[n] || 0) + 1; };
+  const ignorar = (n) => !n || /\((propietario|cliente)\)$/.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo'].includes(n);
+  const sumar = (n, k = 1) => { if (!ignorar(n)) cuenta[n] = (cuenta[n] || 0) + k; };
   for (const col of ['campos', 'clientes', 'tasaciones']) for (const x of db[col]) { (x.historial || []).forEach((h) => sumar(h.autor)); if (x.responsable) sumar(x.responsable); }
   (db.actividad || []).forEach((a) => sumar(a.autor));
-  return Object.entries(cuenta).sort((a, b) => b[1] - a[1]).map(([nombre, registros]) => ({ nombre, registros }));
+  const cfg = db.config || {};
+  // Personas sin acciones todavía: agregadas a mano, con contacto, que entraron al CRM o con tareas
+  const extra = [...(cfg.miembros || []), ...Object.keys(cfg.contactos || {}), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || []),
+    ...(db.tareas || []).flatMap((t) => [t.asignadoA, t.creadoPor])];
+  extra.forEach((n) => sumar(n, 0));
+  return Object.entries(cuenta).map(([nombre, registros]) => ({ nombre, registros, ultimoIngreso: (cfg.vistos || {})[nombre] || '' }))
+    .sort((a, b) => b.registros - a.registros || a.nombre.localeCompare(b.nombre, 'es'));
 }
 router.post('/equipo/renombrar', async (req, res) => {
   const de = txt((req.body || {}).de, 80), a = txt((req.body || {}).a, 80);
@@ -1535,6 +1547,33 @@ router.post('/notificaciones/leidas', async (req, res) => {
   const yo = usuarioDe(req), ids = Array.isArray((req.body || {}).ids) ? req.body.ids : null;
   await modificar((db) => { for (const n of db.notificaciones || []) if (n.para === yo && (!ids || ids.includes(n.id))) n.leida = true; });
   res.json({ ok: true });
+});
+
+// Agregar o quitar personas de la lista del equipo (no borra lo que hicieron)
+router.post('/equipo/persona', async (req, res) => {
+  const b = req.body || {}, nombre = txt(b.nombre, 80), autor = usuarioDe(req);
+  if (nombre.length < 2) return res.status(400).json({ error: 'Escribe el nombre completo.' });
+  const r = await modificar((db) => {
+    const cfg = db.config = { ...(db.config || {}) };
+    cfg.miembros = [...new Set([...(cfg.miembros || []), nombre])];
+    if (b.telefono || b.email) cfg.contactos = { ...(cfg.contactos || {}), [nombre]: { telefono: txt(b.telefono, 40), email: txt(b.email, 160) } };
+    auditar(db, autor, `Agregó a ${nombre} al equipo`, null);
+    return { equipo: personasEquipo(db), contactos: cfg.contactos || {} };
+  });
+  res.json(r);
+});
+router.delete('/equipo/persona', async (req, res) => {
+  const nombre = txt((req.body || {}).nombre, 80), autor = usuarioDe(req);
+  if (!esAdmin(req)) return res.status(403).json({ error: 'Solo la administradora puede quitar personas de la lista.' });
+  const r = await modificar((db) => {
+    const cfg = db.config = { ...(db.config || {}) };
+    cfg.miembros = (cfg.miembros || []).filter((n) => n !== nombre);
+    if (cfg.contactos) delete cfg.contactos[nombre];
+    if (cfg.vistos) delete cfg.vistos[nombre];
+    auditar(db, autor, `Quitó a ${nombre} de la lista del equipo`, null);
+    return { equipo: personasEquipo(db) };
+  });
+  res.json(r);
 });
 
 // Contacto de cada persona del equipo (para avisarle por WhatsApp o correo)
