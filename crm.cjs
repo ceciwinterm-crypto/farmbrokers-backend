@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v5.7';
+const VERSION = 'crm-v5.8';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -33,12 +33,23 @@ const ARCHIVOS = path.join(DIR, 'archivos');
 
 // ───────────────────────── Catálogos ─────────────────────────
 const ETAPAS = {
-  campos: ['Prospección', 'Captación', 'Documentación', 'Mandato firmado', 'Publicado', 'En negociación', 'Vendido', 'Arrendado', 'Suspendido', 'Retirado de la web', 'Descartado'],
+  campos: ['Prospección', 'Captación', 'Documentación', 'Mandato firmado', 'En venta', 'En negociación', 'Vendido', 'Arrendado', 'Suspendido', 'Retirado de la web', 'Descartado'],
   tasaciones: ['Solicitud', 'Cotizada', 'Aceptada', 'En terreno', 'Informe entregado', 'Pagada', 'Perdida'],
   clientes: ['Activo', 'Pausado', 'Compró', 'Descartado'],
 };
-const CAMPO_ACTIVAS = ['Captación', 'Documentación', 'Mandato firmado', 'Publicado', 'En negociación'];
-const CAMPO_OFRECIBLES = ['Mandato firmado', 'Publicado', 'En negociación'];
+const CAMPO_ACTIVAS = ['Captación', 'Documentación', 'Mandato firmado', 'En venta', 'En negociación'];
+const CAMPO_OFRECIBLES = ['Mandato firmado', 'En venta', 'En negociación'];
+// Visibilidad: quién puede ver el campo (independiente de la etapa de venta)
+const VISIBILIDADES = ['publica', 'reservada', 'interna'];
+const tieneLinkWeb = (c) => [c.linkWeb, c.linkPortal].some((u) => /^https?:\/\/(www\.)?farmbrokers\.cl\/propiedad\/[^/]+/i.test(String(u || '').trim()));
+// Convierte los campos antiguos: "Publicado" pasa a "En venta" y se asigna la visibilidad
+function normalizarCampo(c) {
+  const eraPublicado = c.etapa === 'Publicado';
+  if (eraPublicado) c.etapa = 'En venta';
+  if (c.etapaAntesDeRetiro === 'Publicado') c.etapaAntesDeRetiro = 'En venta';
+  if (!VISIBILIDADES.includes(c.visibilidad)) c.visibilidad = tieneLinkWeb(c) ? 'publica' : eraPublicado ? 'reservada' : 'interna';
+  return c;
+}
 const CHECKLIST = [
   ['mandato', 'Mandato firmado'], ['dominio', 'Dominio vigente'], ['hipotecas', 'Certificado de hipotecas y gravámenes'],
   ['avaluo', 'Certificado de avalúo fiscal'], ['aguas', 'Inscripción derechos de agua'], ['plano', 'Plano o KMZ'],
@@ -201,7 +212,7 @@ function fonoNorm(t) {
 // ───────────────────────── Esquemas ─────────────────────────
 const CAMPOS_CAMPO = ['codigo', 'nombre', 'tipo', 'etapa', 'region', 'sector', 'hectareas', 'agua', 'fuenteAgua', 'plantaciones', 'aptitud',
   'precioTexto', 'precioCLP', 'precioUF', 'observaciones', 'corredor', 'asociado', 'propietario', 'telefono', 'email', 'rol', 'linkWeb', 'linkPortal',
-  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles'];
+  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles', 'visibilidad'];
 const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar'];
 const CAMPOS_TASACION = ['titulo', 'cliente', 'telefono', 'email', 'campoId', 'rol', 'comuna', 'codigo', 'etapa', 'honorariosUF', 'responsable', 'proximaAccion', 'proximaFecha'];
@@ -213,7 +224,8 @@ function limpiar(col, b, previo = {}) {
     const r = {};
     for (const k of CAMPOS_CAMPO) r[k] = txt(o[k], k === 'descripcionFicha' ? 8000 : ['observaciones', 'infraestructura'].includes(k) ? 4000 : 400);
     r.tipo = TIPOS.includes(o.tipo) ? o.tipo : tipoNorm(o.tipo) || 'agricola';
-    r.etapa = ETAPAS.campos.includes(o.etapa) ? o.etapa : 'Captación';
+    r.etapa = o.etapa === 'Publicado' ? 'En venta' : ETAPAS.campos.includes(o.etapa) ? o.etapa : 'Captación';
+    r.visibilidad = VISIBILIDADES.includes(o.visibilidad) ? o.visibilidad : '';
     r.region = regionCodigo(o.region);
     r.hectareas = num(o.hectareas); r.precioCLP = num(o.precioCLP); r.precioUF = num(o.precioUF);
     r.proximaFecha = fecha(o.proximaFecha);
@@ -361,7 +373,7 @@ const get = (fila, m, ...nombres) => { for (const n of nombres) if (m[n] != null
 function importarHojas(hojas) {
   const campos = [], clientes = [], resumen = { campos: 0, captacion: 0, prospeccion: 0, clientes: 0, clientesRevisar: 0, hojasIgnoradas: [] };
   const nuevo = (extra) => ({ id: id(), creado: ahora(), actualizado: ahora(), historial: [{ fecha: ahora(), autor: 'Importación', texto: 'Importado desde la planilla' }], envios: [], ...extra });
-  const ESTADO = { activo: 'Publicado', vendido: 'Vendido', suspendido: 'Suspendido', arrendado: 'Arrendado', mandato: 'Mandato firmado', publicar: 'Documentación' };
+  const ESTADO = { activo: 'En venta', vendido: 'Vendido', suspendido: 'Suspendido', arrendado: 'Arrendado', mandato: 'Mandato firmado', publicar: 'Documentación' };
 
   for (const hoja of hojas || []) {
     const filas = (hoja.filas || []).map((f) => (Array.isArray(f) ? f : []));
@@ -416,7 +428,7 @@ function importarHojas(hojas) {
       const nombre = txt(get(f, m, 'nombre'), 200), sector = txt(get(f, m, 'sector'), 120);
       if (!nombre && !sector) continue;
       const estado = norm(get(f, m, 'estado'));
-      const etapa = esCartera ? (ESTADO[estado] || 'Publicado') : (estado === 'mandato' ? 'Mandato firmado' : 'Captación');
+      const etapa = esCartera ? (ESTADO[estado] || 'En venta') : (estado === 'mandato' ? 'Mandato firmado' : 'Captación');
       const links = [get(f, m, 'link fb'), get(f, m, 'link')].map((x) => txt(x, 400)).filter((x) => /^https?:\/\//.test(x));
       const codigo = txt(get(f, m, 'codigo'), 40);
       campos.push(nuevo({
@@ -427,7 +439,7 @@ function importarHojas(hojas) {
         corredor: txt(get(f, m, 'corredor'), 40), asociado: txt(get(f, m, 'asociado'), 120),
         propietario: txt(get(f, m, 'contacto'), 200), telefono: txt(get(f, m, 'fono'), 60), email: esCartera ? '' : txt(get(f, m, 'email'), 200),
         linkWeb: links[0] || '', linkPortal: links[1] || '', fechaIngreso: parseFechaMY(get(f, m, 'fecha')),
-        checklist: { publicacion: esCartera && etapa === 'Publicado' && links.length > 0 },
+        checklist: { publicacion: esCartera && etapa === 'En venta' && links.length > 0 },
       }));
       if (esCartera) resumen.campos++; else resumen.captacion++;
     }
@@ -442,7 +454,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 function guardar(db) {
@@ -1837,6 +1849,7 @@ router.post('/campos/:id/publicar-web', async (req, res) => {
   if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
   const t = (k, n = 300) => txt(b[k], n);
   if (!t('titulo')) return res.status(400).json({ error: 'Falta el título.' });
+  if (campo.visibilidad === 'reservada') return res.status(409).json({ error: 'Este campo es de venta reservada: el propietario no quiere que se publique. Si eso cambió, pásalo a visibilidad Pública y vuelve a intentarlo.' });
   // Bloqueos para no crear publicaciones duplicadas
   const linkPublicado = [campo.linkWeb, campo.linkPortal].find((u) => slugDe(u));
   if (linkPublicado) return res.status(409).json({ error: 'Este campo ya está publicado en farmbrokers.cl. Los cambios de la publicación se hacen en WordPress.', link: linkPublicado });
@@ -2302,7 +2315,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
       return leer().sync;
     }
     // 1) Confirmar retiros consultando cada página (404 = borrada)
-    const candidatos = enlazados.filter((c) => ['Mandato firmado', 'Publicado', 'En negociación', 'Documentación', 'Arrendado', 'Suspendido'].includes(c.etapa)
+    const candidatos = enlazados.filter((c) => ['Mandato firmado', 'En venta', 'En negociación', 'Documentación', 'Arrendado', 'Suspendido'].includes(c.etapa)
       && !slugsCampo(c).some((sl) => sitio.publicadas.has(sl)));
     const borrados = new Set();
     for (const c of candidatos.slice(0, 40)) {
@@ -2332,6 +2345,10 @@ async function sincronizarWeb(autor = 'Sincronización web') {
       const nota = (c, t) => { c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: t }]; c.actualizado = ahora(); };
       for (const c of db.campos) {
         const sls = slugsCampo(c); if (!sls.length) continue;
+        if (borrados.has(c.id) && c.visibilidad === 'reservada') {
+          nota(c, 'La publicación se sacó de farmbrokers.cl. El campo sigue en venta reservada.');
+          c.linkWeb = ''; c.checklist = { ...(c.checklist || {}), publicacion: false }; continue;
+        }
         if (borrados.has(c.id)) {
           nota(c, `Etapa: ${c.etapa} → Retirado de la web (la publicación ya no existe en farmbrokers.cl)`);
           c.etapaAntesDeRetiro = c.etapa; c.etapa = 'Retirado de la web'; cambios.retirados.push(c.nombre); continue;
@@ -2344,7 +2361,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
         if (sls.some((sl) => sitio.vendidos.has(sl)) && !['Vendido', 'Descartado'].includes(c.etapa)) {
           nota(c, `Etapa: ${c.etapa} → Vendido (marcado como vendido en farmbrokers.cl)`); c.etapa = 'Vendido'; cambios.vendidos.push(c.nombre);
         } else if (c.etapa === 'Retirado de la web' && sls.some((sl) => sitio.publicadas.has(sl) && !sitio.vendidos.has(sl))) {
-          const vuelve = c.etapaAntesDeRetiro || 'Publicado';
+          const vuelve = c.etapaAntesDeRetiro || 'En venta';
           nota(c, `Etapa: Retirado de la web → ${vuelve} (volvió a publicarse en farmbrokers.cl)`); c.etapa = vuelve; cambios.restaurados.push(c.nombre);
         }
       }
@@ -2361,11 +2378,12 @@ async function sincronizarWeb(autor = 'Sincronización web') {
         if (mismo) {
           mismo.linkWeb = p.url; const cm = aplicarWeb(mismo, w);
           if (mismo.wp) { mismo.wp = { ...mismo.wp, estado: 'publish', ver: p.url }; }
-          if (['Prospección', 'Captación', 'Documentación', 'Mandato firmado'].includes(mismo.etapa)) { nota(mismo, `Etapa: ${mismo.etapa} → Publicado (ya está en farmbrokers.cl)`); mismo.etapa = 'Publicado'; }
+          mismo.visibilidad = 'publica';
+          if (['Prospección', 'Captación', 'Documentación', 'Mandato firmado'].includes(mismo.etapa)) { nota(mismo, `Etapa: ${mismo.etapa} → En venta (ya está en farmbrokers.cl)`); mismo.etapa = 'En venta'; }
           nota(mismo, `Enlazado con su publicación en farmbrokers.cl${cm.length ? `: ${cm.join('; ')}` : ''}`);
           cambios.vinculados.push(mismo.nombre);
         } else {
-          const c = campoDesdeWeb(p.url, w, autor, vendida ? 'Vendido' : 'Publicado');
+          const c = campoDesdeWeb(p.url, w, autor, vendida ? 'Vendido' : 'En venta'); c.visibilidad = 'publica';
           aplicarWeb(c, w); db.campos.push(c); cambios.creados.push(c.nombre);
         }
       }
@@ -2407,7 +2425,7 @@ router.post('/sync/agregar', async (req, res) => {
   const autor = usuarioDe(req), d = web.detalle;
   const r = await modificar((db) => {
     if (db.campos.some((c) => slugsCampo(c).includes(slug))) return { error: 'Ese campo ya está en el CRM.' };
-    const campo = campoDesdeWeb(url, web, autor, /vend/i.test(d.estado || '') ? 'Vendido' : 'Publicado');
+    const campo = campoDesdeWeb(url, web, autor, /vend/i.test(d.estado || '') ? 'Vendido' : 'En venta'); campo.visibilidad = 'publica';
     aplicarWeb(campo, web);
     db.campos.push(campo);
     if (db.sync) db.sync.nuevos = (db.sync.nuevos || []).filter((n) => n.slug !== slug);
