@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v5.6';
+const VERSION = 'crm-v5.7';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -543,9 +543,12 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
         if (upd.checklist[k]) registrar(db, autor, `${etiqueta(col, upd)}: ${l} listo`, { col, id: prev.id });
       }
       if (upd.proximaAccion !== prev.proximaAccion || upd.proximaFecha !== prev.proximaFecha) {
-        if (upd.proximaAccion) historial.push({ fecha: ahora(), autor, texto: `Próxima acción: ${upd.proximaAccion}${upd.proximaFecha ? ` (${upd.proximaFecha})` : ''}` });
+        if (upd.proximaAccion) historial.push({ fecha: ahora(), autor, texto: `Próxima acción: ${upd.proximaAccion}${upd.proximaFecha ? ` (${upd.proximaFecha})` : ''}${upd.responsable && upd.responsable !== autor ? `, para ${upd.responsable}` : ''}` });
       }
-      const IGNORAR = ['historial', 'actualizado', 'checklist', 'etapa'];
+      // La próxima acción para otra persona se convierte en tarea y le llega la notificación
+      const tareaAccion = sincronizarAccion(db, col, prev, upd, autor);
+      if (tareaAccion !== undefined) upd.accionTareaId = tareaAccion;
+      const IGNORAR = ['historial', 'actualizado', 'checklist', 'etapa', 'accionTareaId'];
       const ver = (v) => (Array.isArray(v) ? v.join(', ') : v == null ? '' : String(v));
       const cambios = Object.keys(upd).filter((k) => !IGNORAR.includes(k) && ver(prev[k]) !== ver(upd[k])).map((k) => ({ campo: k, antes: ver(prev[k]).slice(0, 300), despues: ver(upd[k]).slice(0, 300) }));
       if (cambios.length) auditar(db, autor, `Editó ${etiqueta(col, upd)}`, { col, id: prev.id, nombre: etiqueta(col, upd) }, cambios);
@@ -1448,6 +1451,43 @@ router.delete('/perfiles/:id', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el perfil.' });
 });
 
+// ───────────────────────── Próxima acción ⇄ tarea del responsable ─────────────────────────
+const fechaCorta = (f) => { try { return new Date(`${f}T12:00:00`).toLocaleDateString('es-CL', { day: 'numeric', month: 'short' }).replace('.', ''); } catch (e) { return f; } };
+function sincronizarAccion(db, col, prev, upd, autor) {
+  const cambio = upd.proximaAccion !== prev.proximaAccion || upd.proximaFecha !== prev.proximaFecha || upd.responsable !== prev.responsable;
+  if (!cambio) return undefined;
+  db.tareas = db.tareas || [];
+  const abierta = prev.accionTareaId && db.tareas.find((t) => t.id === prev.accionTareaId && t.estado !== 'hecha');
+  const para = upd.responsable || '';
+  const nombre = etiqueta(col, upd);
+  const ref = { col, id: prev.id, nombre };
+  // Sin acción o para uno mismo: se cierra la tarea anterior, si había
+  if (!upd.proximaAccion || !para || para === autor) {
+    if (abierta) {
+      abierta.estado = 'hecha'; abierta.hechaEn = ahora(); abierta.hechaPor = autor;
+      abierta.comentarios = [...(abierta.comentarios || []), { fecha: ahora(), autor, texto: upd.proximaAccion ? `La acción quedó a cargo de ${para || 'nadie'}.` : 'Se quitó la próxima acción.' }];
+      if (abierta.asignadoA !== autor) notificar(db, abierta.asignadoA, `${autor} quitó la acción “${abierta.titulo}” (${nombre})`, { tarea: abierta.id }, autor);
+    }
+    return '';
+  }
+  if (abierta) {
+    const reasignada = abierta.asignadoA !== para;
+    const antes = abierta.asignadoA;
+    abierta.titulo = upd.proximaAccion; abierta.vence = upd.proximaFecha || ''; abierta.asignadoA = para; abierta.ref = ref;
+    if (reasignada) {
+      notificar(db, antes, `${autor} pasó a ${para} la acción “${upd.proximaAccion}” (${nombre})`, { tarea: abierta.id }, autor);
+      notificar(db, para, `${autor} te asignó una acción en ${nombre}: ${upd.proximaAccion}${upd.proximaFecha ? `, para el ${fechaCorta(upd.proximaFecha)}` : ''}`, { tarea: abierta.id }, autor);
+    } else notificar(db, para, `${autor} cambió tu acción en ${nombre}: ${upd.proximaAccion}${upd.proximaFecha ? `, para el ${fechaCorta(upd.proximaFecha)}` : ''}`, { tarea: abierta.id }, autor);
+    auditar(db, autor, `Actualizó la acción para ${para}: ${upd.proximaAccion}`, ref);
+    return abierta.id;
+  }
+  const t = { id: id(), titulo: upd.proximaAccion, detalle: '', asignadoA: para, creadoPor: autor, fecha: ahora(), vence: upd.proximaFecha || '', estado: 'pendiente', ref, comentarios: [], deAccion: true };
+  db.tareas.push(t);
+  registrar(db, autor, `Pidió a ${para}: ${upd.proximaAccion} (${nombre})`, ref);
+  notificar(db, para, `${autor} te asignó una acción en ${nombre}: ${upd.proximaAccion}${upd.proximaFecha ? `, para el ${fechaCorta(upd.proximaFecha)}` : ''}`, { tarea: t.id }, autor);
+  return t.id;
+}
+
 // ───────────────────────── Equipo: administradora, tareas, notificaciones, solicitudes y reporte ─────────────────────────
 function solicitarEliminacion(db, autor, ref, motivo) {
   db.solicitudes = db.solicitudes || [];
@@ -1544,7 +1584,13 @@ router.put('/tareas/:id', async (req, res) => {
       t.hechaEn = ahora(); t.hechaPor = autor;
       registrar(db, autor, `Completó la tarea “${t.titulo}”`, t.ref);
       notificar(db, t.creadoPor, `${autor} completó la tarea: ${t.titulo}`, { tarea: t.id }, autor);
-      if (t.ref && db[t.ref.col]) { const x = db[t.ref.col].find((y) => y.id === t.ref.id); if (x) x.historial = [...(x.historial || []), { fecha: ahora(), autor, texto: `Completó la tarea: ${t.titulo}` }]; }
+      if (t.ref && db[t.ref.col]) {
+        const x = db[t.ref.col].find((y) => y.id === t.ref.id);
+        if (x) {
+          x.historial = [...(x.historial || []), { fecha: ahora(), autor, texto: `Completó la ${t.deAccion ? 'acción' : 'tarea'}: ${t.titulo}` }];
+          if (x.accionTareaId === t.id) { x.proximaAccion = ''; x.proximaFecha = ''; x.accionTareaId = ''; x.actualizado = ahora(); }
+        }
+      }
     } else if (t.estado !== antes.estado) auditar(db, autor, `Cambió la tarea “${t.titulo}” a ${t.estado}`, t.ref);
     if (t.asignadoA !== antes.asignadoA) { auditar(db, autor, `Reasignó la tarea “${t.titulo}” a ${t.asignadoA}`, t.ref); notificar(db, t.asignadoA, `${autor} te asignó una tarea: ${t.titulo}`, { tarea: t.id }, autor); }
     return t;
