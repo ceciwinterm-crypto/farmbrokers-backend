@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v5.8';
+const VERSION = 'crm-v6.1';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -33,20 +33,24 @@ const ARCHIVOS = path.join(DIR, 'archivos');
 
 // ───────────────────────── Catálogos ─────────────────────────
 const ETAPAS = {
-  campos: ['Prospección', 'Captación', 'Documentación', 'Mandato firmado', 'En venta', 'En negociación', 'Vendido', 'Arrendado', 'Suspendido', 'Retirado de la web', 'Descartado'],
+  campos: ['Prospección', 'Captación', 'Documentación', 'Mandato firmado', 'En venta', 'En arriendo', 'En negociación', 'Vendido', 'Arrendado', 'Suspendido', 'Retirado de la web', 'Descartado'],
   tasaciones: ['Solicitud', 'Cotizada', 'Aceptada', 'En terreno', 'Informe entregado', 'Pagada', 'Perdida'],
   clientes: ['Activo', 'Pausado', 'Compró', 'Descartado'],
 };
-const CAMPO_ACTIVAS = ['Captación', 'Documentación', 'Mandato firmado', 'En venta', 'En negociación'];
-const CAMPO_OFRECIBLES = ['Mandato firmado', 'En venta', 'En negociación'];
+const CAMPO_ACTIVAS = ['Captación', 'Documentación', 'Mandato firmado', 'En venta', 'En arriendo', 'En negociación'];
+const CAMPO_OFRECIBLES = ['Mandato firmado', 'En venta', 'En arriendo', 'En negociación'];
+// La etapa "en venta" o "en arriendo" según la operación del campo
+const etapaOferta = (op) => (op === 'arriendo' ? 'En arriendo' : 'En venta');
 // Visibilidad: quién puede ver el campo (independiente de la etapa de venta)
 const VISIBILIDADES = ['publica', 'reservada', 'interna'];
 const tieneLinkWeb = (c) => [c.linkWeb, c.linkPortal].some((u) => /^https?:\/\/(www\.)?farmbrokers\.cl\/propiedad\/[^/]+/i.test(String(u || '').trim()));
 // Convierte los campos antiguos: "Publicado" pasa a "En venta" y se asigna la visibilidad
 function normalizarCampo(c) {
-  const eraPublicado = c.etapa === 'Publicado';
-  if (eraPublicado) c.etapa = 'En venta';
-  if (c.etapaAntesDeRetiro === 'Publicado') c.etapaAntesDeRetiro = 'En venta';
+  const eraPublicado = c.etapa === 'Publicado' || c.etapa === 'Activo';
+  if (eraPublicado) c.etapa = etapaOferta(c.operacion);
+  if (['Publicado', 'Activo'].includes(c.etapaAntesDeRetiro)) c.etapaAntesDeRetiro = etapaOferta(c.operacion);
+  if (c.etapa === 'En arriendo') c.operacion = 'arriendo';
+  else if (c.etapa === 'En venta' && c.operacion === 'arriendo') c.operacion = 'venta';
   if (!VISIBILIDADES.includes(c.visibilidad)) c.visibilidad = tieneLinkWeb(c) ? 'publica' : eraPublicado ? 'reservada' : 'interna';
   return c;
 }
@@ -212,7 +216,7 @@ function fonoNorm(t) {
 // ───────────────────────── Esquemas ─────────────────────────
 const CAMPOS_CAMPO = ['codigo', 'nombre', 'tipo', 'etapa', 'region', 'sector', 'hectareas', 'agua', 'fuenteAgua', 'plantaciones', 'aptitud',
   'precioTexto', 'precioCLP', 'precioUF', 'observaciones', 'corredor', 'asociado', 'propietario', 'telefono', 'email', 'rol', 'linkWeb', 'linkPortal',
-  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles', 'visibilidad'];
+  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles', 'visibilidad', 'operacion'];
 const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar'];
 const CAMPOS_TASACION = ['titulo', 'cliente', 'telefono', 'email', 'campoId', 'rol', 'comuna', 'codigo', 'etapa', 'honorariosUF', 'responsable', 'proximaAccion', 'proximaFecha'];
@@ -224,8 +228,9 @@ function limpiar(col, b, previo = {}) {
     const r = {};
     for (const k of CAMPOS_CAMPO) r[k] = txt(o[k], k === 'descripcionFicha' ? 8000 : ['observaciones', 'infraestructura'].includes(k) ? 4000 : 400);
     r.tipo = TIPOS.includes(o.tipo) ? o.tipo : tipoNorm(o.tipo) || 'agricola';
-    r.etapa = o.etapa === 'Publicado' ? 'En venta' : ETAPAS.campos.includes(o.etapa) ? o.etapa : 'Captación';
+    r.etapa = ['Publicado', 'Activo'].includes(o.etapa) ? etapaOferta(o.operacion) : ETAPAS.campos.includes(o.etapa) ? o.etapa : 'Captación';
     r.visibilidad = VISIBILIDADES.includes(o.visibilidad) ? o.visibilidad : '';
+    r.operacion = r.etapa === 'En arriendo' ? 'arriendo' : r.etapa === 'En venta' ? (o.operacion === 'ambas' ? 'ambas' : 'venta') : ['venta', 'arriendo', 'ambas'].includes(o.operacion) ? o.operacion : 'venta';
     r.region = regionCodigo(o.region);
     r.hectareas = num(o.hectareas); r.precioCLP = num(o.precioCLP); r.precioUF = num(o.precioUF);
     r.proximaFecha = fecha(o.proximaFecha);
@@ -242,7 +247,7 @@ function limpiar(col, b, previo = {}) {
     r.fechaAlta = /^\d{4}-\d{2}(-\d{2})?$/.test(previo.fechaAlta || '') ? previo.fechaAlta : /^\d{4}-\d{2}(-\d{2})?$/.test(o.fechaAlta || '') ? o.fechaAlta : '';
     r.perfiles = limpiarPerfiles(o.perfiles);
     r.haMin = num(o.haMin); r.haMax = num(o.haMax);
-    r.operacion = o.operacion === 'arriendo' ? 'arriendo' : 'compra';
+    r.operacion = ['compra', 'arriendo', 'ambas'].includes(o.operacion) ? o.operacion : 'compra';
     r.etapa = ETAPAS.clientes.includes(o.etapa) ? o.etapa : 'Activo';
     r.fechaRequerimiento = /^\d{4}-\d{2}/.test(o.fechaRequerimiento || '') ? o.fechaRequerimiento.slice(0, 10) : '';
     r.proximaFecha = fecha(o.proximaFecha);
@@ -280,6 +285,10 @@ const NOMBRE_CULTIVO = { paltos: 'paltos', citricos: 'cítricos', nogales: 'noga
   ganaderia: 'ganadería', forestal: 'forestal', cultivos_anuales: 'cultivos anuales', frutales: 'frutales' };
 
 function evaluar(campo, cli, hoy = new Date()) {
+  // operación: quien compra ve campos en venta; quien arrienda, campos en arriendo
+  const opCampo = campo.operacion || 'venta', opCli = ['arriendo', 'ambas'].includes(cli.operacion) ? cli.operacion : 'compra';
+  if (opCli === 'compra' && opCampo === 'arriendo') return null;
+  if (opCli === 'arriendo' && opCampo === 'venta') return null;
   // tipo
   let sTipo;
   if (!cli.tipo) sTipo = 5;
@@ -341,7 +350,7 @@ function evaluar(campo, cli, hoy = new Date()) {
   if (!hitZona && conocidos < 2 && !sPerfil) return null;
   const score = Math.min(100, sTipo + sLugar + sCult + sSup + sPerfil);
   if (score < 55) return null;
-  if (cli.operacion === 'arriendo') alertas.push('Busca arriendo');
+  if (opCli !== 'compra' && opCampo !== 'venta') razones.unshift('Busca arriendo y el campo se arrienda');
   if (cli.presupuesto) razones.push(`Presupuesto: ${cli.presupuesto}`);
   if (cli.fechaRequerimiento) {
     const meses = (hoy.getFullYear() - Number(cli.fechaRequerimiento.slice(0, 4))) * 12 + (hoy.getMonth() + 1 - Number(cli.fechaRequerimiento.slice(5, 7)));
@@ -399,7 +408,7 @@ function importarHojas(hojas) {
         const faltan = [!regiones.length && !zona, !cultivos.length, haMin == null && haMax == null].filter(Boolean).length;
         const c = nuevo({
           nombre, requerimiento: req, observaciones: obs, zona, regiones, cultivos, haMin, haMax, presupuesto: txt(presupuesto, 200), fechaAlta: parseFechaMY(colFecha >= 0 ? f[colFecha] : ''),
-          tipo: tipoNorm(get(f, m, 'tipo')), operacion: /arriend/.test(norm(req)) ? 'arriendo' : 'compra',
+          tipo: tipoNorm(get(f, m, 'tipo')), operacion: /arriend/.test(norm(req)) ? (/compr|venta|adquir/.test(norm(req)) ? 'ambas' : 'arriendo') : 'compra',
           contactoNombre: esFono ? '' : contacto, telefono: esFono ? contacto : '', email: txt(get(f, m, 'email'), 400),
           corredor: txt(get(f, m, 'corredor'), 40), mailing: txt(get(f, m, 'lista mailing'), 60),
           fechaRequerimiento: parseFechaMY(colFecha >= 0 ? f[colFecha] : ''), etapa: 'Activo', revisar: faltan >= 2,
@@ -1785,7 +1794,7 @@ function propuestaWeb(c) {
   return {
     titulo: w.titulo || c.nombre,
     descripcion: lineas.join('\n'),
-    tipo: TIPO_WEB[c.tipo] || 'Agrícolas', estado: 'Venta',
+    tipo: TIPO_WEB[c.tipo] || 'Agrícolas', estado: c.operacion === 'arriendo' ? 'Arriendo' : 'Venta',
     comuna: c.sector || w.comuna || '', region: REGION_WEB[c.region] || w.region || '',
     precioPrefijo: c.precioUF ? 'UF' : '$', precio: c.precioUF ? Math.round(c.precioUF).toLocaleString('es-CL') : c.precioCLP ? Math.round(c.precioCLP).toLocaleString('es-CL') : '',
     superficie: c.hectareas ? String(c.hectareas).replace('.', ',') : '', superficieUnidad: 'has', idPropiedad: c.codigo || d.id || '',
@@ -2288,6 +2297,7 @@ function aplicarWeb(c, w) {
   set('region', regionDeNombre(w.region), 'Región');
   set('codigo', txt(d.id, 40), 'ID');
   if (d.tipo) set('tipo', tipoNorm(d.tipo), 'Tipo');
+  if (d.estado) { const e = norm(d.estado); const op = /arriend/.test(e) && /venta/.test(e) ? 'ambas' : /arriend/.test(e) ? 'arriendo' : /venta/.test(e) ? 'venta' : ''; if (op) { set('operacion', op, 'Operación'); if (['En venta', 'En arriendo'].includes(c.etapa)) c.etapa = etapaOferta(op); } }
   c.web = w;
   c.checklist = { ...(c.checklist || {}), publicacion: true, fotos: !!((c.checklist || {}).fotos || w.fotos.length) };
   return cambios;
@@ -2315,7 +2325,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
       return leer().sync;
     }
     // 1) Confirmar retiros consultando cada página (404 = borrada)
-    const candidatos = enlazados.filter((c) => ['Mandato firmado', 'En venta', 'En negociación', 'Documentación', 'Arrendado', 'Suspendido'].includes(c.etapa)
+    const candidatos = enlazados.filter((c) => ['Mandato firmado', 'En venta', 'En arriendo', 'En negociación', 'Documentación', 'Arrendado', 'Suspendido'].includes(c.etapa)
       && !slugsCampo(c).some((sl) => sitio.publicadas.has(sl)));
     const borrados = new Set();
     for (const c of candidatos.slice(0, 40)) {
@@ -2346,7 +2356,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
       for (const c of db.campos) {
         const sls = slugsCampo(c); if (!sls.length) continue;
         if (borrados.has(c.id) && c.visibilidad === 'reservada') {
-          nota(c, 'La publicación se sacó de farmbrokers.cl. El campo sigue en venta reservada.');
+          nota(c, 'La publicación se sacó de farmbrokers.cl. El campo sigue activo como reservado.');
           c.linkWeb = ''; c.checklist = { ...(c.checklist || {}), publicacion: false }; continue;
         }
         if (borrados.has(c.id)) {
@@ -2361,7 +2371,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
         if (sls.some((sl) => sitio.vendidos.has(sl)) && !['Vendido', 'Descartado'].includes(c.etapa)) {
           nota(c, `Etapa: ${c.etapa} → Vendido (marcado como vendido en farmbrokers.cl)`); c.etapa = 'Vendido'; cambios.vendidos.push(c.nombre);
         } else if (c.etapa === 'Retirado de la web' && sls.some((sl) => sitio.publicadas.has(sl) && !sitio.vendidos.has(sl))) {
-          const vuelve = c.etapaAntesDeRetiro || 'En venta';
+          const vuelve = c.etapaAntesDeRetiro || etapaOferta(c.operacion);
           nota(c, `Etapa: Retirado de la web → ${vuelve} (volvió a publicarse en farmbrokers.cl)`); c.etapa = vuelve; cambios.restaurados.push(c.nombre);
         }
       }
@@ -2379,11 +2389,11 @@ async function sincronizarWeb(autor = 'Sincronización web') {
           mismo.linkWeb = p.url; const cm = aplicarWeb(mismo, w);
           if (mismo.wp) { mismo.wp = { ...mismo.wp, estado: 'publish', ver: p.url }; }
           mismo.visibilidad = 'publica';
-          if (['Prospección', 'Captación', 'Documentación', 'Mandato firmado'].includes(mismo.etapa)) { nota(mismo, `Etapa: ${mismo.etapa} → En venta (ya está en farmbrokers.cl)`); mismo.etapa = 'En venta'; }
+          if (['Prospección', 'Captación', 'Documentación', 'Mandato firmado'].includes(mismo.etapa)) { const et = etapaOferta(mismo.operacion); nota(mismo, `Etapa: ${mismo.etapa} → ${et} (ya está en farmbrokers.cl)`); mismo.etapa = et; }
           nota(mismo, `Enlazado con su publicación en farmbrokers.cl${cm.length ? `: ${cm.join('; ')}` : ''}`);
           cambios.vinculados.push(mismo.nombre);
         } else {
-          const c = campoDesdeWeb(p.url, w, autor, vendida ? 'Vendido' : 'En venta'); c.visibilidad = 'publica';
+          const c = campoDesdeWeb(p.url, w, autor, vendida ? 'Vendido' : etapaOferta(/arriend/i.test((w.detalle || {}).estado || '') ? 'arriendo' : 'venta')); c.visibilidad = 'publica';
           aplicarWeb(c, w); db.campos.push(c); cambios.creados.push(c.nombre);
         }
       }
@@ -2425,7 +2435,7 @@ router.post('/sync/agregar', async (req, res) => {
   const autor = usuarioDe(req), d = web.detalle;
   const r = await modificar((db) => {
     if (db.campos.some((c) => slugsCampo(c).includes(slug))) return { error: 'Ese campo ya está en el CRM.' };
-    const campo = campoDesdeWeb(url, web, autor, /vend/i.test(d.estado || '') ? 'Vendido' : 'En venta'); campo.visibilidad = 'publica';
+    const campo = campoDesdeWeb(url, web, autor, /vend/i.test(d.estado || '') ? 'Vendido' : etapaOferta(/arriend/i.test(d.estado || '') ? 'arriendo' : 'venta')); campo.visibilidad = 'publica';
     aplicarWeb(campo, web);
     db.campos.push(campo);
     if (db.sync) db.sync.nuevos = (db.sync.nuevos || []).filter((n) => n.slug !== slug);
