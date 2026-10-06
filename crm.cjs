@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v5.2';
+const VERSION = 'crm-v5.5';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -507,7 +507,7 @@ router.get('/', (req, res) => {
     modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     tareas: db.tareas || [], notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
@@ -985,6 +985,24 @@ router.delete('/campos/:id/archivos/:fid', async (req, res) => {
 });
 
 // ───────────────────────── Redactar la descripción para el cliente (IA) ─────────────────────────
+const ESTILO_BASE = {
+  descripcion: `Excelente oportunidad de inversión en uno de los destinos más atractivos del sur de Chile. Campo de 41,25 hectáreas ubicado en la comuna de Pucón, Región de La Araucanía, en un privilegiado entorno natural y con frente al Río Trancura.
+La propiedad combina paisaje, privacidad y cercanía a Pucón, convirtiéndose en una alternativa especialmente atractiva tanto para uso residencial y recreacional como para el desarrollo de un proyecto inmobiliario o de parcelación, gracias a su gran potencial de loteo.
+El campo cuenta con una casa de aproximadamente 250 m² completamente remodelada, además de jardines consolidados y un huerto de frutales, entregando una base residencial lista para disfrutar mientras se proyecta el desarrollo futuro del predio.`,
+  meta: 'Campo de 41,25 ha en Pucón, a orillas del Río Trancura, con casa remodelada de 250 m², jardines, huerto y gran potencial de loteo.',
+};
+const estiloDe = (db) => ({ ...ESTILO_BASE, ...(((db.config || {}).estilo) || {}) });
+router.put('/config/estilo', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const actual = estiloDe(db);
+    const nuevo = { descripcion: b.descripcion === '' ? ESTILO_BASE.descripcion : txt(b.descripcion, 6000) || actual.descripcion, meta: b.meta === '' ? ESTILO_BASE.meta : txt(b.meta, 320) || actual.meta };
+    db.config = { ...(db.config || {}), estilo: nuevo };
+    auditar(db, autor, 'Actualizó el estilo de referencia de las descripciones', null);
+    return nuevo;
+  });
+  res.json(r);
+});
 async function llamarClaude(prompt) {
   if (global.__claudeMock) return global.__claudeMock(prompt);
   const clave = process.env.ANTHROPIC_API_KEY;
@@ -1023,23 +1041,40 @@ router.post('/campos/:id/redactar', async (req, res) => {
   const campo = { ...base, ...limpiar('campos', { ...base, ...((req.body || {}).campo || {}) }), web: base.web, geo: base.geo, captacion: base.captacion, tasacionInfo: base.tasacionInfo };
   const { filas, web } = antecedentesCampo(campo);
   if (filas.length < 4 && !web) return res.status(400).json({ error: 'Hay muy pocos datos del campo para redactar. Completa superficie, agua, plantaciones o aptitud, o vincula la publicación o la tasación.' });
-  const prompt = `Eres redactor comercial de Farm Brokers Chile, corredora de campos agrícolas. Escribe la descripción de este campo para la ficha que se entrega a un posible comprador.
+  const perfiles = (campo.perfiles || []).map((pid) => (perfilesDe(db).find((x) => x.id === pid) || {}).nombre).filter(Boolean);
+  const tono = ['comercial', 'inversion', 'agrado', 'tecnico'].includes((req.body || {}).tono) ? req.body.tono : 'comercial';
+  const ENFOQUES = {
+    comercial: `Enfoque COMERCIAL: tu objetivo es que el lector quiera visitar el campo. Abre con una frase que enganche y resuma lo más atractivo del predio (su ubicación, su entorno, su producción o su potencial). Convierte cada dato en un beneficio concreto para el comprador: no solo "tiene 31 l/s de agua", sino lo que eso le permite. Muestra por qué es una oportunidad.`,
+    inversion: `Enfoque INVERSIÓN Y PRODUCCIÓN: el lector es un agricultor, exportadora o inversionista. Destaca lo que hace rentable y seguro el campo: superficie productiva, plantaciones y su estado, seguridad de riego y derechos de agua, infraestructura para operar, suelos y aptitud. Habla de un activo productivo listo para trabajar o con potencial de crecimiento, siempre con los datos que hay.`,
+    agrado: `Enfoque AGRADO Y ESTILO DE VIDA: el lector busca un lugar para vivir, descansar o compartir en familia. Destaca el entorno natural, el paisaje, la tranquilidad, la cercanía a la ciudad o a servicios, la casa y los espacios, y lo que se puede vivir ahí, siempre con los datos que hay. Que se imagine estando en el campo.`,
+    tecnico: `Enfoque TÉCNICO: tono sobrio y preciso, como una ficha profesional. Presenta los datos con claridad, sin adjetivos de venta.`,
+  };
+  const comercial = tono !== 'tecnico';
+  const estilo = estiloDe(db);
+  const prompt = `Eres el mejor redactor comercial de Farm Brokers Chile, corredora especializada en campos agrícolas. Escribe la descripción de este campo para su publicación y para la ficha que se entrega a posibles compradores.
 
-Reglas:
-- Usa SOLO los antecedentes de abajo. No inventes cifras, distancias, cultivos, calidades ni ventajas que no estén escritas. Si un dato no está, no lo menciones.
-- Español de Chile, tono profesional y cercano, sin exageraciones ni signos de exclamación.
+${ENFOQUES[tono]}
+${perfiles.length ? `El campo está pensado para compradores con perfil: ${perfiles.join(', ')}. Orienta el texto a ellos.` : ''}
+
+Reglas que no se pueden romper:
+- Usa SOLO los antecedentes de abajo. Puedes destacar, ordenar y explicar el valor de un dato, pero no inventes cifras, distancias, cultivos, vistas, calidades, servicios ni ventajas que no estén escritos. Si un dato no está, no lo menciones ni lo supongas.
+- Español de Chile${comercial ? ', cálido, seguro y entusiasta, que transmita oportunidad sin sonar exagerado ni a aviso clasificado. Evita frases gastadas como "no te lo pierdas" o "única oportunidad". Como máximo un signo de exclamación en todo el texto.' : ', sobrio y profesional, sin signos de exclamación.'}
 - No incluyas precio, comisión, nombres de propietarios, RUT, rol SII ni datos de contacto.
-- Formato: un párrafo inicial de 2 o 3 oraciones que presente el campo. Luego párrafos breves que empiecen con una etiqueta y dos puntos, en este orden y solo si hay datos: "Superficie:", "Suelos:", "Aguas:", "Plantaciones:", "Clima:", "Infraestructura:", "Acceso:". Puedes agregar "Potencial:" solo si los antecedentes mencionan aptitud o conclusión.
-- Si hay una lista de elementos (por ejemplo varios derechos de agua), escríbelos en líneas que empiecen con "- ".
-- Entre 120 y 280 palabras. Devuelve solo el texto, sin títulos ni comentarios.
-
+- Formato: ${comercial ? `de 3 a 5 párrafos corridos, separados por un salto de línea, SIN títulos, etiquetas ni listas. El primero abre con la oportunidad y presenta el campo (tipo, superficie, comuna, región y su atributo más atractivo). El segundo explica qué combina y para qué sirve o qué posibilidades ofrece. El tercero describe lo que tiene (construcciones, producción, plantaciones, agua, accesos) presentándolo como valor para el comprador. Puedes agregar uno o dos párrafos más solo si hay antecedentes importantes que no entraron. Si un antecedente es una limitación (por ejemplo, que no tiene derechos de agua), no lo destaques en el texto: queda en la ficha técnica.` : `un párrafo inicial de 2 o 3 oraciones; luego párrafos breves que empiecen con una etiqueta y dos puntos, en este orden y solo si hay datos: "Superficie:", "Suelos:", "Aguas:", "Plantaciones:", "Clima:", "Infraestructura:", "Acceso:"; y un párrafo "Potencial:" solo si los antecedentes mencionan aptitud o conclusión. Si hay una lista de elementos, escríbelos en líneas que empiecen con "- ".`}
+- Entre ${comercial ? '110 y 260' : '120 y 280'} palabras. Devuelve solo el texto, sin títulos ni comentarios.
+${comercial ? `
+Ejemplo del estilo que se busca (es de otro campo: copia el tono, la estructura y el ritmo, NUNCA sus datos):
+---
+${estilo.descripcion}
+---
+` : ''}
 Antecedentes del campo:
 ${filas.map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 1500)}`).join('\n')}
-${web ? `\nDescripción publicada en farmbrokers.cl (úsala como base de estilo y datos):\n${web.slice(0, 4000)}` : ''}`;
+${web ? `\nDescripción publicada en farmbrokers.cl (úsala como fuente de datos; puedes mejorar su redacción):\n${web.slice(0, 4000)}` : ''}`;
   try {
     const texto = (await llamarClaude(prompt)).replace(/\*\*/g, '').replace(/^#+\s*/gm, '').replace(/\n{2,}/g, '\n').trim();
     const autor = usuarioDe(req);
-    await modificar((d2) => { registrar(d2, autor, `Redactó con IA la descripción de ${campo.nombre}`, { col: 'campos', id: campo.id }); });
+    await modificar((d2) => { registrar(d2, autor, `Redactó con IA la descripción de ${campo.nombre} (enfoque ${tono})`, { col: 'campos', id: campo.id }); });
     res.json({ texto });
   } catch (e) { res.status(502).json({ error: `No se pudo redactar: ${e.message}` }); }
 });
@@ -1666,6 +1701,23 @@ function descripcionHtml(lineas) {
   cerrar();
   return out.join('\n');
 }
+// SEO: sugerencias al estilo de las publicaciones del sitio
+const aSlug = (t) => norm(t).replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 70).replace(/-[^-]*$/, (m) => (m.length < 3 ? '' : m));
+const slugSugerido = (c) => {
+  const base = c.tipo === 'loteo' ? 'venta loteo' : 'venta campo';
+  const usadas = new Set(norm(`${base} ${c.sector || ''}`).split(/[^a-z0-9]+/));
+  const nombre = norm(c.nombre || '').split(/[^a-z0-9]+/).filter((w) => w && !usadas.has(w) && !['campo', 'loteo', 'venta', 'de', 'en', 'el', 'la'].includes(w));
+  return aSlug([base, c.sector, ...nombre].filter(Boolean).join(' '));
+};
+const fraseSugerida = (c) => [`${(c.tipo === 'loteo' ? 'loteo' : 'campo')} en venta`, c.sector].filter(Boolean).join(' ');
+function metaSugerida(c, w) {
+  const nombreTipo = c.tipo === 'loteo' ? 'Loteo' : c.tipo === 'forestal' ? 'Campo forestal' : 'Campo';
+  const ha = c.hectareas ? ` de ${String(c.hectareas).replace('.', ',')} ha` : '';
+  const con = [c.plantaciones, c.agua && !/^sin\b|no cuenta|no tiene/i.test(c.agua) ? `agua: ${c.agua}` : '', c.infraestructura ? c.infraestructura.split(/[.;]/)[0] : ''].filter(Boolean).map((x) => x.trim().replace(/^./, (m) => m.toLowerCase()));
+  let t = `${nombreTipo}${ha}${c.sector ? ` en ${c.sector}` : ''}${con.length ? `, con ${con.join(', ')}` : ''}.`;
+  if (t.length > 155) t = `${t.slice(0, 152).replace(/[\s,]+\S*$/, '')}.`;
+  return t;
+}
 function propuestaWeb(c) {
   const w = c.web || {}, d = w.detalle || {};
   const lineas = c.descripcionFicha ? c.descripcionFicha.split('\n') : (w.descripcion || []);
@@ -1682,6 +1734,7 @@ function propuestaWeb(c) {
     agua: c.agua || d.agua || '', plantaciones: c.plantaciones || d.plantaciones || '',
     lat: coord ? coord.lat : '', lng: coord ? coord.lng : '',
     fotos: fotos.map((a, i) => ({ id: a.id, nombre: a.nombre, tamano: a.tamano, subida: !!(c.wp && (c.wp.fotos || []).includes(a.id)), elegida: true, principal: i === 0 })),
+    slug: (c.wp && c.wp.slug) || slugSugerido(c), metaDescripcion: (c.wp && c.wp.metaDescripcion) || metaSugerida(c, w), fraseClave: (c.wp && c.wp.fraseClave) || fraseSugerida(c),
     wp: c.wp || null,
   };
 }
@@ -1707,6 +1760,26 @@ async function muestraWeb() {
   await modificar((d) => { d.config = { ...(d.config || {}), wpMuestra: m }; });
   return m;
 }
+router.post('/campos/:id/seo-ia', async (req, res) => {
+  const c = leer().campos.find((x) => x.id === req.params.id);
+  if (!c) return res.status(404).json({ error: 'No se encontró el campo.' });
+  const { filas, web } = antecedentesCampo(c);
+  const b = req.body || {};
+  const prompt = `Eres el encargado de SEO de Farm Brokers Chile, corredora de campos. Para la publicación de este campo en farmbrokers.cl entrega:
+1. "meta": una meta description en español de Chile, entre 120 y 155 caracteres, directa a los datos más atractivos, con este estilo (de otro campo, no copies sus datos): ${estiloDe(leer()).meta}. Sin precio, sin comillas, sin emojis, sin el nombre de la corredora.
+2. "slug": la dirección de la página, en minúsculas, sin tildes, palabras separadas por guiones, máximo 6 palabras, empezando por "venta-campo" o "venta-loteo".
+3. "frase": la frase clave principal para Yoast, de 2 a 4 palabras, como la buscaría un comprador en Google.
+Usa solo los antecedentes. Responde SOLO con un JSON {"meta":"...","slug":"...","frase":"..."}.
+
+Título: ${txt(b.titulo, 200) || c.nombre}
+${filas.map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 400)}`).join('\n')}
+${b.descripcion ? `Descripción:\n${String(b.descripcion).slice(0, 2500)}` : web ? `Descripción:\n${web.slice(0, 2500)}` : ''}`;
+  try {
+    const t = await llamarClaude(prompt);
+    const j = JSON.parse((t.match(/\{[\s\S]*\}/) || ['{}'])[0]);
+    res.json({ meta: txt(j.meta, 320), slug: aSlug(j.slug || ''), frase: txt(j.frase, 120) });
+  } catch (e) { res.status(502).json({ error: `No se pudo sugerir: ${e.message}` }); }
+});
 router.get('/campos/:id/publicar-web', (req, res) => {
   const campo = leer().campos.find((x) => x.id === req.params.id);
   if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
@@ -1734,6 +1807,7 @@ router.post('/campos/:id/publicar-web', async (req, res) => {
     id_propiedad: t('idPropiedad', 40), direccion: [t('comuna'), t('region')].filter(Boolean).join(', '),
     lat: coordOk(lat, lng) ? lat : '', lng: coordOk(lat, lng) ? lng : '',
     detalles, tipo: t('tipo', 80), estado: t('estado', 80), comuna: t('comuna', 80), region: t('region', 80),
+    slug: aSlug(t('slug', 120)), meta_descripcion: t('metaDescripcion', 320), frase_clave: t('fraseClave', 120),
   };
   let r;
   try { r = await wpLlamarImpl('POST', '/propiedad', pedido); }
@@ -1756,12 +1830,14 @@ router.post('/campos/:id/publicar-web', async (req, res) => {
   const final = await modificar((db) => {
     const c = db.campos.find((x) => x.id === campo.id); if (!c) return null;
     const nuevo = !c.wp || c.wp.id !== r.id;
-    c.wp = { id: r.id, estado: r.estado, editar: r.editar, previa: r.previa, ver: r.ver, fecha: ahora(), autor, fotos: subidas };
+    c.wp = { id: r.id, estado: r.estado, editar: r.editar, previa: r.previa, ver: r.ver, fecha: ahora(), autor, fotos: subidas,
+      slug: r.slug || pedido.slug, metaDescripcion: pedido.meta_descripcion, fraseClave: pedido.frase_clave, versionCodigo: r.version || '1.0' };
     c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: `${nuevo ? 'Creó' : 'Actualizó'} el borrador en farmbrokers.cl${subidas.length > yaSubidas.size ? ` con ${plural(subidas.length - yaSubidas.size, 'foto')}` : ''}` }];
     registrar(db, autor, `${nuevo ? 'Preparó' : 'Actualizó'} la publicación de ${c.nombre} en farmbrokers.cl`, { col: 'campos', id: c.id, nombre: c.nombre });
     return c;
   });
-  res.json({ campo: final, wp: final.wp, fotosNuevas: subidas.length - yaSubidas.size, errores });
+  const aviso = (pedido.slug || pedido.meta_descripcion) && !r.version ? 'El código de WordPress es una versión anterior: el slug y la meta description no se guardaron. Actualiza el snippet “Farm Brokers CRM” con la versión 1.2.' : '';
+  res.json({ campo: final, wp: final.wp, fotosNuevas: subidas.length - yaSubidas.size, errores, aviso });
 });
 
 // ── Propietario (sin clave del equipo, solo con el link)
