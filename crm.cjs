@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v5.1';
+const VERSION = 'crm-v5.2';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -507,7 +507,7 @@ router.get('/', (req, res) => {
     modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     tareas: db.tareas || [], notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
@@ -1619,6 +1619,151 @@ router.get('/reporte', (req, res) => {
   });
 });
 
+// ───────────────────────── Publicar en farmbrokers.cl (borradores de WordPress) ─────────────────────────
+const WP_URL = String(process.env.WP_URL || 'https://farmbrokers.cl').replace(/\/$/, '');
+function wpLlamar(metodo, ruta, cuerpo) {
+  const usuario = process.env.WP_USER, clave = process.env.WP_APP_PASSWORD;
+  if (!usuario || !clave) return Promise.reject(new Error('Faltan las variables WP_USER y WP_APP_PASSWORD en Railway.'));
+  const auth = 'Basic ' + Buffer.from(`${usuario}:${clave}`).toString('base64');
+  const datos = cuerpo ? Buffer.from(JSON.stringify(cuerpo)) : null;
+  const u = new URL(WP_URL + '/wp-json/farmbrokers/v1' + ruta);
+  return new Promise((ok, mal) => {
+    const req = https.request(u, { method: metodo, timeout: 90000, headers: { Authorization: auth, 'X-FB-Authorization': auth, 'User-Agent': 'FarmBrokersCRM/1.0', Accept: 'application/json',
+      ...(datos ? { 'Content-Type': 'application/json', 'Content-Length': datos.length } : {}) } }, (res) => {
+      let t = ''; res.setEncoding('utf8'); res.on('data', (c) => { t += c; });
+      res.on('end', () => {
+        let j = null; try { j = JSON.parse(t); } catch (e) { /* no es JSON */ }
+        if (res.statusCode >= 200 && res.statusCode < 300 && j) return ok(j);
+        const codigo = j && j.code;
+        let msg = (j && j.message) || `WordPress respondió ${res.statusCode}.`;
+        if (res.statusCode === 401 || codigo === 'rest_forbidden' || codigo === 'incorrect_password' || codigo === 'invalid_username')
+          msg = 'WordPress no aceptó la clave. Revisa en Railway que WP_USER sea el nombre de usuario (por ejemplo Daniel) y que WP_APP_PASSWORD sea la contraseña de aplicación de ese mismo usuario.';
+        if (codigo === 'rest_no_route') msg = 'El código del CRM no está activo en WordPress. Revisa el snippet "Farm Brokers CRM" en Fragmentos de código.';
+        const e = new Error(msg); e.estado = res.statusCode; mal(e);
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('WordPress tardó demasiado en responder.')));
+    req.on('error', (e) => mal(new Error(`No se pudo conectar con ${WP_URL}: ${e.message}`)));
+    if (datos) req.write(datos);
+    req.end();
+  });
+}
+let wpLlamarImpl = wpLlamar;
+const TIPO_WEB = { agricola: 'Agrícolas', loteo: 'Campos con Subdivisión', forestal: 'Forestales', conservacion: 'Conservación', agroindustrial: 'Terrenos Agroindustriales', derechos_agua: 'Derechos de Agua', urbano: 'Terrenos Urbanos', energia: 'Agrícolas' };
+const REGION_WEB = { XV: 'Región de Arica y Parinacota', I: 'Región de Tarapacá', II: 'Región de Antofagasta', III: 'Región de Atacama', IV: 'Región de Coquimbo', V: 'Región de Valparaíso', RM: 'Región Metropolitana',
+  VI: "Región de O'Higgins", VII: 'Región del Maule', XVI: 'Región de Ñuble', VIII: 'Región del Biobío', IX: 'Región de la Araucanía', XIV: 'Región de los Ríos', X: 'Región de los Lagos', XI: 'Región de Aysén', XII: 'Región de Magallanes' };
+const escHtml = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function descripcionHtml(lineas) {
+  const out = []; let lista = [];
+  const cerrar = () => { if (lista.length) { out.push(`<ul>${lista.map((x) => `<li>${escHtml(x)}</li>`).join('')}</ul>`); lista = []; } };
+  for (const l0 of lineas) {
+    const l = String(l0).trim(); if (!l) continue;
+    if (/^[•–-]\s*/.test(l)) { lista.push(l.replace(/^[•–-]\s*/, '')); continue; }
+    cerrar();
+    const m = l.match(/^([A-ZÁÉÍÓÚÑ][^:]{1,40}):\s*(.*)$/);
+    out.push(m ? `<p><strong>${escHtml(m[1])}:</strong>${m[2] ? ` ${escHtml(m[2])}` : ''}</p>` : `<p>${escHtml(l)}</p>`);
+  }
+  cerrar();
+  return out.join('\n');
+}
+function propuestaWeb(c) {
+  const w = c.web || {}, d = w.detalle || {};
+  const lineas = c.descripcionFicha ? c.descripcionFicha.split('\n') : (w.descripcion || []);
+  const m = String(c.coordenadas || '').match(/(-\d{1,2}\.\d+)\s*,\s*(-\d{1,3}\.\d+)/);
+  const coord = m ? { lat: Number(m[1]), lng: Number(m[2]) } : c.geo ? c.geo.centro : (w.coordenadas && w.fuenteUbicacion !== 'comuna' ? w.coordenadas : null);
+  const fotos = (c.archivos || []).filter((a) => a.tipo === 'foto');
+  return {
+    titulo: w.titulo || c.nombre,
+    descripcion: lineas.join('\n'),
+    tipo: TIPO_WEB[c.tipo] || 'Agrícolas', estado: 'Venta',
+    comuna: c.sector || w.comuna || '', region: REGION_WEB[c.region] || w.region || '',
+    precioPrefijo: c.precioUF ? 'UF' : '$', precio: c.precioUF ? Math.round(c.precioUF).toLocaleString('es-CL') : c.precioCLP ? Math.round(c.precioCLP).toLocaleString('es-CL') : '',
+    superficie: c.hectareas ? String(c.hectareas).replace('.', ',') : '', superficieUnidad: 'has', idPropiedad: c.codigo || d.id || '',
+    agua: c.agua || d.agua || '', plantaciones: c.plantaciones || d.plantaciones || '',
+    lat: coord ? coord.lat : '', lng: coord ? coord.lng : '',
+    fotos: fotos.map((a, i) => ({ id: a.id, nombre: a.nombre, tamano: a.tamano, subida: !!(c.wp && (c.wp.fotos || []).includes(a.id)), elegida: true, principal: i === 0 })),
+    wp: c.wp || null,
+  };
+}
+router.get('/wp/estado', async (req, res) => {
+  try {
+    const db = leer();
+    const ejemplo = db.campos.map((c) => slugsCampo(c)[0]).find(Boolean) || '';
+    const r = await wpLlamarImpl('GET', `/estado${ejemplo ? `?muestra=${encodeURIComponent(ejemplo)}` : ''}`);
+    res.json({ ok: true, version: r.version, usuario: r.usuario, houzez: r.houzez, taxonomias: r.taxonomias, muestra: r.muestra });
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+async function muestraWeb() {
+  const db = leer(), cfg = db.config || {};
+  if (cfg.wpMuestra && Date.now() - new Date(cfg.wpMuestra.fecha).getTime() < 7 * 864e5) return cfg.wpMuestra;
+  const ref = db.campos.find((c) => slugsCampo(c).length && c.web && c.web.detalle && (c.web.detalle.agua || c.web.detalle.plantaciones));
+  if (!ref) return null;
+  const r = await wpLlamarImpl('GET', `/estado?muestra=${encodeURIComponent(slugsCampo(ref)[0])}`);
+  if (!r.muestra) return null;
+  const meta = r.muestra.meta || {};
+  const clave = (v) => { if (!v) return ''; const n = norm(v); return Object.keys(meta).find((k) => /^(fave_|houzez_)/.test(k) && !/additional|features|_enable$/.test(k) && norm(meta[k]) === n) || ''; };
+  const m = { fecha: ahora(), slug: slugsCampo(ref)[0], claveAgua: clave(ref.web.detalle.agua), clavePlantaciones: clave(ref.web.detalle.plantaciones),
+    precioSoloNumeros: /^\d+(\.\d+)?$/.test(String(meta.fave_property_price || '')), unidad: meta.fave_property_size_prefix || '' };
+  await modificar((d) => { d.config = { ...(d.config || {}), wpMuestra: m }; });
+  return m;
+}
+router.get('/campos/:id/publicar-web', (req, res) => {
+  const campo = leer().campos.find((x) => x.id === req.params.id);
+  if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
+  res.json(propuestaWeb(campo));
+});
+router.post('/campos/:id/publicar-web', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req);
+  const campo = leer().campos.find((x) => x.id === req.params.id);
+  if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
+  const t = (k, n = 300) => txt(b[k], n);
+  if (!t('titulo')) return res.status(400).json({ error: 'Falta el título.' });
+  // Copia el formato de una publicación existente del sitio (campo del agua, plantaciones, formato del precio)
+  let muestra = null;
+  try { muestra = await muestraWeb(); } catch (e) { /* sin muestra se usan los valores estándar de Houzez */ }
+  const detalles = {}, metaExtra = {};
+  if (t('agua')) { if (muestra && muestra.claveAgua) metaExtra[muestra.claveAgua] = t('agua'); else detalles.Agua = t('agua'); }
+  if (t('plantaciones')) { if (muestra && muestra.clavePlantaciones) metaExtra[muestra.clavePlantaciones] = t('plantaciones'); else detalles.Plantaciones = t('plantaciones'); }
+  let precio = t('precio', 40), prefijo = t('precioPrefijo', 10);
+  if (precio && muestra && muestra.precioSoloNumeros) precio = precio.replace(/\D/g, '');
+  const lat = Number(b.lat), lng = Number(b.lng);
+  const pedido = {
+    post_id: campo.wp && campo.wp.id ? campo.wp.id : undefined,
+    titulo: t('titulo', 200), descripcion: descripcionHtml(String(b.descripcion || '').split('\n')),
+    precio, precio_prefijo: prefijo, superficie: t('superficie', 40), superficie_unidad: t('superficieUnidad', 20) || (muestra && muestra.unidad) || 'has', meta_extra: metaExtra,
+    id_propiedad: t('idPropiedad', 40), direccion: [t('comuna'), t('region')].filter(Boolean).join(', '),
+    lat: coordOk(lat, lng) ? lat : '', lng: coordOk(lat, lng) ? lng : '',
+    detalles, tipo: t('tipo', 80), estado: t('estado', 80), comuna: t('comuna', 80), region: t('region', 80),
+  };
+  let r;
+  try { r = await wpLlamarImpl('POST', '/propiedad', pedido); }
+  catch (e) { return res.status(502).json({ error: e.message }); }
+  // Fotos: solo las elegidas que todavía no se subieron a esta publicación
+  const elegidas = Array.isArray(b.fotos) ? b.fotos.map(String) : [];
+  const principal = String(b.principal || elegidas[0] || '');
+  const yaSubidas = new Set((campo.wp && campo.wp.id === r.id ? campo.wp.fotos : []) || []);
+  const subidas = [...yaSubidas], errores = [];
+  const ordenadas = [...elegidas].sort((a, c) => (a === principal ? -1 : c === principal ? 1 : 0));
+  for (const fid of ordenadas) {
+    if (yaSubidas.has(fid)) continue;
+    const a = (campo.archivos || []).find((x) => x.id === fid && x.tipo === 'foto'); if (!a) continue;
+    try {
+      const datos = fs.readFileSync(path.join(ARCHIVOS, campo.id, a.id)).toString('base64');
+      await wpLlamarImpl('POST', '/imagen', { post_id: r.id, nombre: a.nombre, titulo: `${pedido.titulo}`, datos, destacada: fid === principal });
+      subidas.push(fid);
+    } catch (e) { errores.push(`${a.nombre}: ${e.message}`); }
+  }
+  const final = await modificar((db) => {
+    const c = db.campos.find((x) => x.id === campo.id); if (!c) return null;
+    const nuevo = !c.wp || c.wp.id !== r.id;
+    c.wp = { id: r.id, estado: r.estado, editar: r.editar, previa: r.previa, ver: r.ver, fecha: ahora(), autor, fotos: subidas };
+    c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: `${nuevo ? 'Creó' : 'Actualizó'} el borrador en farmbrokers.cl${subidas.length > yaSubidas.size ? ` con ${plural(subidas.length - yaSubidas.size, 'foto')}` : ''}` }];
+    registrar(db, autor, `${nuevo ? 'Preparó' : 'Actualizó'} la publicación de ${c.nombre} en farmbrokers.cl`, { col: 'campos', id: c.id, nombre: c.nombre });
+    return c;
+  });
+  res.json({ campo: final, wp: final.wp, fotosNuevas: subidas.length - yaSubidas.size, errores });
+});
+
 // ── Propietario (sin clave del equipo, solo con el link)
 router.get('/publico/:token', (req, res) => {
   const campo = buscarPorToken(leer(), req.params.token);
@@ -2344,5 +2489,5 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
