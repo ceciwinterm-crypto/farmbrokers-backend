@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v5.5';
+const VERSION = 'crm-v5.6';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1791,6 +1791,12 @@ router.post('/campos/:id/publicar-web', async (req, res) => {
   if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
   const t = (k, n = 300) => txt(b[k], n);
   if (!t('titulo')) return res.status(400).json({ error: 'Falta el título.' });
+  // Bloqueos para no crear publicaciones duplicadas
+  const linkPublicado = [campo.linkWeb, campo.linkPortal].find((u) => slugDe(u));
+  if (linkPublicado) return res.status(409).json({ error: 'Este campo ya está publicado en farmbrokers.cl. Los cambios de la publicación se hacen en WordPress.', link: linkPublicado });
+  if (campo.wp && campo.wp.estado === 'publish') return res.status(409).json({ error: 'Esta publicación ya fue publicada. Edítala en WordPress.', link: campo.wp.ver });
+  const otro = campo.codigo && leer().campos.find((x) => x.id !== campo.id && norm(x.codigo) === norm(campo.codigo) && ((x.wp && x.wp.id) || [x.linkWeb, x.linkPortal].some((u) => slugDe(u))));
+  if (otro) return res.status(409).json({ error: `El ID de propiedad ${campo.codigo} ya está usado en la publicación de “${otro.nombre}”. Revisa que no sea el mismo campo duplicado.` });
   // Copia el formato de una publicación existente del sitio (campo del agua, plantaciones, formato del precio)
   let muestra = null;
   try { muestra = await muestraWeb(); } catch (e) { /* sin muestra se usan los valores estándar de Houzez */ }
@@ -2154,14 +2160,14 @@ async function listarSitio() {
     try { for (const t of JSON.parse(await traerPagina('https://farmbrokers.cl/wp-json/wp/v2/property_status?per_page=100&_fields=id,slug,name'))) estados[t.id] = `${t.slug} ${t.name}`; } catch (e) {}
     for (let pag = 1; pag <= 20; pag++) {
       let lista;
-      try { lista = JSON.parse(await traerPagina(`https://farmbrokers.cl/wp-json/wp/v2/properties?per_page=100&page=${pag}&_fields=slug,link,title,property_status,modified`)); } catch (e) { break; }
+      try { lista = JSON.parse(await traerPagina(`https://farmbrokers.cl/wp-json/wp/v2/properties?per_page=100&page=${pag}&_fields=id,slug,link,title,property_status,modified`)); } catch (e) { break; }
       if (!Array.isArray(lista) || !lista.length) break;
       for (const p of lista) {
         const sl = String(p.slug || slugDe(p.link)).toLowerCase(); if (!sl) continue;
         const est = (p.property_status || []).map((id) => estados[id] || '').join(' ');
         const titulo = entidades(String((p.title && p.title.rendered) || '')) || tituloDeSlug(sl);
         if (/vend/i.test(est)) vendidos.add(sl);
-        enVenta.set(sl, { slug: sl, url: p.link || `https://farmbrokers.cl/propiedad/${sl}/`, titulo, lastmod: String(p.modified || '') });
+        enVenta.set(sl, { slug: sl, wpId: p.id || 0, url: p.link || `https://farmbrokers.cl/propiedad/${sl}/`, titulo, lastmod: String(p.modified || '') });
       }
       if (lista.length < 100) break;
     }
@@ -2302,11 +2308,14 @@ async function sincronizarWeb(autor = 'Sincronización web') {
         if (db.campos.some((c) => slugsCampo(c).includes(p.slug))) continue;
         const idWeb = norm((w.detalle || {}).id).toUpperCase();
         const sinEnlace = db.campos.filter((c) => !slugsCampo(c).length);
-        const mismo = (idWeb.length >= 5 && sinEnlace.find((c) => norm(c.codigo).toUpperCase() === idWeb))
+        const porBorrador = sinEnlace.find((c) => c.wp && ((p.wpId && c.wp.id === p.wpId) || (c.wp.slug && c.wp.slug === p.slug)));
+        const mismo = porBorrador || (idWeb.length >= 5 && sinEnlace.find((c) => norm(c.codigo).toUpperCase() === idWeb))
           || sinEnlace.find((c) => norm(c.nombre) === norm(w.titulo) && (!c.sector || !w.comuna || norm(c.sector) === norm(w.comuna)));
         const vendida = sitio.vendidos.has(p.slug);
         if (mismo) {
           mismo.linkWeb = p.url; const cm = aplicarWeb(mismo, w);
+          if (mismo.wp) { mismo.wp = { ...mismo.wp, estado: 'publish', ver: p.url }; }
+          if (['Prospección', 'Captación', 'Documentación', 'Mandato firmado'].includes(mismo.etapa)) { nota(mismo, `Etapa: ${mismo.etapa} → Publicado (ya está en farmbrokers.cl)`); mismo.etapa = 'Publicado'; }
           nota(mismo, `Enlazado con su publicación en farmbrokers.cl${cm.length ? `: ${cm.join('; ')}` : ''}`);
           cambios.vinculados.push(mismo.nombre);
         } else {
