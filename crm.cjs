@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.6';
+const VERSION = 'crm-v6.7';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -62,6 +62,7 @@ function normalizarCampo(c) {
   if (!c.linkWeb && c.web && /^https?:\/\/(www\.)?farmbrokers\.cl\/propiedad\//i.test(c.web.url || '')) c.linkWeb = c.web.url;
   if (c.web && c.web.titulo) c.web.titulo = limpiarTitulo(c.web.titulo);
   if (c.nombre) c.nombre = limpiarTitulo(c.nombre);
+  for (const a of c.archivos || []) if (a.tipo === 'kmz' && !/\.(kmz|kml)$/i.test(a.nombre || '') && /pdf|image/i.test(`${a.mime} ${a.nombre}`)) a.tipo = 'plano';
   if (!VISIBILIDADES.includes(c.visibilidad)) c.visibilidad = tieneLinkWeb(c) ? 'publica' : eraPublicado ? 'reservada' : 'interna';
   return c;
 }
@@ -986,7 +987,8 @@ router.post('/campos/:id/archivo', async (req, res) => {
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
-    const a = { id: crypto.randomBytes(8).toString('hex'), tipo: g ? 'kmz' : tipo, nombre: nombreArch, mime: txt(b.mime, 100), tamano: buf.length, fecha: ahora(), origen: 'equipo', autor };
+    const tipoFinal = g ? 'kmz' : (tipo === 'kmz' && /pdf|image/i.test(`${b.mime} ${nombreArch}`) ? 'plano' : tipo);
+    const a = { id: crypto.randomBytes(8).toString('hex'), tipo: tipoFinal, nombre: nombreArch, mime: txt(b.mime, 100), tamano: buf.length, fecha: ahora(), origen: 'equipo', autor };
     fs.mkdirSync(path.join(ARCHIVOS, campo.id), { recursive: true });
     fs.writeFileSync(path.join(ARCHIVOS, campo.id, a.id), buf);
     campo.archivos = [...(campo.archivos || []), a];
@@ -996,10 +998,57 @@ router.post('/campos/:id/archivo', async (req, res) => {
     auditar(db, autor, `Subió el archivo ${a.nombre}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Subió ${a.nombre}${g ? ` (plano del predio: ${g.anillos.length} ${g.anillos.length === 1 ? 'polígono' : 'polígonos'}, ${g.areaHa.toLocaleString('es-CL')} ha)` : ''}` }];
     campo.actualizado = ahora();
-    return campo;
+    return { campo, archivo: a };
   });
   if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
-  res.json({ campo: r, avisoGeo });
+  res.json({ campo: r.campo, archivo: r.archivo, avisoGeo });
+});
+
+// Plano en PDF o imagen: el navegador lo convierte en páginas JPG que van como hojas aparte en la ficha
+function borrarVistas(campo, a) { (a.vistas || []).forEach((_, i) => { try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, `${a.id}-v${i}`)); } catch (e) {} }); }
+router.post('/campos/:id/archivos/:fid/vistas', async (req, res) => {
+  const imgs = (Array.isArray((req.body || {}).imagenes) ? req.body.imagenes : []).slice(0, 6)
+    .map((x) => ({ buf: Buffer.from(String((x && x.base64) || '').replace(/^data:[^,]*,/, ''), 'base64'), w: Math.round(Number(x && x.w) || 0), h: Math.round(Number(x && x.h) || 0) }))
+    .filter((x) => x.buf.length > 200 && x.buf.length < 12 * 1024 * 1024 && x.buf[0] === 0xff && x.buf[1] === 0xd8 && x.w > 0 && x.h > 0);
+  if (!imgs.length) return res.status(400).json({ error: 'No se pudo preparar el plano para la ficha.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    const a = (campo.archivos || []).find((x) => x.id === req.params.fid); if (!a) return null;
+    borrarVistas(campo, a);
+    fs.mkdirSync(path.join(ARCHIVOS, campo.id), { recursive: true });
+    imgs.forEach((x, i) => fs.writeFileSync(path.join(ARCHIVOS, campo.id, `${a.id}-v${i}`), x.buf));
+    a.vistas = imgs.map((x) => ({ w: x.w, h: x.h }));
+    if (a.tipo !== 'plano') a.tipo = 'plano';
+    if (a.enFicha === undefined) a.enFicha = true;
+    campo.checklist = { ...(campo.checklist || {}), plano: true };
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Dejó el plano ${a.nombre} en la ficha (${imgs.length} ${imgs.length === 1 ? 'página' : 'páginas'})` }];
+    campo.actualizado = ahora();
+    return campo;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el archivo.' });
+});
+router.get('/campos/:id/archivos/:fid/vista/:n', (req, res) => {
+  const campo = leer().campos.find((x) => x.id === req.params.id);
+  const a = campo && (campo.archivos || []).find((x) => x.id === req.params.fid);
+  const n = Number(req.params.n);
+  if (!a || !Number.isInteger(n) || n < 0 || n >= (a.vistas || []).length) return res.status(404).json({ error: 'Página del plano no encontrada.' });
+  const ruta = path.join(ARCHIVOS, campo.id, `${a.id}-v${n}`);
+  if (!fs.existsSync(ruta)) return res.status(404).json({ error: 'La página del plano ya no está en el servidor.' });
+  res.set('Content-Type', 'image/jpeg');
+  res.set('Cache-Control', 'private, max-age=3600');
+  fs.createReadStream(ruta).pipe(res);
+});
+router.put('/campos/:id/archivos/:fid', async (req, res) => {
+  const autor = usuarioDe(req), enFicha = !!(req.body || {}).enFicha;
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    const a = (campo.archivos || []).find((x) => x.id === req.params.fid); if (!a) return null;
+    a.enFicha = enFicha;
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: enFicha ? `Agregó el plano ${a.nombre} a la ficha` : `Sacó el plano ${a.nombre} de la ficha` }];
+    return campo;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el archivo.' });
 });
 
 router.delete('/campos/:id/archivos/:fid', async (req, res) => {
@@ -1011,6 +1060,7 @@ router.delete('/campos/:id/archivos/:fid', async (req, res) => {
     auditar(db, autor, `Eliminó el archivo ${a.nombre}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
     campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
     try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
+    borrarVistas(campo, a);
     if (campo.geo && campo.geo.fuente === 'kmz' && campo.geo.archivo === a.nombre) delete campo.geo;
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eliminó el archivo ${a.nombre}` }];
     return campo;
@@ -1590,6 +1640,7 @@ function ejecutarEliminacion(db, sol, autor) {
     const a = (campo.archivos || []).find((x) => x.id === r.id); if (!a) return false;
     campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
     try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
+    borrarVistas(campo, a);
     if (campo.geo && campo.geo.fuente === 'kmz' && campo.geo.archivo === a.nombre) delete campo.geo;
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eliminó el archivo ${a.nombre} (pedido por ${sol.solicitadoPor})` }];
     auditar(db, autor, `Eliminó el archivo ${a.nombre}, pedido por ${sol.solicitadoPor}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
@@ -2092,6 +2143,7 @@ router.delete('/publico/:token/archivo/:fid', async (req, res) => {
     if (!a) return { error: 'Archivo no encontrado.' };
     campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
     try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
+    borrarVistas(campo, a);
     return { ok: true };
   });
   if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
