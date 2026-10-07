@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.4';
+const VERSION = 'crm-v6.5';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -51,6 +51,7 @@ function normalizarCampo(c) {
   if (['Publicado', 'Activo'].includes(c.etapaAntesDeRetiro)) c.etapaAntesDeRetiro = etapaOferta(c.operacion);
   if (c.etapa === 'En arriendo') c.operacion = 'arriendo';
   else if (c.etapa === 'En venta' && c.operacion === 'arriendo') c.operacion = 'venta';
+  if (!c.linkWeb && c.web && /^https?:\/\/(www\.)?farmbrokers\.cl\/propiedad\//i.test(c.web.url || '')) c.linkWeb = c.web.url;
   if (c.web && c.web.titulo) c.web.titulo = limpiarTitulo(c.web.titulo);
   if (c.nombre) c.nombre = limpiarTitulo(c.nombre);
   if (!VISIBILIDADES.includes(c.visibilidad)) c.visibilidad = tieneLinkWeb(c) ? 'publica' : eraPublicado ? 'reservada' : 'interna';
@@ -2239,7 +2240,7 @@ async function geocodificar(q) {
   } catch (e) { /* sin conexión al geocodificador */ }
   return null;
 }
-const linkFB = (c) => [c.linkWeb, c.linkPortal].find((u) => esFarmBrokers(String(u || '').trim()));
+const linkFB = (c) => [c.linkWeb, c.linkPortal, c.web && c.web.url].find((u) => esFarmBrokers(String(u || '').trim()));
 
 router.post('/campos/:id/web', async (req, res) => {
   const campo = leer().campos.find((x) => x.id === req.params.id);
@@ -2381,7 +2382,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
       return leer().sync;
     }
     // 1) Confirmar retiros consultando cada página (404 = borrada)
-    const candidatos = enlazados.filter((c) => ['Mandato firmado', 'En venta', 'En arriendo', 'En negociación', 'Documentación', 'Arrendado', 'Suspendido'].includes(c.etapa)
+    const candidatos = enlazados.filter((c) => c.visibilidad !== 'reservada' && ['Mandato firmado', 'En venta', 'En arriendo', 'En negociación', 'Documentación', 'Arrendado', 'Suspendido'].includes(c.etapa)
       && !slugsCampo(c).some((sl) => sitio.publicadas.has(sl)));
     const borrados = new Set();
     for (const c of candidatos.slice(0, 40)) {
@@ -2411,10 +2412,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
       const nota = (c, t) => { c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: t }]; c.actualizado = ahora(); };
       for (const c of db.campos) {
         const sls = slugsCampo(c); if (!sls.length) continue;
-        if (borrados.has(c.id) && c.visibilidad === 'reservada') {
-          nota(c, 'La publicación se sacó de farmbrokers.cl. El campo sigue activo como reservado.');
-          c.linkWeb = ''; c.checklist = { ...(c.checklist || {}), publicacion: false }; continue;
-        }
+        if (c.visibilidad === 'reservada') continue; // los reservados (a menudo con contraseña en la web) no se tocan
         if (borrados.has(c.id)) {
           nota(c, `Etapa: ${c.etapa} → Retirado de la web (la publicación ya no existe en farmbrokers.cl)`);
           c.etapaAntesDeRetiro = c.etapa; c.etapa = 'Retirado de la web'; cambios.retirados.push(c.nombre); continue;
