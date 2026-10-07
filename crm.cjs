@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.8';
+const VERSION = 'crm-v6.9';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -61,6 +61,8 @@ function normalizarCampo(c) {
   else if (c.etapa === 'En venta' && c.operacion === 'arriendo') c.operacion = 'venta';
   if (!c.linkWeb && c.web && /^https?:\/\/(www\.)?farmbrokers\.cl\/propiedad\//i.test(c.web.url || '')) c.linkWeb = c.web.url;
   if (c.web && c.web.titulo) c.web.titulo = limpiarTitulo(c.web.titulo);
+  if (c.web && !c.web.valores) c.web.valores = valoresWeb(c.web);
+  if (c.precioTexto && !c.precioUF && !c.precioCLP) { const pr = parsePrecio(c.precioTexto); c.precioUF = pr.precioUF; c.precioCLP = pr.precioCLP; }
   if (c.nombre) c.nombre = limpiarTitulo(c.nombre);
   for (const a of c.archivos || []) if (a.tipo === 'kmz' && !/\.(kmz|kml)$/i.test(a.nombre || '') && /pdf|image/i.test(`${a.mime} ${a.nombre}`)) a.tipo = 'plano';
   if (!VISIBILIDADES.includes(c.visibilidad)) c.visibilidad = tieneLinkWeb(c) ? 'publica' : eraPublicado ? 'reservada' : 'interna';
@@ -180,6 +182,7 @@ function parsePrecio(v) {
   const limpio = m[0].replace(/[.,](?=\d{3}(\D|$))/g, '').replace(',', '.');
   const n = parseFloat(limpio); if (isNaN(n)) return r;
   if (/\bu[ i]?f\b|\buif\b/.test(s)) r.precioUF = n;
+  else if (/\d\s*(mm|millones)\b/.test(s) && n < 1e6) r.precioCLP = Math.round(n * 1e6); // "$4.700 MM" = 4.700 millones
   else if (n >= 1e6) r.precioCLP = n;
   return r;
 }
@@ -2240,7 +2243,7 @@ function buscarCoordenadas(html) {
 const limpiarTitulo = (t) => String(t || '').replace(/^\s*(Protegido|Privado|Protected|Private)\s*:\s*/i, '').trim();
 // Una página con contraseña no muestra fotos ni descripción: se conserva lo que ya se tenía
 function fusionarWeb(prev, w) {
-  if (!prev) return w;
+  if (!prev) return { ...w, valores: valoresWeb(w) };
   const descTexto = (x) => ((x && x.descripcion) || []).join('').replace(/[•\s]/g, '').length;
   const out = { ...w };
   if (!(w.fotos || []).length && (prev.fotos || []).length) out.fotos = prev.fotos;
@@ -2250,8 +2253,28 @@ function fusionarWeb(prev, w) {
   for (const [k, v] of Object.entries(w.detalle || {})) if (v) d[k] = v;
   out.detalle = d;
   if (!out.comision && prev.comision) out.comision = prev.comision;
+  out.valores = valoresWeb(out);
   return out;
 }
+// Datos de la publicación en el mismo formato que los guarda el CRM (para comparar y copiar)
+function valoresWeb(w) {
+  const d = (w && w.detalle) || {}, v = {};
+  const sinDato = (x) => typeof x === 'string' && /^0+([.,]0+)?\s*(has?|l\/s|lts?)?$/i.test(x.trim()); // la web muestra "0 Has" cuando no hay dato
+  const ha = sinDato(d.superficie) ? null : parseHa(d.superficie); if (ha) v.hectareas = ha;
+  const pr = parsePrecio(d.precio || ''); if (pr.precioTexto) v.precio = pr;
+  if (d.agua && !sinDato(d.agua)) v.agua = txt(d.agua, 200);
+  if (d.plantaciones && !sinDato(d.plantaciones)) v.plantaciones = txt(d.plantaciones, 300);
+  if (w && w.comuna) v.sector = txt(w.comuna, 120);
+  const reg = regionDeNombre(w && w.region); if (reg) v.region = reg;
+  if (d.id) v.codigo = txt(d.id, 40);
+  if (d.tipo) v.tipo = tipoNorm(d.tipo);
+  if (d.estado) { const e = norm(d.estado); const op = /arriend/.test(e) && /venta/.test(e) ? 'ambas' : /arriend/.test(e) ? 'arriendo' : /venta/.test(e) ? 'venta' : ''; if (op) v.operacion = op; }
+  return v;
+}
+const claveValor = (k, v) => (k === 'hectareas' ? (Number(v) ? String(Math.round(Number(v) * 10) / 10) : '')
+  : k === 'precio' ? (v && v.precioUF ? `uf${Math.round(v.precioUF)}` : v && v.precioCLP ? `clp${Math.round(v.precioCLP)}` : norm((v && v.precioTexto) || ''))
+  : norm(v == null ? '' : String(v)));
+const valorCRM = (c, k) => (k === 'precio' ? { precioTexto: c.precioTexto, precioUF: c.precioUF, precioCLP: c.precioCLP } : c[k]);
 function analizarPropiedad(html, url) {
   const meta = (p) => { const m = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${p}["'][^>]+content=["']([^"']*)["']`, 'i')) || html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${p}["']`, 'i')); return m ? entidades(m[1]).trim() : ''; };
   const lineasV = aLineas(html); // con viñetas, solo para la descripción
@@ -2446,27 +2469,22 @@ async function listarSitio() {
   return { publicadas: enVenta, vendidos, fuente };
 }
 
-// Copia al campo los datos publicados en la web (la web manda en estos datos)
+// Copia al campo los datos publicados en la web. La web manda, salvo que el dato se haya cambiado en el CRM:
+// en ese caso se respeta el del CRM y la ficha del campo lo marca como "no coincide con la web".
+const ETQ_WEB = { hectareas: 'Superficie', precio: 'Precio', agua: 'Agua', plantaciones: 'Plantaciones', sector: 'Comuna', region: 'Región', codigo: 'ID', tipo: 'Tipo', operacion: 'Operación' };
 function aplicarWeb(c, w) {
-  const d = w.detalle || {}, cambios = [];
-  const set = (k, v, etq, fmt = (x) => x) => {
-    if (v === '' || v == null || (typeof v === 'number' && isNaN(v))) return;
-    if (typeof v === 'string' && /^0+([.,]0+)?\s*(has?|l\/s|lts?)?$/i.test(v.trim())) return; // la web muestra "0 Has" cuando no hay dato
-    const antes = c[k];
-    if (norm(String(antes == null ? '' : antes)) === norm(String(v))) return;
-    cambios.push(antes === '' || antes == null ? `${etq}: ${fmt(v)}` : `${etq}: ${fmt(antes)} → ${fmt(v)}`);
-    c[k] = v;
-  };
-  set('hectareas', parseHa(d.superficie), 'Superficie', (x) => `${String(x).replace('.', ',')} ha`);
-  set('agua', txt(d.agua, 200), 'Agua');
-  set('plantaciones', txt(d.plantaciones, 300), 'Plantaciones');
-  const pr = parsePrecio(d.precio || '');
-  if (pr.precioTexto) { set('precioTexto', pr.precioTexto, 'Precio'); c.precioUF = pr.precioUF; c.precioCLP = pr.precioCLP; }
-  set('sector', txt(w.comuna, 120), 'Comuna');
-  set('region', regionDeNombre(w.region), 'Región');
-  set('codigo', txt(d.id, 40), 'ID');
-  if (d.tipo) set('tipo', tipoNorm(d.tipo), 'Tipo');
-  if (d.estado) { const e = norm(d.estado); const op = /arriend/.test(e) && /venta/.test(e) ? 'ambas' : /arriend/.test(e) ? 'arriendo' : /venta/.test(e) ? 'venta' : ''; if (op) { set('operacion', op, 'Operación'); if (['En venta', 'En arriendo'].includes(c.etapa)) c.etapa = etapaOferta(op); } }
+  const nuevos = valoresWeb(w), viejos = c.web ? (c.web.valores || valoresWeb(c.web)) : null, cambios = [];
+  const mostrar = (k, v) => (k === 'hectareas' ? `${String(v).replace('.', ',')} ha` : k === 'precio' ? (v.precioTexto || (v.precioUF ? `UF ${miles(v.precioUF)}` : v.precioCLP ? `$${miles(v.precioCLP)}` : '')) : v);
+  for (const k of Object.keys(ETQ_WEB)) {
+    if (!(k in nuevos)) continue;
+    const actual = valorCRM(c, k), ka = claveValor(k, actual), kn = claveValor(k, nuevos[k]);
+    if (ka === kn) continue;
+    if (ka && viejos && ka !== claveValor(k, viejos[k])) continue; // cambiado en el CRM: se respeta
+    cambios.push(ka ? `${ETQ_WEB[k]}: ${mostrar(k, actual)} → ${mostrar(k, nuevos[k])}` : `${ETQ_WEB[k]}: ${mostrar(k, nuevos[k])}`);
+    if (k === 'precio') { c.precioTexto = nuevos.precio.precioTexto; c.precioUF = nuevos.precio.precioUF; c.precioCLP = nuevos.precio.precioCLP; }
+    else c[k] = nuevos[k];
+    if (k === 'operacion' && ['En venta', 'En arriendo'].includes(c.etapa)) c.etapa = etapaOferta(c.operacion);
+  }
   c.web = fusionarWeb(c.web, w);
   c.checklist = { ...(c.checklist || {}), publicacion: true, fotos: !!((c.checklist || {}).fotos || w.fotos.length) };
   return cambios;
@@ -2814,5 +2832,5 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { aplicarWeb, valoresWeb, setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 module.exports = router;
