@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.5';
+const VERSION = 'crm-v6.6';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -26,6 +26,14 @@ const PERFILES_BASE = [
 ];
 let perfilesActuales = PERFILES_BASE;
 const perfilesDe = (db) => (Array.isArray(db.perfiles) ? db.perfiles : PERFILES_BASE);
+// Corredores: lista que el equipo crea y borra desde el CRM. Si aún no existe, parte con los nombres ya usados en campos y clientes.
+const corredoresDe = (db) => {
+  if (Array.isArray(db.corredores)) return db.corredores;
+  const vistos = new Map();
+  for (const col of ['campos', 'clientes']) for (const x of db[col] || []) { const n = String(x.corredor || '').trim(); if (n && !vistos.has(n.toLowerCase())) vistos.set(n.toLowerCase(), n); }
+  return [...vistos.values()].sort((a, b) => a.localeCompare(b, 'es')).map((nombre) => ({ id: idCorredor(nombre), nombre }));
+};
+const idCorredor = (nombre) => String(nombre).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40) || 'c';
 const limpiarPerfiles = (v) => [...new Set((Array.isArray(v) ? v : []).map(String).filter((x) => /^[a-z0-9_-]{2,40}$/.test(x)))].slice(0, 10);
 const zlib = require('zlib');
 const https = require('https');
@@ -531,7 +539,7 @@ router.get('/', (req, res) => {
     modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     tareas: db.tareas || [], notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
@@ -1473,6 +1481,57 @@ router.delete('/perfiles/:id', async (req, res) => {
     return { perfiles: db.perfiles, quitados: n };
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el perfil.' });
+});
+
+// ───────────────────────── Corredores ─────────────────────────
+const usosCorredor = (db, nombre) => { const k = nombre.trim().toLowerCase(); let n = 0; for (const col of ['campos', 'clientes']) for (const x of db[col]) if (String(x.corredor || '').trim().toLowerCase() === k) n++; return n; };
+router.post('/corredores', async (req, res) => {
+  const nombre = txt((req.body || {}).nombre, 40).trim();
+  if (nombre.length < 2) return res.status(400).json({ error: 'Escribe el nombre del corredor.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.corredores = corredoresDe(db).slice();
+    if (db.corredores.some((c) => c.nombre.toLowerCase() === nombre.toLowerCase())) return { error: 'Ese corredor ya existe.' };
+    let idC = idCorredor(nombre), i = 2; while (db.corredores.some((c) => c.id === idC)) idC = `${idCorredor(nombre)}-${i++}`;
+    db.corredores.push({ id: idC, nombre });
+    db.corredores.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    registrar(db, autor, `Agregó el corredor "${nombre}"`, null);
+    return { corredores: db.corredores, id: idC };
+  });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+router.put('/corredores/:id', async (req, res) => {
+  const nombre = txt((req.body || {}).nombre, 40).trim();
+  if (nombre.length < 2) return res.status(400).json({ error: 'Escribe el nombre del corredor.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.corredores = corredoresDe(db).map((c) => ({ ...c }));
+    const c = db.corredores.find((x) => x.id === req.params.id); if (!c) return null;
+    if (db.corredores.some((x) => x.id !== c.id && x.nombre.toLowerCase() === nombre.toLowerCase())) return { error: 'Ya hay otro corredor con ese nombre.' };
+    const antes = c.nombre; c.nombre = nombre;
+    let n = 0;
+    if (antes !== nombre) for (const col of ['campos', 'clientes']) for (const x of db[col]) if (String(x.corredor || '').trim().toLowerCase() === antes.toLowerCase()) { x.corredor = nombre; n++; }
+    db.corredores.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+    if (antes !== nombre) registrar(db, autor, `Cambió el corredor "${antes}" por "${nombre}" (${n} ${n === 1 ? 'registro' : 'registros'})`, null);
+    return { corredores: db.corredores, cambiados: n };
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el corredor.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+router.delete('/corredores/:id', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.corredores = corredoresDe(db).slice();
+    const c = db.corredores.find((x) => x.id === req.params.id); if (!c) return null;
+    db.corredores = db.corredores.filter((x) => x.id !== c.id);
+    let n = 0;
+    for (const col of ['campos', 'clientes']) for (const x of db[col]) if (String(x.corredor || '').trim().toLowerCase() === c.nombre.toLowerCase()) { x.corredor = ''; n++; }
+    registrar(db, autor, `Eliminó el corredor "${c.nombre}" (estaba en ${n} ${n === 1 ? 'registro' : 'registros'})`, null);
+    return { corredores: db.corredores, quitados: n };
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el corredor.' });
 });
 
 // ───────────────────────── Próxima acción ⇄ tarea del responsable ─────────────────────────
