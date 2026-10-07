@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.3';
+const VERSION = 'crm-v6.4';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1755,33 +1755,38 @@ function wpLlamar(metodo, ruta, cuerpo, base = '/wp-json/farmbrokers/v1') {
 let wpLlamarImpl = wpLlamar;
 // Páginas con contraseña: las fotos y la descripción se piden a WordPress con la clave de aplicación
 async function completarProtegida(w) {
-  if (!w || !process.env.WP_USER || !process.env.WP_APP_PASSWORD) return w;
+  if (!w) return w;
+  const diag = w.diag = { protegida: !!w.protegida, fotosPagina: (w.fotos || []).length, pasos: [] };
+  if (!process.env.WP_USER || !process.env.WP_APP_PASSWORD) { diag.pasos.push('Sin conexión a WordPress (faltan WP_USER y WP_APP_PASSWORD)'); return w; }
   const sinTexto = ((w.descripcion || []).join('').replace(/[•\s]/g, '').length < 40);
   if (!w.protegida && !sinTexto && (w.fotos || []).length) return w;
-  const slug = slugDe(w.url); if (!slug) return w;
+  const slug = slugDe(w.url); if (!slug) { diag.pasos.push('Link sin slug'); return w; }
   const usarTexto = (html) => { const l = aLineas(String(html || '')).map((x) => x.trim()).filter((x) => x && !/protegido por contrase|password protected/i.test(x)); if (l.length && sinTexto) w.descripcion = l; };
   // 1) Código del CRM en WordPress (versión 1.3): descripción, portada y galería completa
   try {
     const c = await wpLlamarImpl('GET', `/contenido?slug=${encodeURIComponent(slug)}`);
     if (c && c.id) {
+      diag.pasos.push(`WordPress 1.3: ${(c.fotos || []).length} fotos`);
       usarTexto(c.descripcion);
       if ((c.fotos || []).length && (w.protegida || !(w.fotos || []).length)) w.fotos = c.fotos.slice(0, 40);
       if (c.titulo) w.titulo = limpiarTitulo(c.titulo);
       return w;
     }
-  } catch (e) { /* versión anterior del código: se usa la API estándar */ }
+  } catch (e) { diag.pasos.push(`WordPress 1.3: ${e.message}`); }
   // 2) API estándar de WordPress
   try {
     const lista = await wpLlamarImpl('GET', `/properties?slug=${encodeURIComponent(slug)}&context=edit&status=any&_fields=id,content,featured_media`, null, '/wp-json/wp/v2');
-    const p = Array.isArray(lista) && lista[0]; if (!p) return w;
+    const p = Array.isArray(lista) && lista[0];
+    if (!p) { diag.pasos.push('API de WordPress: no encontró la publicación'); return w; }
     usarTexto(p.content && (p.content.raw || p.content.rendered));
     if (!(w.fotos || []).length) {
       const medios = await wpLlamarImpl('GET', `/media?parent=${p.id}&per_page=60&media_type=image&_fields=id,source_url`, null, '/wp-json/wp/v2').catch(() => []);
       let fotos = (Array.isArray(medios) ? medios : []).sort((a, b) => (a.id === p.featured_media ? -1 : b.id === p.featured_media ? 1 : 0)).map((m) => m.source_url).filter(Boolean);
       if (!fotos.length && p.featured_media) { const m = await wpLlamarImpl('GET', `/media/${p.featured_media}?_fields=source_url`, null, '/wp-json/wp/v2').catch(() => null); if (m && m.source_url) fotos = [m.source_url]; }
+      diag.pasos.push(`API de WordPress: ${fotos.length} fotos`);
       if (fotos.length) w.fotos = fotos.slice(0, 40);
     }
-  } catch (e) { /* se conserva lo que ya se tenía */ }
+  } catch (e) { diag.pasos.push(`API de WordPress: ${e.message}`); }
   return w;
 }
 const TIPO_WEB = { agricola: 'Agrícolas', loteo: 'Campos con Subdivisión', forestal: 'Forestales', conservacion: 'Conservación', agroindustrial: 'Terrenos Agroindustriales', derechos_agua: 'Derechos de Agua', urbano: 'Terrenos Urbanos', energia: 'Agrícolas' };
@@ -2256,10 +2261,10 @@ router.post('/campos/:id/web', async (req, res) => {
     const c = db.campos.find((x) => x.id === req.params.id); if (!c) return null;
     c.web = fusionarWeb(c.web, web);
     if (!c.codigo && web.detalle.id) c.codigo = web.detalle.id;
-    registrar(db, autor, `Actualizó ${c.nombre} desde farmbrokers.cl (${web.fotos.length} fotos)`, { col: 'campos', id: c.id });
+    registrar(db, autor, `Actualizó ${c.nombre} desde farmbrokers.cl (${c.web.fotos.length} fotos)`, { col: 'campos', id: c.id });
     return c;
   });
-  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+  r ? res.json({ ...r, diagnostico: web.diag }) : res.status(404).json({ error: 'No se encontró el campo.' });
 });
 
 // ───────────────────────── Sincronización con farmbrokers.cl ─────────────────────────
