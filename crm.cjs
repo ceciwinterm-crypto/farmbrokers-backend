@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.9';
+const VERSION = 'crm-v7.0';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -2395,12 +2395,15 @@ router.post('/campos/:id/web', async (req, res) => {
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
     const c = db.campos.find((x) => x.id === req.params.id); if (!c) return null;
-    c.web = fusionarWeb(c.web, web);
-    if (!c.codigo && web.detalle.id) c.codigo = web.detalle.id;
-    registrar(db, autor, `Actualizó ${c.nombre} desde farmbrokers.cl (${c.web.fotos.length} fotos)`, { col: 'campos', id: c.id });
-    return c;
+    const cambios = aplicarWeb(c, web);
+    if (cambios.length) {
+      c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: `Actualizado desde farmbrokers.cl: ${cambios.join('; ')}` }];
+      c.actualizado = ahora();
+      registrar(db, autor, `Actualizó ${c.nombre} desde farmbrokers.cl: ${cambios.join('; ')}`, { col: 'campos', id: c.id });
+    }
+    return { c, cambios };
   });
-  r ? res.json({ ...r, diagnostico: web.diag }) : res.status(404).json({ error: 'No se encontró el campo.' });
+  r ? res.json({ ...r.c, cambiosWeb: r.cambios, diagnostico: web.diag }) : res.status(404).json({ error: 'No se encontró el campo.' });
 });
 
 // ───────────────────────── Sincronización con farmbrokers.cl ─────────────────────────
@@ -2469,17 +2472,15 @@ async function listarSitio() {
   return { publicadas: enVenta, vendidos, fuente };
 }
 
-// Copia al campo los datos publicados en la web. La web manda, salvo que el dato se haya cambiado en el CRM:
-// en ese caso se respeta el del CRM y la ficha del campo lo marca como "no coincide con la web".
+// Copia al campo los datos publicados en la web. La web manda: superficie, precio, agua, etc. son siempre los de farmbrokers.cl.
 const ETQ_WEB = { hectareas: 'Superficie', precio: 'Precio', agua: 'Agua', plantaciones: 'Plantaciones', sector: 'Comuna', region: 'Región', codigo: 'ID', tipo: 'Tipo', operacion: 'Operación' };
 function aplicarWeb(c, w) {
-  const nuevos = valoresWeb(w), viejos = c.web ? (c.web.valores || valoresWeb(c.web)) : null, cambios = [];
+  const nuevos = valoresWeb(w), cambios = [];
   const mostrar = (k, v) => (k === 'hectareas' ? `${String(v).replace('.', ',')} ha` : k === 'precio' ? (v.precioTexto || (v.precioUF ? `UF ${miles(v.precioUF)}` : v.precioCLP ? `$${miles(v.precioCLP)}` : '')) : v);
   for (const k of Object.keys(ETQ_WEB)) {
     if (!(k in nuevos)) continue;
     const actual = valorCRM(c, k), ka = claveValor(k, actual), kn = claveValor(k, nuevos[k]);
     if (ka === kn) continue;
-    if (ka && viejos && ka !== claveValor(k, viejos[k])) continue; // cambiado en el CRM: se respeta
     cambios.push(ka ? `${ETQ_WEB[k]}: ${mostrar(k, actual)} → ${mostrar(k, nuevos[k])}` : `${ETQ_WEB[k]}: ${mostrar(k, nuevos[k])}`);
     if (k === 'precio') { c.precioTexto = nuevos.precio.precioTexto; c.precioUF = nuevos.precio.precioUF; c.precioCLP = nuevos.precio.precioCLP; }
     else c[k] = nuevos[k];
@@ -2547,7 +2548,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
           nota(c, `Etapa: ${c.etapa} → Retirado de la web (la publicación ya no existe en farmbrokers.cl)`);
           c.etapaAntesDeRetiro = c.etapa; c.etapa = 'Retirado de la web'; cambios.retirados.push(c.nombre); continue;
         }
-        const w = sls.map((sl) => leidas.get(sl)).find(Boolean);
+        const w = sls.map((sl) => leidas.get(sl)).find(Boolean) || (c.web && c.web.valores && sls.some((sl) => sitio.publicadas.has(sl)) ? c.web : null); // sin cambios en la web: igual se corrige lo distinto
         if (w) {
           const cm = aplicarWeb(c, w);
           if (cm.length) { nota(c, `Actualizado desde farmbrokers.cl: ${cm.join('; ')}`); cambios.actualizados.push({ nombre: c.nombre, cambios: cm }); }
