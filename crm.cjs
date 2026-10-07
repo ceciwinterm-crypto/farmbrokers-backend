@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.1';
+const VERSION = 'crm-v6.2';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -51,6 +51,8 @@ function normalizarCampo(c) {
   if (['Publicado', 'Activo'].includes(c.etapaAntesDeRetiro)) c.etapaAntesDeRetiro = etapaOferta(c.operacion);
   if (c.etapa === 'En arriendo') c.operacion = 'arriendo';
   else if (c.etapa === 'En venta' && c.operacion === 'arriendo') c.operacion = 'venta';
+  if (c.web && c.web.titulo) c.web.titulo = limpiarTitulo(c.web.titulo);
+  if (c.nombre) c.nombre = limpiarTitulo(c.nombre);
   if (!VISIBILIDADES.includes(c.visibilidad)) c.visibilidad = tieneLinkWeb(c) ? 'publica' : eraPublicado ? 'reservada' : 'interna';
   return c;
 }
@@ -1723,12 +1725,12 @@ router.get('/reporte', (req, res) => {
 
 // ───────────────────────── Publicar en farmbrokers.cl (borradores de WordPress) ─────────────────────────
 const WP_URL = String(process.env.WP_URL || 'https://farmbrokers.cl').replace(/\/$/, '');
-function wpLlamar(metodo, ruta, cuerpo) {
+function wpLlamar(metodo, ruta, cuerpo, base = '/wp-json/farmbrokers/v1') {
   const usuario = process.env.WP_USER, clave = process.env.WP_APP_PASSWORD;
   if (!usuario || !clave) return Promise.reject(new Error('Faltan las variables WP_USER y WP_APP_PASSWORD en Railway.'));
   const auth = 'Basic ' + Buffer.from(`${usuario}:${clave}`).toString('base64');
   const datos = cuerpo ? Buffer.from(JSON.stringify(cuerpo)) : null;
-  const u = new URL(WP_URL + '/wp-json/farmbrokers/v1' + ruta);
+  const u = new URL(WP_URL + base + ruta);
   return new Promise((ok, mal) => {
     const req = https.request(u, { method: metodo, timeout: 90000, headers: { Authorization: auth, 'X-FB-Authorization': auth, 'User-Agent': 'FarmBrokersCRM/1.0', Accept: 'application/json',
       ...(datos ? { 'Content-Type': 'application/json', 'Content-Length': datos.length } : {}) } }, (res) => {
@@ -1751,6 +1753,26 @@ function wpLlamar(metodo, ruta, cuerpo) {
   });
 }
 let wpLlamarImpl = wpLlamar;
+// Páginas con contraseña: las fotos y la descripción se piden a WordPress con la clave de aplicación
+async function completarProtegida(w) {
+  if (!w || !w.protegida || !process.env.WP_USER || !process.env.WP_APP_PASSWORD) return w;
+  const slug = slugDe(w.url); if (!slug) return w;
+  try {
+    const lista = await wpLlamarImpl('GET', `/properties?slug=${encodeURIComponent(slug)}&context=edit&status=any&_fields=id,content,featured_media`, null, '/wp-json/wp/v2');
+    const p = Array.isArray(lista) && lista[0]; if (!p) return w;
+    const crudo = String((p.content && (p.content.raw || p.content.rendered)) || '');
+    if (crudo && ((w.descripcion || []).join('').replace(/[•\s]/g, '').length < 40)) {
+      const lineas = aLineas(crudo).map((l) => l.trim()).filter((l) => l && !/protegido por contrase|password protected/i.test(l));
+      if (lineas.length) w.descripcion = lineas;
+    }
+    if (!(w.fotos || []).length) {
+      const medios = await wpLlamarImpl('GET', `/media?parent=${p.id}&per_page=60&media_type=image&_fields=id,source_url`, null, '/wp-json/wp/v2').catch(() => []);
+      const fotos = (Array.isArray(medios) ? medios : []).sort((a, b) => (a.id === p.featured_media ? -1 : b.id === p.featured_media ? 1 : 0)).map((m) => m.source_url).filter(Boolean);
+      if (fotos.length) w.fotos = fotos.slice(0, 40);
+    }
+  } catch (e) { /* se conserva lo que ya se tenía */ }
+  return w;
+}
 const TIPO_WEB = { agricola: 'Agrícolas', loteo: 'Campos con Subdivisión', forestal: 'Forestales', conservacion: 'Conservación', agroindustrial: 'Terrenos Agroindustriales', derechos_agua: 'Derechos de Agua', urbano: 'Terrenos Urbanos', energia: 'Agrícolas' };
 const REGION_WEB = { XV: 'Región de Arica y Parinacota', I: 'Región de Tarapacá', II: 'Región de Antofagasta', III: 'Región de Atacama', IV: 'Región de Coquimbo', V: 'Región de Valparaíso', RM: 'Región Metropolitana',
   VI: "Región de O'Higgins", VII: 'Región del Maule', XVI: 'Región de Ñuble', VIII: 'Región del Biobío', IX: 'Región de la Araucanía', XIV: 'Región de los Ríos', X: 'Región de los Lagos', XI: 'Región de Aysén', XII: 'Región de Magallanes' };
@@ -2085,6 +2107,22 @@ function buscarCoordenadas(html) {
   for (const r of pruebas) { const m = html.match(r); if (m && coordOk(Number(m[1]), Number(m[2]))) return { lat: Number(m[1]), lng: Number(m[2]) }; }
   return null;
 }
+// WordPress antepone "Protegido:" o "Privado:" al título de las páginas con contraseña o privadas
+const limpiarTitulo = (t) => String(t || '').replace(/^\s*(Protegido|Privado|Protected|Private)\s*:\s*/i, '').trim();
+// Una página con contraseña no muestra fotos ni descripción: se conserva lo que ya se tenía
+function fusionarWeb(prev, w) {
+  if (!prev) return w;
+  const descTexto = (x) => ((x && x.descripcion) || []).join('').replace(/[•\s]/g, '').length;
+  const out = { ...w };
+  if (!(w.fotos || []).length && (prev.fotos || []).length) out.fotos = prev.fotos;
+  if (descTexto(w) < 40 && descTexto(prev) >= 40) out.descripcion = prev.descripcion;
+  if (!w.coordenadas && prev.coordenadas) { out.coordenadas = prev.coordenadas; out.fuenteUbicacion = prev.fuenteUbicacion; }
+  const d = { ...(prev.detalle || {}) };
+  for (const [k, v] of Object.entries(w.detalle || {})) if (v) d[k] = v;
+  out.detalle = d;
+  if (!out.comision && prev.comision) out.comision = prev.comision;
+  return out;
+}
 function analizarPropiedad(html, url) {
   const meta = (p) => { const m = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${p}["'][^>]+content=["']([^"']*)["']`, 'i')) || html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${p}["']`, 'i')); return m ? entidades(m[1]).trim() : ''; };
   const lineasV = aLineas(html); // con viñetas, solo para la descripción
@@ -2118,7 +2156,7 @@ function analizarPropiedad(html, url) {
   // Puede haber varios "Descripción" (por ejemplo, en el menú de pestañas): se usa el que tiene texto de verdad
   const limpiarP = (arr) => arr.filter((l) => !/^(Read More|Leer más|Ver más|Mostrar más)$/i.test(l))
     .filter((l) => !/<\/?[a-z][^>]*$|^<|class=["']|id=["']/i.test(l)).map((l) => l.replace(/<[^>]*>?/g, '').trim())
-    .filter((l) => l && !/^[•\s]*$/.test(l));
+    .filter((l) => l && !/^[•\s]*$/.test(l) && !/protegido por contrase|password protected|introduce (la|tu) contrase|enter (your|the) password/i.test(l));
   const texto = (arr) => arr.join(' ').replace(/[•\s]/g, '').length;
   let parrafos = [];
   for (let iD = 0; iD < lineas.length; iD++) {
@@ -2152,14 +2190,16 @@ function analizarPropiedad(html, url) {
   // Dirección
   const val = (etq) => { const i = idx(new RegExp(`^${etq}\\s*:`, 'i')); return i >= 0 ? lineas[i].replace(new RegExp(`^${etq}\\s*:\\s*`, 'i'), '') : ''; };
   const h1 = (html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1];
-  const titulo = (h1 ? entidades(h1.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim() : '') || meta('og:title');
+  const tituloCrudo = (h1 ? entidades(h1.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim() : '') || meta('og:title');
+  const protegida = /^\s*(Protegido|Privado|Protected|Private)\s*:/i.test(tituloCrudo) || /post-password-form/i.test(html);
+  const titulo = limpiarTitulo((h1 ? entidades(h1.replace(/<[^>]+>/g, ' ')).replace(/\s+/g, ' ').trim() : '') || meta('og:title'));
   let direccion = '';
   for (let i = 0; i < lineas.length - 1; i++) {
     if (lineas[i] === titulo && /Regi[oó]n|,/.test(lineas[i + 1]) && !/^(Venta|Arriendo|Vendido|Destacado|Share)/i.test(lineas[i + 1])) { direccion = lineas[i + 1]; break; }
   }
   const mapsQ = (html.match(/maps\.google\.[a-z.]+\/\?q=([^"'&\s]+)/i) || [])[1];
   return {
-    url, titulo, direccion, comuna: val('Comuna'), region: val('Región'), resumen: meta('og:description') || meta('description'),
+    url, titulo, protegida, direccion, comuna: val('Comuna'), region: val('Región'), resumen: meta('og:description') || meta('description'),
     fotos: fotos.slice(0, 24), descripcion, comision, detalle,
     coordenadas: buscarCoordenadas(html), direccionMapa: mapsQ ? decodeURIComponent(mapsQ.replace(/\+/g, ' ')) : '',
   };
@@ -2191,7 +2231,7 @@ router.post('/campos/:id/web', async (req, res) => {
   const url = linkFB(campo);
   if (!url) return res.status(400).json({ error: 'Este campo no tiene un link de farmbrokers.cl/propiedad/. Agrégalo en los datos del campo.' });
   let web;
-  try { web = analizarPropiedad(await traerPagina(url.trim()), url.trim()); }
+  try { web = await completarProtegida(analizarPropiedad(await traerPagina(url.trim()), url.trim())); }
   catch (e) { return res.status(502).json({ error: `No se pudo leer la publicación: ${e.message}` }); }
   let fuente = web.coordenadas ? 'publicacion' : '';
   if (!web.coordenadas) { web.coordenadas = await coordenadasREST(url); if (web.coordenadas) fuente = 'publicacion'; }
@@ -2203,7 +2243,7 @@ router.post('/campos/:id/web', async (req, res) => {
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
     const c = db.campos.find((x) => x.id === req.params.id); if (!c) return null;
-    c.web = web;
+    c.web = fusionarWeb(c.web, web);
     if (!c.codigo && web.detalle.id) c.codigo = web.detalle.id;
     registrar(db, autor, `Actualizó ${c.nombre} desde farmbrokers.cl (${web.fotos.length} fotos)`, { col: 'campos', id: c.id });
     return c;
@@ -2233,7 +2273,7 @@ async function listarSitio() {
       for (const p of lista) {
         const sl = String(p.slug || slugDe(p.link)).toLowerCase(); if (!sl) continue;
         const est = (p.property_status || []).map((id) => estados[id] || '').join(' ');
-        const titulo = entidades(String((p.title && p.title.rendered) || '')) || tituloDeSlug(sl);
+        const titulo = limpiarTitulo(entidades(String((p.title && p.title.rendered) || ''))) || tituloDeSlug(sl);
         if (/vend/i.test(est)) vendidos.add(sl);
         enVenta.set(sl, { slug: sl, wpId: p.id || 0, url: p.link || `https://farmbrokers.cl/propiedad/${sl}/`, titulo, lastmod: String(p.modified || '') });
       }
@@ -2298,7 +2338,7 @@ function aplicarWeb(c, w) {
   set('codigo', txt(d.id, 40), 'ID');
   if (d.tipo) set('tipo', tipoNorm(d.tipo), 'Tipo');
   if (d.estado) { const e = norm(d.estado); const op = /arriend/.test(e) && /venta/.test(e) ? 'ambas' : /arriend/.test(e) ? 'arriendo' : /venta/.test(e) ? 'venta' : ''; if (op) { set('operacion', op, 'Operación'); if (['En venta', 'En arriendo'].includes(c.etapa)) c.etapa = etapaOferta(op); } }
-  c.web = w;
+  c.web = fusionarWeb(c.web, w);
   c.checklist = { ...(c.checklist || {}), publicacion: true, fotos: !!((c.checklist || {}).fotos || w.fotos.length) };
   return cambios;
 }
@@ -2345,7 +2385,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
     }
     const leidas = new Map();
     for (const p of [...nuevas, ...cambiadas].slice(0, 250)) {
-      try { const w = analizarPropiedad(await traerPagina(p.url), p.url); w.lastmod = p.lastmod || ''; w.fecha = ahora(); w.fuenteUbicacion = w.coordenadas ? 'publicacion' : ''; leidas.set(p.slug, w); }
+      try { const w = await completarProtegida(analizarPropiedad(await traerPagina(p.url), p.url)); w.lastmod = p.lastmod || ''; w.fecha = ahora(); w.fuenteUbicacion = w.coordenadas ? 'publicacion' : ''; leidas.set(p.slug, w); }
       catch (e) { /* se reintenta en la próxima revisión */ }
       await pausa(120);
     }
@@ -2429,7 +2469,7 @@ router.post('/sync/agregar', async (req, res) => {
   if (!/^[a-z0-9%_-]+$/i.test(slug)) return res.status(400).json({ error: 'Publicación no válida.' });
   const url = `https://farmbrokers.cl/propiedad/${slug}/`;
   let web;
-  try { web = analizarPropiedad(await traerPagina(url), url); } catch (e) { return res.status(502).json({ error: `No se pudo leer la publicación: ${e.message}` }); }
+  try { web = await completarProtegida(analizarPropiedad(await traerPagina(url), url)); } catch (e) { return res.status(502).json({ error: `No se pudo leer la publicación: ${e.message}` }); }
   if (!web.coordenadas) web.coordenadas = await coordenadasREST(url);
   web.fuenteUbicacion = web.coordenadas ? 'publicacion' : ''; web.fecha = ahora();
   const autor = usuarioDe(req), d = web.detalle;
