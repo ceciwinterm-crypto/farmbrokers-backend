@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.0';
+const VERSION = 'crm-v7.1';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -2249,7 +2249,9 @@ function fusionarWeb(prev, w) {
   if (!(w.fotos || []).length && (prev.fotos || []).length) out.fotos = prev.fotos;
   if (descTexto(w) < 40 && descTexto(prev) >= 40) out.descripcion = prev.descripcion;
   if (!w.coordenadas && prev.coordenadas) { out.coordenadas = prev.coordenadas; out.fuenteUbicacion = prev.fuenteUbicacion; }
-  const d = { ...(prev.detalle || {}) };
+  // Una lectura completa reemplaza los datos anteriores; una página protegida (sin datos) conserva los que había
+  const completa = w.detalle && w.detalle.id && !w.protegida;
+  const d = completa ? {} : { ...(prev.detalle || {}) };
   for (const [k, v] of Object.entries(w.detalle || {})) if (v) d[k] = v;
   out.detalle = d;
   if (!out.comision && prev.comision) out.comision = prev.comision;
@@ -2275,6 +2277,7 @@ const claveValor = (k, v) => (k === 'hectareas' ? (Number(v) ? String(Math.round
   : k === 'precio' ? (v && v.precioUF ? `uf${Math.round(v.precioUF)}` : v && v.precioCLP ? `clp${Math.round(v.precioCLP)}` : norm((v && v.precioTexto) || ''))
   : norm(v == null ? '' : String(v)));
 const valorCRM = (c, k) => (k === 'precio' ? { precioTexto: c.precioTexto, precioUF: c.precioUF, precioCLP: c.precioCLP } : c[k]);
+const LECTOR_WEB = 2; // subir este número obliga a releer todas las publicaciones en la próxima revisión
 function analizarPropiedad(html, url) {
   const meta = (p) => { const m = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${p}["'][^>]+content=["']([^"']*)["']`, 'i')) || html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${p}["']`, 'i')); return m ? entidades(m[1]).trim() : ''; };
   const lineasV = aLineas(html); // con viñetas, solo para la descripción
@@ -2291,17 +2294,45 @@ function analizarPropiedad(html, url) {
     if (!vistas.has(completa)) { vistas.add(completa); fotos.push(completa); }
   }
   const og = meta('og:image'); if (og && !vistas.has(og)) fotos.unshift(og);
-  // Detalles (pares etiqueta-valor)
+  // Detalles (pares etiqueta-valor). Se leen en este orden y cada dato se toma de la primera fuente que lo tenga:
+  // 1) la sección "Detalles" del tema (lista <li><strong>Etiqueta</strong> <span>valor</span>)
+  // 2) el resumen de arriba ("Vista General": valor y debajo su título, por ejemplo "20 l/s" / "Agua")
+  // 3) las líneas de texto de la sección Detalles
   const detalle = {};
-  const iniD = idx(/^Detalles$/i); const desdeD = iniD >= 0 ? iniD : 0;
-  const claves = { 'ID de propiedad': 'id', Precio: 'precio', 'Tamaño de propiedad': 'superficie', 'Tipo de Propiedad': 'tipo', 'Estado de la propiedad': 'estado', Agua: 'agua', Plantaciones: 'plantaciones' };
-  for (let i = desdeD; i < Math.min(lineas.length, desdeD + 60); i++) {
-    for (const [etq, k] of Object.entries(claves)) {
-      if (detalle[k]) continue;
-      const m = lineas[i].match(new RegExp(`^${etq}\\s*:?\\s*(.*)$`, 'i'));
-      if (m) detalle[k] = m[1] || (lineas[i + 1] && !Object.keys(claves).some((c) => lineas[i + 1].startsWith(c)) ? lineas[i + 1] : '');
+  const claves = { 'ID de propiedad': 'id', Precio: 'precio', 'Tamaño de propiedad': 'superficie', 'Tamaño de área': 'superficie', 'Superficie': 'superficie', 'Tipo de Propiedad': 'tipo', 'Estado de la propiedad': 'estado', Agua: 'agua', 'Derechos de agua': 'agua', Plantaciones: 'plantaciones' };
+  const claveDe = (etq) => { const e = norm(String(etq || '').replace(/[:\s]+$/, '')); for (const [l, k] of Object.entries(claves)) if (norm(l) === e) return k; return ''; };
+  const textoDe = (h) => entidades(String(h || '').replace(/<[^>]*>/g, ' ')).replace(/\s+/g, ' ').trim();
+  const poner = (k, v) => { v = String(v || '').trim(); if (k && v && !detalle[k] && !/^0+([.,]0+)?\s*(has?|l\/s|lts?)?$/i.test(v)) detalle[k] = v; };
+  const iniWrap = html.search(/id=["']property-detail-wrap["']|class=["'][^"']*property-detail-wrap/i);
+  if (iniWrap >= 0) {
+    const resto = html.slice(iniWrap);
+    const finWrap = resto.slice(20).search(/property-(?:address|features|description|video|map|floor|walkscore|contact|schedule|review|nearby|similar)[\w-]*-wrap|<footer/i);
+    const bloque = finWrap >= 0 ? resto.slice(0, finWrap + 20) : resto.slice(0, 20000);
+    for (const li of bloque.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)) {
+      const m = li[1].match(/<strong[^>]*>([\s\S]*?)<\/strong>([\s\S]*)/i);
+      if (m) poner(claveDe(textoDe(m[1])), textoDe(m[2]));
     }
-    if (/^Información de contacto|^Anuncios Similares/i.test(lineas[i])) break;
+  }
+  const iniO = html.search(/property-overview-wrap|property-overview-data/i);
+  if (iniO >= 0) {
+    const bloqueO = html.slice(iniO, iniO + 15000).split(/property-(?:address|detail|description)[\w-]*-wrap/i)[0];
+    for (const ul of bloqueO.matchAll(/<ul[^>]*>([\s\S]*?)<\/ul>/gi)) {
+      const items = [...ul[1].matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)].map((x) => textoDe(x[1])).filter(Boolean);
+      if (items.length >= 2) poner(claveDe(items[items.length - 1]), items.slice(0, -1).join(' '));
+    }
+  }
+  // Texto: el "Detalles" de verdad es el que va seguido de "Actualizado en" o "ID de propiedad" (no el del menú)
+  let iniD = -1;
+  for (let i = 0; i < lineas.length; i++) if (/^Detalles$/i.test(lineas[i]) && lineas.slice(i + 1, i + 4).some((l) => /^Actualizado en/i.test(l))) { iniD = i; break; }
+  if (iniD < 0) for (let i = lineas.length - 1; i >= 0; i--) if (/^Detalles$/i.test(lineas[i])) { iniD = i; break; } // el último "Detalles" (el del menú va arriba)
+  if (iniD >= 0) {
+    for (let i = iniD; i < Math.min(lineas.length, iniD + 40); i++) {
+      if (i > iniD && /^(Información de contacto|Anuncios Similares|Dirección|Descripci[oó]n|Características|Video|Mapa)\b/i.test(lineas[i])) break;
+      for (const etq of Object.keys(claves)) {
+        const m = lineas[i].match(new RegExp(`^${etq}\\s*:?\\s*(.*)$`, 'i'));
+        if (m) { poner(claves[etq], m[1] || (lineas[i + 1] && !claveDe(lineas[i + 1]) ? lineas[i + 1] : '')); break; }
+      }
+    }
   }
   if (!detalle.id) { const m = lineas.join('\n').match(/ID de propiedad:?\s*([A-Z0-9]{5,})/i); if (m) detalle.id = m[1]; }
   // Descripción
@@ -2339,6 +2370,10 @@ function analizarPropiedad(html, url) {
     descripcion.push(l);
   }
   if (!comision) { const c = parrafos.join(' ').match(/Comisi[oó]n:?\s*([0-9.,]+\s*%[^.\n]*)/i); if (c) comision = c[1].trim(); }
+  // Si la publicación no trae agua o superficie en Detalles, se toman de la descripción ("Agua: 20 l/s", o el título "Agua:" y su línea siguiente)
+  const deDescripcion = (re) => { for (let i = 0; i < parrafos.length; i++) { const m = parrafos[i].replace(/^[-•\s]+/, '').match(re); if (!m) continue; const v = (m[1] || '').trim() || (parrafos[i + 1] || '').replace(/^[-•\s]+/, '').trim(); if (v && !/^[A-ZÁÉÍÓÚÑ][\wáéíóúñ ]{0,25}:$/.test(v)) return v.slice(0, 200); } return ''; };
+  if (!detalle.agua) poner('agua', deDescripcion(/^(?:Agua|Aguas|Derechos de agua)\s*:\s*(.*)$/i));
+  if (!detalle.superficie) poner('superficie', deDescripcion(/^Superficie(?: total)?\s*:\s*(.*)$/i));
   // Dirección
   const val = (etq) => { const i = idx(new RegExp(`^${etq}\\s*:`, 'i')); return i >= 0 ? lineas[i].replace(new RegExp(`^${etq}\\s*:\\s*`, 'i'), '') : ''; };
   const h1 = (html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1];
@@ -2351,7 +2386,7 @@ function analizarPropiedad(html, url) {
   }
   const mapsQ = (html.match(/maps\.google\.[a-z.]+\/\?q=([^"'&\s]+)/i) || [])[1];
   return {
-    url, titulo, protegida, direccion, comuna: val('Comuna'), region: val('Región'), resumen: meta('og:description') || meta('description'),
+    lector: LECTOR_WEB, url, titulo, protegida, direccion, comuna: val('Comuna'), region: val('Región'), resumen: meta('og:description') || meta('description'),
     fotos: fotos.slice(0, 24), descripcion, comision, detalle,
     coordenadas: buscarCoordenadas(html), direccionMapa: mapsQ ? decodeURIComponent(mapsQ.replace(/\+/g, ' ')) : '',
   };
@@ -2529,7 +2564,7 @@ async function sincronizarWeb(autor = 'Sincronización web') {
       const sl = slugsCampo(c).find((x) => sitio.publicadas.has(x)); if (!sl) continue;
       const p = sitio.publicadas.get(sl);
       const viejo = !c.web || !c.web.fecha || Date.now() - new Date(c.web.fecha).getTime() > 20 * 3600 * 1000;
-      if (!c.web || (p.lastmod ? p.lastmod !== c.web.lastmod : viejo)) cambiadas.push(p);
+      if (!c.web || c.web.lector !== LECTOR_WEB || (p.lastmod ? p.lastmod !== c.web.lastmod : viejo)) cambiadas.push(p);
     }
     const leidas = new Map();
     for (const p of [...nuevas, ...cambiadas].slice(0, 250)) {
