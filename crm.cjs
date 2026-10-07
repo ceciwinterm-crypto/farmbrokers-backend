@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v6.7';
+const VERSION = 'crm-v6.8';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1454,7 +1454,8 @@ router.post('/campos/:id/ficha-pdf', async (req, res) => {
     fs.writeFileSync(path.join(ARCHIVOS, campo.id, `ficha-${token}.pdf`), buf);
     const previas = campo.fichasPdf || [];
     for (const f of previas.slice(0, -4)) { try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, `ficha-${f.token}.pdf`)); } catch (e) {} } // guarda las 5 últimas
-    campo.fichasPdf = [...previas.slice(-4), { token, fecha: ahora(), autor, tamano: buf.length, vistas: 0 }];
+    const opciones = /^k[01]p[01]$/.test(String((req.body || {}).opciones || '')) ? req.body.opciones : 'k1p1';
+    campo.fichasPdf = [...previas.slice(-4), { token, fecha: ahora(), autor, tamano: buf.length, vistas: 0, opciones }];
     campo.fichaPdf = campo.fichasPdf[campo.fichasPdf.length - 1];
     return { token, fecha: campo.fichaPdf.fecha, link: FICHAS_URL ? `${FICHAS_URL}/f/${token}` : '' };
   });
