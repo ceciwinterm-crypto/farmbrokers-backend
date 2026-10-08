@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.2';
+const VERSION = 'crm-v7.3';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -255,7 +255,7 @@ function limpiarBusqueda(b, i) {
 }
 function limpiarContacto(c) {
   return { id: /^[a-z0-9-]{4,40}$/i.test(String((c && c.id) || '')) ? c.id : id(), nombre: txt(c && c.nombre, 120), cargo: txt(c && c.cargo, 80),
-    telefono: txt(c && c.telefono, 60), email: txt(c && c.email, 200), principal: !!(c && c.principal && c.principal !== 'false') };
+    rut: txt(c && c.rut, 20), telefono: txt(c && c.telefono, 60), email: txt(c && c.email, 200), principal: !!(c && c.principal && c.principal !== 'false') };
 }
 const busquedasDe = (cli) => (Array.isArray(cli.busquedas) && cli.busquedas.length ? cli.busquedas : [cli]);
 const CAMPOS_TASACION = ['titulo', 'cliente', 'telefono', 'email', 'campoId', 'rol', 'comuna', 'codigo', 'etapa', 'honorariosUF', 'responsable', 'proximaAccion', 'proximaFecha'];
@@ -292,7 +292,7 @@ function limpiar(col, b, previo = {}) {
     r.proximaFecha = fecha(o.proximaFecha);
     r.revisar = !!o.revisar && o.revisar !== 'false';
     r.clase = ['persona', 'empresa'].includes(o.clase) ? o.clase : RE_EMPRESA.test(r.nombre) ? 'empresa' : 'persona';
-    r.rut = r.clase === 'empresa' ? txt(o.rut, 20) : '';
+    r.rut = txt(o.rut, 20);
     // Contactos: si no vienen, se arma el primero con los datos de contacto que tenía el cliente
     let contactos = (Array.isArray(o.contactos) ? o.contactos : []).map(limpiarContacto).filter((c) => c.nombre || c.telefono || c.email).slice(0, 30);
     if (!Array.isArray(o.contactos) && (r.contactoNombre || r.telefono || r.email)) {
@@ -582,7 +582,7 @@ const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ?
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/')) return next();
+  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/')) return next();
   const clave = process.env.CRM_KEY;
   if (!clave) return res.status(500).json({ error: 'Falta la variable CRM_KEY en Railway.' });
   if (req.get('x-crm-key') !== clave) return res.status(401).json({ error: 'Clave del equipo incorrecta.' });
@@ -600,7 +600,7 @@ router.get('/', (req, res) => {
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
     cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
-    tareas: db.tareas || [], notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
+    tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
     esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {} });
 });
@@ -702,6 +702,117 @@ router.post('/campos/:id/envio', async (req, res) => {
     return campo;
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
+
+// ───────────────────────── Orden de visita ─────────────────────────
+// El cliente la firma en línea desde un link (o se descarga en PDF para firmarla a mano)
+const MESES_LARGOS = ['enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio', 'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre'];
+const fechaLargaISO = (iso) => { const d = new Date(`${String(iso || '').slice(0, 10)}T12:00:00`); return isNaN(d) ? '' : `${d.getDate()} de ${MESES_LARGOS[d.getMonth()]} de ${d.getFullYear()}`; };
+function textoOrden(o) {
+  const com = o.datos.comision || '2 % + IVA';
+  return [
+    `El Cliente certifica y declara haber solicitado a Farm Brokers Chile SpA, oficina de corretaje de propiedades, rol único tributario N° 77.089.307-0, orden para visitar la propiedad descrita anteriormente, y deja expresa constancia de que ésta es la primera oficina en ofrecer esta propiedad. Por lo tanto, se compromete a encargar a Farm Brokers Chile SpA la realización de cualquier gestión ante el propietario para adquirirla o arrendarla, comprometiéndose a pagar una comisión correspondiente a ${com} del valor total del contrato respectivo de compraventa y/o arriendo, en caso de efectuarse el negocio.`,
+    'Las partes se obligan, para sí y para los colaboradores que designen, a mantener la más estricta confidencialidad respecto de toda conversación, información y documentación referente al proceso de compra y/o arriendo de la propiedad, quedando estrictamente prohibida su divulgación a cualquier tercero, así como la utilización de tal información o conocimiento en cualquier otra actividad, ya sea en beneficio propio o de terceros.',
+    'En caso de que el suscrito transmita a terceros cualquier información de la propiedad sin consentimiento previo y por escrito de Farm Brokers Chile SpA; en caso de tratar directamente con los propietarios, haciendo el negocio por su cuenta directa o indirectamente; o en caso de que la propiedad sea adquirida por personas relacionadas familiar o laboralmente con el suscrito, aunque la orden de venta de la propiedad haya vencido, sea ésta exclusiva o no exclusiva, el suscrito estará obligado a pagar íntegramente la comisión correspondiente a Farm Brokers Chile SpA.',
+    'Esta orden es personal e intransferible y, para todos los efectos legales, las partes fijan su domicilio en la ciudad de Santiago.',
+  ];
+}
+const hashOrden = (o) => crypto.createHash('sha256').update(JSON.stringify({ d: o.datos, f: o.fecha, t: textoOrden(o) })).digest('hex');
+const CAMPOS_ORDEN = ['clienteNombre', 'clienteRut', 'empresa', 'empresaRut', 'email', 'telefono', 'propiedad', 'ubicacion', 'tipo', 'superficie', 'codigo', 'enlace', 'comision'];
+function datosOrdenDe(db, campo, cli, ct) {
+  const w = (campo && campo.web) || {}, d = w.detalle || {};
+  const empresa = cli && cli.clase === 'empresa';
+  const regionTxt = campo && campo.region ? `${campo.region} Región` : '';
+  return {
+    clienteNombre: (empresa ? ct && ct.nombre : (ct && ct.nombre) || (cli && cli.nombre)) || '',
+    clienteRut: (empresa ? ct && ct.rut : (ct && ct.rut) || (cli && cli.rut)) || '',
+    empresa: empresa ? cli.nombre : '', empresaRut: empresa ? cli.rut || '' : '',
+    email: (ct && ct.email) || '', telefono: (ct && ct.telefono) || '',
+    propiedad: campo ? limpiarTitulo(campo.nombre) : '',
+    ubicacion: campo ? [campo.sector || w.comuna, regionTxt].filter(Boolean).join(', ') : '',
+    tipo: campo ? (todosLosTipos()[campo.tipo] || campo.tipo || '') : '',
+    superficie: campo && campo.hectareas ? `${String(campo.hectareas).replace('.', ',')} ha` : d.superficie || '',
+    codigo: (campo && (d.id || campo.codigo)) || '',
+    enlace: (campo && (campo.linkWeb || w.url)) || '',
+    comision: (w.comision && /\d/.test(w.comision) ? w.comision : '') || '2 % + IVA',
+  };
+}
+const limpiarDatosOrden = (d, base) => Object.fromEntries(CAMPOS_ORDEN.map((k) => [k, txt(d && d[k] != null ? d[k] : base[k], k === 'enlace' ? 300 : 200)]));
+router.post('/ordenes', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === b.campoId); if (!campo) return { error: 'Elige el campo.' };
+    const cli = db.clientes.find((x) => x.id === b.clienteId); if (!cli) return { error: 'Elige el cliente.' };
+    const ct = (cli.contactos || []).find((x) => x.id === b.contactoId) || (cli.contactos || []).find((x) => x.principal) || null;
+    const o = { id: id(), token: crypto.randomBytes(16).toString('hex'), fecha: /^\d{4}-\d{2}-\d{2}$/.test(b.fecha || '') ? b.fecha : new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' }),
+      creado: ahora(), autor, campoId: campo.id, clienteId: cli.id, contactoId: ct ? ct.id : '', estado: 'pendiente' };
+    o.datos = limpiarDatosOrden(b.datos, datosOrdenDe(db, campo, cli, ct));
+    db.ordenes = [...(db.ordenes || []), o];
+    const quien = o.datos.clienteNombre || cli.nombre;
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Preparó una orden de visita para ${quien}${o.datos.empresa ? ` (${o.datos.empresa})` : ''}` }];
+    cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Se preparó la orden de visita de ${campo.nombre}${ct && ct.nombre ? ` para ${ct.nombre}` : ''}` }];
+    registrar(db, autor, `Preparó la orden de visita de ${campo.nombre} para ${quien}`, { col: 'campos', id: campo.id });
+    return o;
+  });
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
+});
+router.put('/ordenes/:id', async (req, res) => {
+  const b = req.body || {};
+  const r = await modificar((db) => {
+    const o = (db.ordenes || []).find((x) => x.id === req.params.id); if (!o) return null;
+    if (o.estado === 'firmada') return { error: 'La orden ya está firmada: no se puede cambiar. Crea una nueva si hace falta.' };
+    o.datos = limpiarDatosOrden(b.datos, o.datos);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(b.fecha || '')) o.fecha = b.fecha;
+    return o;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró la orden.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+router.post('/ordenes/:id/anular', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const o = (db.ordenes || []).find((x) => x.id === req.params.id); if (!o) return null;
+    o.estado = 'anulada'; o.anulada = { fecha: ahora(), autor };
+    const campo = db.campos.find((x) => x.id === o.campoId);
+    if (campo) campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Anuló la orden de visita de ${o.datos.clienteNombre || o.datos.empresa}` }];
+    return o;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró la orden.' });
+});
+const publicoOrden = (o) => ({ fecha: o.fecha, fechaTexto: fechaLargaISO(o.fecha), datos: o.datos, texto: textoOrden(o), hash: hashOrden(o), estado: o.estado,
+  firma: o.firma ? { nombre: o.firma.nombre, rut: o.firma.rut, fecha: o.firma.fecha, codigo: o.firma.hash.slice(0, 12).toUpperCase() } : null });
+router.get('/publico-orden/:token', (req, res) => {
+  const o = (leer().ordenes || []).find((x) => x.token === req.params.token);
+  if (!o) return res.status(404).json({ error: 'Esta orden de visita no existe.' });
+  if (o.estado === 'anulada') return res.status(410).json({ error: 'Esta orden de visita fue anulada por Farm Brokers.' });
+  res.json(publicoOrden(o));
+});
+router.post('/publico-orden/:token/firmar', async (req, res) => {
+  const b = req.body || {};
+  const r = await modificar((db) => {
+    const o = (db.ordenes || []).find((x) => x.token === req.params.token); if (!o) return null;
+    if (o.estado === 'anulada') return { error: 'Esta orden de visita fue anulada.' };
+    if (o.firma) return publicoOrden(o);
+    const h = hashOrden(o);
+    if (b.hash !== h) return { error: 'La orden cambió mientras la leías. Recarga la página y vuelve a revisarla.' };
+    if (b.acepto !== true) return { error: 'Debes marcar que aceptas la orden de visita.' };
+    const nombre = txt(b.nombre, 160), rut = txt(b.rut, 20), email = txt(b.email, 160);
+    if (nombre.length < 3) return { error: 'Escribe tu nombre completo.' };
+    if (!rutValido(rut)) return { error: 'El RUT no es válido.' };
+    o.firma = { nombre, rut: rutFormato(rut), email, fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash: h, texto: textoOrden(o) };
+    o.estado = 'firmada';
+    const quien = `${nombre} (cliente)`, campo = db.campos.find((x) => x.id === o.campoId), cli = db.clientes.find((x) => x.id === o.clienteId);
+    if (campo) campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: quien, texto: `Firmó la orden de visita (RUT ${o.firma.rut}, código ${h.slice(0, 12).toUpperCase()})` }];
+    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor: quien, texto: `Firmó la orden de visita de ${campo ? campo.nombre : o.datos.propiedad}` }];
+    registrar(db, quien, `Firmó la orden de visita de ${o.datos.propiedad}`, { col: 'campos', id: o.campoId });
+    notificar(db, o.autor, `${nombre} firmó la orden de visita de ${o.datos.propiedad}`, { col: 'campos', id: o.campoId }, quien);
+    return publicoOrden(o);
+  });
+  if (!r) return res.status(404).json({ error: 'Esta orden de visita no existe.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
 });
 
 // Mensaje libre a un cliente (queda en su historial)
