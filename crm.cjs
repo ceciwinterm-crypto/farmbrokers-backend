@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.0';
+const VERSION = 'crm-v8.1';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -585,7 +585,7 @@ const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ?
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/')) return next();
+  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/') || req.path.startsWith('/publico-brochure/')) return next();
   const clave = process.env.CRM_KEY;
   if (!clave) return res.status(500).json({ error: 'Falta la variable CRM_KEY en Railway.' });
   if (req.get('x-crm-key') !== clave) return res.status(401).json({ error: 'Clave del equipo incorrecta.' });
@@ -1900,9 +1900,88 @@ async function servirFicha(req, res) {
   fs.createReadStream(ruta).pipe(res);
 }
 router.get('/publico-ficha/:token', servirFicha);
+
+// ───────────────────────── Brochure de varios campos para un cliente ─────────────────────────
+// Resumen corto de cada campo y su zona (con IA), que se guarda en el campo y se puede corregir a mano
+const CAMPOS_BROCHURE = ['titular', 'campo', 'zona'];
+function textoBrochure(t) {
+  const sacar = (k) => { const m = t.match(new RegExp(`${k}\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*(?:TITULAR|CAMPO|ZONA)\\s*:|$)`, 'i')); return m ? m[1].replace(/\*\*/g, '').replace(/\s+/g, ' ').trim() : ''; };
+  return { titular: sacar('TITULAR').replace(/^["“]|["”]$/g, '').slice(0, 110), campo: sacar('CAMPO').slice(0, 700), zona: sacar('ZONA').slice(0, 600) };
+}
+router.post('/campos/:id/brochure', async (req, res) => {
+  const db = leer(), campo = db.campos.find((x) => x.id === req.params.id);
+  if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
+  const prev = campo.brochure, b = req.body || {};
+  if (prev && !b.forzar && (prev.editado || new Date(prev.fecha) >= new Date(campo.actualizado || 0))) return res.json(prev);
+  const { filas, web } = antecedentesCampo(campo);
+  if (filas.length < 3 && !web) return res.status(400).json({ error: `${campo.nombre} tiene muy pocos datos para el resumen. Escríbelo a mano o completa el campo.` });
+  const busca = txt(b.busca, 400);
+  const prompt = `Eres el redactor de Farm Brokers Chile, corredora de campos agrícolas. Prepara el texto de UNA página de un brochure elegante que reúne varios campos para un cliente comprador.
+
+Devuelve exactamente tres bloques, en este formato y sin nada más:
+TITULAR: una frase corta y atractiva (máximo 10 palabras) con lo más valioso del campo. Sin el nombre del campo, sin signos de exclamación.
+CAMPO: entre 45 y 75 palabras con lo importante del campo: superficie, agua, plantaciones o aptitud, infraestructura y acceso, solo lo que esté en los antecedentes. Convierte los datos en beneficios, en un párrafo corrido.
+ZONA: entre 35 y 60 palabras sobre la zona donde está (comuna y región): su carácter agrícola, clima general, paisaje y conectividad con ciudades cercanas. Usa conocimiento general y conocido de esa comuna; no inventes cifras, distancias ni servicios específicos que no estén en los antecedentes.
+
+Reglas: español de Chile, tono cálido y profesional, sin exagerar. No incluyas precio, comisión, propietarios, RUT, rol ni contactos. Sin listas ni títulos dentro de los bloques.
+${busca ? `\nEl cliente busca: ${busca}. Si el campo tiene algo que calce con eso, destácalo.\n` : ''}
+Antecedentes del campo:
+${filas.map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 900)}`).join('\n')}
+${web ? `\nDescripción publicada:\n${web.slice(0, 3000)}` : ''}`;
+  try {
+    const r = textoBrochure(await llamarClaude(prompt));
+    if (!r.campo) throw new Error('la respuesta llegó incompleta.');
+    const out = await modificar((d2) => { const c = d2.campos.find((x) => x.id === campo.id); if (!c) return null; c.brochure = { ...r, fecha: ahora(), editado: false }; return c.brochure; });
+    res.json(out);
+  } catch (e) { res.status(502).json({ error: `No se pudo redactar el resumen de ${campo.nombre}: ${e.message}` }); }
+});
+router.put('/campos/:id/brochure', async (req, res) => {
+  const b = req.body || {};
+  const r = await modificar((db) => {
+    const c = db.campos.find((x) => x.id === req.params.id); if (!c) return null;
+    c.brochure = { titular: txt(b.titular, 110), campo: txt(b.campo, 900), zona: txt(b.zona, 800), fecha: ahora(), editado: true };
+    return c.brochure;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
+// El PDF del brochure queda con un link para enviarlo
+router.post('/brochures', async (req, res) => {
+  const b = req.body || {};
+  const buf = Buffer.from(String(b.base64 || '').replace(/^data:[^,]*,/, ''), 'base64');
+  if (buf.length < 500 || buf.slice(0, 4).toString() !== '%PDF') return res.status(400).json({ error: 'El PDF llegó vacío o dañado.' });
+  if (buf.length > 40 * 1024 * 1024) return res.status(413).json({ error: 'El brochure pesa demasiado. Prueba con menos campos.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const cli = db.clientes.find((x) => x.id === b.clienteId);
+    const ids = (Array.isArray(b.campoIds) ? b.campoIds : []).filter((x) => db.campos.some((c) => c.id === x)).slice(0, 12);
+    const token = crypto.randomBytes(16).toString('hex');
+    fs.mkdirSync(path.join(ARCHIVOS, 'brochures'), { recursive: true });
+    fs.writeFileSync(path.join(ARCHIVOS, 'brochures', `${token}.pdf`), buf);
+    db.brochures = [...(db.brochures || []), { token, clienteId: cli ? cli.id : '', campos: ids, fecha: ahora(), autor, tamano: buf.length, vistas: 0, titulo: txt(b.titulo, 160) }];
+    const nombres = ids.map((x) => db.campos.find((c) => c.id === x).nombre);
+    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Se le preparó un brochure con ${nombres.length} ${nombres.length === 1 ? 'campo' : 'campos'}: ${nombres.join(', ')}` }];
+    registrar(db, autor, `Preparó un brochure${cli ? ` para ${cli.nombre}` : ''} con ${nombres.length} campos`, cli ? { col: 'clientes', id: cli.id } : null);
+    return { token, link: FICHAS_URL ? `${FICHAS_URL}/b/${token}` : '', cliente: cli || null };
+  });
+  res.json(r);
+});
+async function servirBrochure(req, res) {
+  const t = String(req.params.token || '').replace(/\.pdf$/i, '');
+  if (!/^[a-f0-9]{32}$/.test(t)) return res.status(404).send('Brochure no encontrado.');
+  const r = await modificar((db) => { const x = (db.brochures || []).find((y) => y.token === t); if (x) { x.vistas = (x.vistas || 0) + 1; x.ultimaVista = ahora(); } return x || null; });
+  const ruta = path.join(ARCHIVOS, 'brochures', `${t}.pdf`);
+  if (!r || !fs.existsSync(ruta)) return res.status(404).send('Este brochure ya no está disponible. Pide uno nuevo a Farm Brokers: contacto@farmbrokers.cl');
+  const nombre = `${(r.titulo || 'Seleccion de campos').replace(/[^\wÁÉÍÓÚáéíóúÑñ .,-]/g, '')} - Farm Brokers.pdf`;
+  res.set('Content-Type', 'application/pdf');
+  res.set('Content-Disposition', `${req.query.descargar ? 'attachment' : 'inline'}; filename="${encodeURIComponent(nombre)}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
+  res.set('Cache-Control', 'private, max-age=300');
+  fs.createReadStream(ruta).pipe(res);
+}
+router.get('/publico-brochure/:token', servirBrochure);
 // Rutas cortas para la dirección propia: fichas.farmbrokers.cl/f/<código>
 const cortos = express.Router();
 cortos.get('/f/:token', servirFicha);
+cortos.get('/b/:token', servirBrochure);
 cortos.get('/', (req, res, next) => (/^fichas\./i.test(req.hostname || '') ? res.redirect(302, 'https://farmbrokers.cl') : next()));
 router.cortos = cortos;
 
