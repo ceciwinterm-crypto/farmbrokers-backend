@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.5';
+const VERSION = 'crm-v8.6';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -585,7 +585,7 @@ const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ?
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/') || req.path.startsWith('/publico-brochure/')) return next();
+  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/') || req.path.startsWith('/publico-brochure/') || req.path === '/publico-vende') return next();
   const clave = process.env.CRM_KEY;
   if (!clave) return res.status(500).json({ error: 'Falta la variable CRM_KEY en Railway.' });
   if (req.get('x-crm-key') !== clave) return res.status(401).json({ error: 'Clave del equipo incorrecta.' });
@@ -605,7 +605,7 @@ router.get('/', (req, res) => {
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
-    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {} });
+    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, ofertas: (db.ofertas || []).slice(-300) });
 });
 
 for (const col of ['campos', 'clientes', 'tasaciones']) {
@@ -1911,6 +1911,71 @@ async function servirFicha(req, res) {
   fs.createReadStream(ruta).pipe(res);
 }
 router.get('/publico-ficha/:token', servirFicha);
+
+
+// ───────────────────────── Formulario público "Vende o arrienda tu campo" ─────────────────────────
+const TIPOS_OFERTA = { agricola: 'Agrícola', forestal: 'Forestal', loteo: 'Parcela o loteo', conservacion: 'Conservación o agrado', otro: 'Otro' };
+const intentosOferta = new Map();
+router.post('/publico-vende', async (req, res) => {
+  const b = req.body || {}, ip = ipDe(req);
+  if (txt(b.sitio, 100)) return res.json({ ok: true }); // trampa para robots
+  const ahoraMs = Date.now(), previos = (intentosOferta.get(ip) || []).filter((t) => ahoraMs - t < 3600e3);
+  if (previos.length >= 6) return res.status(429).json({ error: 'Recibimos varios formularios seguidos. Escríbenos a contacto@farmbrokers.cl.' });
+  const o = {
+    id: id(), fecha: ahora(), estado: 'nueva', ip,
+    nombre: txt(b.nombre, 120), telefono: txt(b.telefono, 40), email: txt(b.email, 160),
+    operacion: b.operacion === 'arriendo' ? 'arriendo' : 'venta', tipo: TIPOS_OFERTA[b.tipo] ? b.tipo : 'agricola',
+    region: REGIONES.includes(b.region) ? b.region : '', comuna: txt(b.comuna, 80), rol: txt(b.rol, 200),
+    hectareas: num(b.hectareas), agua: txt(b.agua, 400), plantaciones: txt(b.plantaciones, 400), construcciones: txt(b.construcciones, 400),
+    precio: txt(b.precio, 120), descripcion: txt(b.descripcion, 3000), notas: '', campoId: '',
+  };
+  if (o.nombre.length < 3) return res.status(400).json({ error: 'Escribe tu nombre.' });
+  if (!o.telefono && !/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(o.email)) return res.status(400).json({ error: 'Déjanos un teléfono o un email para contactarte.' });
+  if (!o.comuna && !o.rol) return res.status(400).json({ error: 'Indica al menos la comuna o el rol de la propiedad.' });
+  if (b.acepto !== true) return res.status(400).json({ error: 'Marca que aceptas que te contactemos.' });
+  intentosOferta.set(ip, [...previos, ahoraMs]);
+  await modificar((db) => {
+    db.ofertas = [...(db.ofertas || []), o].slice(-2000);
+    const quien = `${o.nombre} (formulario web)`;
+    const texto = `${o.nombre} ofreció un campo en ${o.operacion} desde la web: ${[o.comuna, REGION_TEXTO[o.region], o.hectareas ? `${o.hectareas} ha` : ''].filter(Boolean).join(', ')}`;
+    registrar(db, quien, texto, null);
+    const para = adminsDe(db).length ? adminsDe(db) : personasEquipo(db).map((x) => x.nombre).slice(0, 10);
+    for (const n of para) notificar(db, n, texto, { oferta: o.id }, quien);
+  });
+  res.json({ ok: true });
+});
+router.put('/ofertas/:id', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const o = (db.ofertas || []).find((x) => x.id === req.params.id); if (!o) return null;
+    if (['nueva', 'contactada', 'descartada', 'convertida'].includes(b.estado) && b.estado !== o.estado) { o.estado = b.estado; o.historial = [...(o.historial || []), { fecha: ahora(), autor, texto: `Estado: ${b.estado}` }]; }
+    if (typeof b.notas === 'string') o.notas = txt(b.notas, 2000);
+    return o;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el formulario.' });
+});
+router.post('/ofertas/:id/campo', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const o = (db.ofertas || []).find((x) => x.id === req.params.id); if (!o) return null;
+    if (o.campoId && db.campos.some((c) => c.id === o.campoId)) return { campo: db.campos.find((c) => c.id === o.campoId), oferta: o };
+    const tipo = o.tipo === 'otro' ? 'agricola' : o.tipo;
+    const d = limpiar('campos', {
+      nombre: `${TIPOS_OFERTA[o.tipo] === 'Otro' ? 'Campo' : TIPOS_OFERTA[o.tipo]} en ${o.comuna || REGION_TEXTO[o.region] || 'revisión'} (${o.nombre.split(' ')[0]})`,
+      tipo, etapa: 'Captación', operacion: o.operacion, region: o.region, sector: o.comuna, rol: o.rol, hectareas: o.hectareas || '',
+      agua: o.agua, plantaciones: o.plantaciones, infraestructura: o.construcciones, precioTexto: o.precio,
+      propietario: o.nombre, telefono: o.telefono, email: o.email, responsable: autor,
+      observaciones: [`Llegó por el formulario de farmbrokers.cl el ${o.fecha.slice(0, 10)}.`, o.descripcion].filter(Boolean).join('\n'),
+    });
+    const campo = { id: id(), ...d, historial: [{ fecha: ahora(), autor, texto: `Creado desde el formulario web de ${o.nombre}` }], envios: [], creado: ahora(), actualizado: ahora(), creadoPor: autor };
+    db.campos.push(campo);
+    o.estado = 'convertida'; o.campoId = campo.id;
+    o.historial = [...(o.historial || []), { fecha: ahora(), autor, texto: 'Se creó el campo en el CRM' }];
+    registrar(db, autor, `Creó el campo ${campo.nombre} desde el formulario web`, { col: 'campos', id: campo.id });
+    return { campo, oferta: o };
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el formulario.' });
+});
 
 // ───────────────────────── Brochure de varios campos para un cliente ─────────────────────────
 // Resumen corto de cada campo y su zona (con IA), que se guarda en el campo y se puede corregir a mano
