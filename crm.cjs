@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.1';
+const VERSION = 'crm-v8.2';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -2908,6 +2908,58 @@ async function geocodificar(q) {
 }
 const linkFB = (c) => [c.linkWeb, c.linkPortal, c.web && c.web.url].find((u) => esFarmBrokers(String(u || '').trim()));
 
+// Busca en farmbrokers.cl la publicación de un campo que no está enlazado (por su nombre, comuna y superficie)
+const PALABRAS_GENERICAS = new Set(['parcela', 'parcelas', 'fundo', 'campo', 'campos', 'hijuela', 'lote', 'lotes', 'sector', 'predio', 'hacienda', 'agricola', 'venta', 'vende', 'arriendo', 'con', 'del', 'los', 'las', 'sitio', 'terreno', 'propiedad', 'chacra', 'huerto', 'loteo', 'comuna', 'region', 'hectareas', 'has']);
+const palabrasDe = (t) => norm(t).replace(/[^a-z0-9ñ ]+/g, ' ').split(/\s+/).filter((x) => x.length >= 3 && !PALABRAS_GENERICAS.has(x) && !/^\d+$/.test(x));
+function puntajePublicacion(c, texto, ha) {
+  const nom = [...new Set(palabrasDe(c.nombre))], com = [...new Set(palabrasDe(c.sector))], tt = new Set(palabrasDe(texto));
+  const nomOk = nom.filter((x) => tt.has(x)).length;
+  if (!nomOk) return 0;
+  let p = (nomOk / nom.length) * 2 + (com.length && com.every((x) => tt.has(x)) ? 1 : 0);
+  if (ha && c.hectareas) { const r = ha / c.hectareas; p += r > 0.85 && r < 1.18 ? 1 : -1.5; }
+  return p;
+}
+let sitioCache = null;
+router.post('/campos/:id/buscar-web', async (req, res) => {
+  const db = leer(), campo = db.campos.find((x) => x.id === req.params.id);
+  if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
+  if (linkFB(campo)) return res.json({ estado: 'enlazado', campo });
+  // 1) Otro campo del CRM que ya tiene esa publicación (por ejemplo, creado por la sincronización)
+  const cod = norm(campo.codigo).toUpperCase();
+  const enCRM = db.campos.filter((x) => x.id !== campo.id && x.web && (x.web.fotos || []).length && linkFB(x)).map((x) => {
+    const d = x.web.detalle || {};
+    const p = cod.length >= 4 && norm(d.id || x.codigo).toUpperCase() === cod ? 6 : puntajePublicacion(campo, `${x.web.titulo || ''} ${slugDe(linkFB(x))} ${x.nombre} ${x.web.comuna || x.sector || ''}`, x.hectareas || parseHa(d.superficie));
+    return { x, p };
+  }).filter((r) => r.p >= 2).sort((a, b) => b.p - a.p);
+  if (enCRM.length && (enCRM.length === 1 || enCRM[0].p > enCRM[1].p)) {
+    const x = enCRM[0].x;
+    return res.json({ estado: 'otro', titulo: x.web.titulo || x.nombre, url: linkFB(x), fotos: x.web.fotos.slice(0, 6), campoId: x.id, nombre: x.nombre });
+  }
+  // 2) El listado de la web
+  try {
+    if (!sitioCache || Date.now() - sitioCache.t > 15 * 60 * 1000) sitioCache = { t: Date.now(), sitio: await listarSitio() };
+  } catch (e) { return res.json({ estado: 'no', motivo: 'No se pudo leer el listado de farmbrokers.cl.' }); }
+  const usados = new Set(db.campos.flatMap(slugsCampo));
+  const cands = [...sitioCache.sitio.publicadas.values()].filter((p) => !sitioCache.sitio.vendidos.has(p.slug))
+    .map((p) => ({ p, s: puntajePublicacion(campo, `${p.titulo || ''} ${p.slug}`, (((p.titulo || '').match(/(\d[\d.,]*)\s*(?:ha\b|hect)/i) || [])[1] ? parseHa((p.titulo || '').match(/(\d[\d.,]*)\s*(?:ha\b|hect)/i)[1]) : null)) })).filter((r) => r.s >= 2).sort((a, b) => b.s - a.s);
+  if (!cands.length || (cands.length > 1 && cands[0].s === cands[1].s)) return res.json({ estado: 'no', motivo: cands.length ? 'Hay varias publicaciones parecidas: enlázalo a mano.' : 'No se encontró su publicación.' });
+  const pub = cands[0].p;
+  let web;
+  try { web = await completarProtegida(analizarPropiedad(await traerPagina(pub.url), pub.url)); }
+  catch (e) { return res.json({ estado: 'no', motivo: `No se pudo leer la publicación: ${e.message}` }); }
+  if (usados.has(pub.slug)) return res.json({ estado: 'otro', titulo: web.titulo || pub.titulo, url: pub.url, fotos: (web.fotos || []).slice(0, 6) });
+  web.fecha = ahora(); web.fuenteUbicacion = web.coordenadas ? 'publicacion' : '';
+  const autor = usuarioDe(req);
+  const r = await modificar((d2) => {
+    const c = d2.campos.find((x) => x.id === campo.id); if (!c) return null;
+    c.linkWeb = pub.url; const cambios = aplicarWeb(c, web);
+    c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: `Enlazado a su publicación en farmbrokers.cl (${web.titulo || pub.titulo})${cambios.length ? `: ${cambios.join('; ')}` : ''}` }];
+    c.actualizado = ahora();
+    registrar(d2, autor, `Enlazó ${c.nombre} a su publicación en farmbrokers.cl`, { col: 'campos', id: c.id });
+    return c;
+  });
+  r ? res.json({ estado: 'enlazado', nuevo: true, campo: r, titulo: web.titulo || pub.titulo, url: pub.url }) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
 router.post('/campos/:id/web', async (req, res) => {
   const campo = leer().campos.find((x) => x.id === req.params.id);
   if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
@@ -3364,6 +3416,6 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { recalcularGeo, aplicarWeb, valoresWeb, setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { puntajePublicacion, recalcularGeo, aplicarWeb, valoresWeb, setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 router._correo = { enviarResumenes, correoResumen, colaCorreos };
 module.exports = router;
