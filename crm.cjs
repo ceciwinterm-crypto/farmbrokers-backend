@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.2';
+const VERSION = 'crm-v8.3';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1461,18 +1461,28 @@ async function llamarClaude(prompt) {
   if (!r.ok) throw new Error((j.error && j.error.message) || `El servicio de IA respondió ${r.status}.`);
   return (j.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n').trim();
 }
+// En lo que ve el cliente, el acceso va solo en términos generales (sin rutas, kilómetros ni entradas)
+function accesoGeneral(t) {
+  const x = norm(t);
+  if (!x.trim()) return '';
+  const pav = /pavimen|asfalt|carretera|autopista|doble via/.test(x), rip = /ripio|tierra|grava|maicillo|huella|consolidad/.test(x);
+  if (pav && rip) return 'Acceso por camino pavimentado y un tramo de ripio';
+  if (pav) return 'Acceso por camino pavimentado';
+  if (rip) return 'Acceso por camino de ripio';
+  return 'Con acceso vehicular';
+}
+const REGLA_ACCESO = 'No expliques cómo llegar al campo: nada de nombres de caminos o rutas, kilómetros, desvíos, cruces, portones, entradas, vecinos ni deslindes. El acceso se menciona solo en términos generales (por ejemplo, "acceso por camino pavimentado").';
 function antecedentesCampo(c) {
   const w = c.web || {}, d = w.detalle || {}, ti = c.tasacionInfo || {}, cap = c.captacion && c.captacion.datos;
   const filas = [
     ['Nombre', c.nombre], ['Tipo de propiedad', (todosLosTipos()[c.tipo] || c.tipo)], ['Comuna o sector', c.sector], ['Región', c.region],
     ['Superficie', d.superficie || (c.hectareas ? `${c.hectareas} ha` : '')], ['Superficie según plano', c.geo ? `${c.geo.areaHa} ha` : ''],
     ['Derechos de agua', d.agua || c.agua], ['Fuente del agua', c.fuenteAgua], ['Plantaciones', d.plantaciones || c.plantaciones], ['Aptitud', c.aptitud],
-    ['Infraestructura', c.infraestructura || (cap && cap.infraestructura)], ['Acceso', c.acceso || ti.acceso],
+    ['Infraestructura', c.infraestructura || (cap && cap.infraestructura)], ['Acceso', accesoGeneral(c.acceso || ti.acceso)],
     ['Distancia a Santiago', ti.distSantiago], ['Distancia a la comuna', ti.distComuna], ['Altitud', ti.altitud],
     ['Suelos (tasación)', ti.suelos], ['Clima (tasación)', ti.clima], ['Recursos hídricos (tasación)', ti.aguas], ['Escasez hídrica', ti.escasez],
     ['Construcciones (tasación)', ti.construcciones], ['Instalaciones (tasación)', ti.instalaciones], ['Usos de suelo (tasación)', ti.usos],
     ['Plantaciones (tasación)', ti.plantaciones], ['Conclusión de la tasación', ti.conclusion],
-    ['Deslindes y accesos (propietario)', cap ? cap.predios.map((p) => p.descripcion).filter(Boolean).join('; ') : ''],
     ['Loteo', cap ? cap.predios.filter((p) => p.tipo === 'loteo' && p.lotes).map((p) => `${p.lotes} lotes${p.m2Lote ? ` de ${p.m2Lote} m²` : ''}${p.planoSAG ? ', plano SAG aprobado' : ''}`).join('; ') : ''],
   ].filter(([, v]) => v && String(v).trim());
   const web = w.descripcion && w.descripcion.length ? w.descripcion.join('\n') : '';
@@ -1505,6 +1515,7 @@ Reglas que no se pueden romper:
 - Usa SOLO los antecedentes de abajo. Puedes destacar, ordenar y explicar el valor de un dato, pero no inventes cifras, distancias, cultivos, vistas, calidades, servicios ni ventajas que no estén escritos. Si un dato no está, no lo menciones ni lo supongas.
 - Español de Chile${comercial ? ', cálido, seguro y entusiasta, que transmita oportunidad sin sonar exagerado ni a aviso clasificado. Evita frases gastadas como "no te lo pierdas" o "única oportunidad". Como máximo un signo de exclamación en todo el texto.' : ', sobrio y profesional, sin signos de exclamación.'}
 - No incluyas precio, comisión, nombres de propietarios, RUT, rol SII ni datos de contacto.
+- ${REGLA_ACCESO}
 - Formato: ${comercial ? `de 3 a 5 párrafos corridos, separados por un salto de línea, SIN títulos, etiquetas ni listas. El primero abre con la oportunidad y presenta el campo (tipo, superficie, comuna, región y su atributo más atractivo). El segundo explica qué combina y para qué sirve o qué posibilidades ofrece. El tercero describe lo que tiene (construcciones, producción, plantaciones, agua, accesos) presentándolo como valor para el comprador. Puedes agregar uno o dos párrafos más solo si hay antecedentes importantes que no entraron. Si un antecedente es una limitación (por ejemplo, que no tiene derechos de agua), no lo destaques en el texto: queda en la ficha técnica.` : `un párrafo inicial de 2 o 3 oraciones; luego párrafos breves que empiecen con una etiqueta y dos puntos, en este orden y solo si hay datos: "Superficie:", "Suelos:", "Aguas:", "Plantaciones:", "Clima:", "Infraestructura:", "Acceso:"; y un párrafo "Potencial:" solo si los antecedentes mencionan aptitud o conclusión. Si hay una lista de elementos, escríbelos en líneas que empiecen con "- ".`}
 - Entre ${comercial ? '110 y 260' : '120 y 280'} palabras. Devuelve solo el texto, sin títulos ni comentarios.
 ${comercial ? `
@@ -1921,9 +1932,9 @@ router.post('/campos/:id/brochure', async (req, res) => {
 Devuelve exactamente tres bloques, en este formato y sin nada más:
 TITULAR: una frase corta y atractiva (máximo 10 palabras) con lo más valioso del campo. Sin el nombre del campo, sin signos de exclamación.
 CAMPO: entre 45 y 75 palabras con lo importante del campo: superficie, agua, plantaciones o aptitud, infraestructura y acceso, solo lo que esté en los antecedentes. Convierte los datos en beneficios, en un párrafo corrido.
-ZONA: entre 35 y 60 palabras sobre la zona donde está (comuna y región): su carácter agrícola, clima general, paisaje y conectividad con ciudades cercanas. Usa conocimiento general y conocido de esa comuna; no inventes cifras, distancias ni servicios específicos que no estén en los antecedentes.
+ZONA: entre 35 y 60 palabras sobre la zona donde está (comuna y región): su carácter agrícola, clima general, paisaje y cercanía general a ciudades. Usa conocimiento general y conocido de esa comuna; no inventes cifras, distancias ni servicios específicos que no estén en los antecedentes.
 
-Reglas: español de Chile, tono cálido y profesional, sin exagerar. No incluyas precio, comisión, propietarios, RUT, rol ni contactos. Sin listas ni títulos dentro de los bloques.
+Reglas: español de Chile, tono cálido y profesional, sin exagerar. No incluyas precio, comisión, propietarios, RUT, rol ni contactos. ${REGLA_ACCESO} Sin listas ni títulos dentro de los bloques.
 ${busca ? `\nEl cliente busca: ${busca}. Si el campo tiene algo que calce con eso, destácalo.\n` : ''}
 Antecedentes del campo:
 ${filas.map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 900)}`).join('\n')}
