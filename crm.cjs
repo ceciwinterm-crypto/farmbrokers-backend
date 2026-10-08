@@ -1914,7 +1914,7 @@ router.get('/publico-ficha/:token', servirFicha);
 
 
 // ───────────────────────── Formulario público "Vende o arrienda tu campo" ─────────────────────────
-const TIPOS_OFERTA = { agricola: 'Agrícola', forestal: 'Forestal', loteo: 'Parcela o loteo', conservacion: 'Conservación o agrado', otro: 'Otro' };
+const TIPOS_OFERTA = { agricola: 'Agrícola', loteo: 'Parcela', forestal: 'Forestal', conservacion: 'Turística', agroindustrial: 'Industrial', urbano: 'Habitacional', derechos_agua: 'Derechos de agua', otro: 'Otro' };
 const intentosOferta = new Map();
 router.post('/publico-vende', async (req, res) => {
   const b = req.body || {}, ip = ipDe(req);
