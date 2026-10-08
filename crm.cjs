@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.8';
+const VERSION = 'crm-v7.9';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1578,6 +1578,7 @@ router.post('/campos/:id/compartir', async (req, res) => {
       email: txt(b.email, 160) || (cli ? emailsCli(cli)[0] || '' : ''), telefono: txt(b.telefono, 40) || (cli ? cli.telefono : ''),
       creado: ahora(), creadoPor: autor, vence: new Date(Date.now() + dias * 864e5).toISOString(), descarga: b.descarga !== false, activo: true,
       aceptacion: null, descargas: [], vistas: 0, kmz: conKmz, planos: planosIds,
+      ficha: (campo.fichasPdf || []).some((f) => f.token === b.ficha) ? b.ficha : '', // ficha del campo que va junto al plano
     };
     if (!c.destinatario) return { error: 'Indica a quién le envías el plano.' };
     campo.compartidos = [...(campo.compartidos || []), c];
@@ -1612,6 +1613,12 @@ function buscarCompartido(db, token) {
 // Planos del loteo (PDF o imagen) que se pueden mostrar: los que ya tienen sus hojas preparadas
 const planosCampo = (campo) => (campo.archivos || []).filter((a) => a.tipo === 'plano' && (a.vistas || []).length);
 const planosDeLink = (campo, c) => planosCampo(campo).filter((a) => !Array.isArray(c.planos) || c.planos.includes(a.id)); // links antiguos: todos
+// Ficha que acompaña al link: la que se envió con él; si ya se reemplazó, la última sin plano ni KMZ
+function fichaDeLink(campo, c) {
+  const fs_ = campo.fichasPdf || [];
+  const f = (c.ficha && fs_.find((x) => x.token === c.ficha)) || [...fs_].reverse().find((x) => x.opciones === 'k0p0');
+  return f ? f.token : '';
+}
 function publicoPlano(db, campo, c) {
   const vencido = Date.now() > new Date(c.vence).getTime();
   const conKmz = c.kmz !== false && !!campo.geo, pls = planosDeLink(campo, c);
@@ -1625,6 +1632,7 @@ function publicoPlano(db, campo, c) {
     plano: c.aceptacion && disponible && conKmz ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro } : null,
     planos: c.aceptacion && disponible ? pls.map((a) => ({ id: a.id, nombre: a.nombre, vistas: a.vistas })) : [],
     incluye: { kmz: conKmz, planos: pls.length },
+    ficha: disponible ? fichaDeLink(campo, c) : '', fichasBase: FICHAS_URL,
   };
 }
 // Hojas y archivo original de los planos, solo para quien aceptó el acuerdo
@@ -1847,7 +1855,7 @@ async function servirFicha(req, res) {
   if (!fs.existsSync(ruta)) return res.status(404).send('Esta ficha ya no está disponible.');
   const nombre = `Ficha ${((r.campo.web && r.campo.web.titulo) || r.campo.nombre).replace(/[^\wÁÉÍÓÚáéíóúÑñ .,-]/g, '')} - Farm Brokers.pdf`;
   res.set('Content-Type', 'application/pdf');
-  res.set('Content-Disposition', `inline; filename="${encodeURIComponent(nombre)}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
+  res.set('Content-Disposition', `${req.query.descargar ? 'attachment' : 'inline'}; filename="${encodeURIComponent(nombre)}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
   res.set('Cache-Control', 'private, max-age=300');
   fs.createReadStream(ruta).pipe(res);
 }
