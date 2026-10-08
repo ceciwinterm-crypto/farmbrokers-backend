@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.7';
+const VERSION = 'crm-v7.8';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -767,32 +767,42 @@ async function procesarCorreos() {
     }
   } finally { procesandoCorreos = false; }
 }
-// Resumen de la mañana: tareas y acciones del día de cada persona
+// Resumen semanal (lunes 8:00): lo atrasado y lo que viene en los próximos 7 días de cada persona
 const hoySantiago = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+const sumarDias = (iso, n) => { const d = new Date(`${iso}T12:00:00`); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+const DIAS_SEMANA = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
 function resumenDe(db, nombre, hoy = hoySantiago()) {
-  const tareas = (db.tareas || []).filter((t) => t.asignadoA === nombre && t.estado !== 'hecha' && (!t.vence || t.vence <= hoy));
+  const fin = sumarDias(hoy, 6);
+  const items = [];
+  const tareas = (db.tareas || []).filter((t) => t.asignadoA === nombre && t.estado !== 'hecha');
   const ids = new Set(tareas.map((t) => t.id));
-  const acciones = [];
+  for (const t of tareas) if (!t.vence || t.vence <= fin) items.push({ fecha: t.vence || '', texto: t.titulo, detalle: t.ref && t.ref.nombre ? t.ref.nombre : '', tipo: 'Tarea' });
   for (const [col, etq] of [['campos', 'Campo'], ['clientes', 'Cliente'], ['tasaciones', 'Tasación']]) {
-    for (const x of db[col] || []) if (x.responsable === nombre && x.proximaAccion && x.proximaFecha && x.proximaFecha <= hoy && !ids.has(x.accionTareaId)) acciones.push({ etq, nombre: x.nombre || x.titulo, accion: x.proximaAccion, fecha: x.proximaFecha });
+    for (const x of db[col] || []) if (x.responsable === nombre && x.proximaAccion && x.proximaFecha && x.proximaFecha <= fin && !ids.has(x.accionTareaId)) items.push({ fecha: x.proximaFecha, texto: x.proximaAccion, detalle: `${etq} ${x.nombre || x.titulo}`, tipo: 'Acción' });
   }
+  items.sort((a, b) => (a.fecha || '9999').localeCompare(b.fecha || '9999'));
   const sinLeer = (db.notificaciones || []).filter((n) => n.para === nombre && !n.leida).length;
-  return { tareas, acciones, sinLeer };
+  return { items, sinLeer, fin };
 }
 function correoResumen(db, nombre, hoy = hoySantiago()) {
   const r = resumenDe(db, nombre, hoy);
-  if (!r.tareas.length && !r.acciones.length && !r.sinLeer) return null;
-  const venc = (f) => (f && f < hoy ? ' <span style="color:#B4452A;font-weight:bold">(atrasada)</span>' : '');
-  const li = (t) => `<li style="margin:0 0 7px;font-size:14px;line-height:1.45">${t}</li>`;
-  const partes = [];
-  if (r.tareas.length) partes.push(`<h2 style="font-size:14px;margin:14px 0 6px;color:#2D6A45">Tareas (${r.tareas.length})</h2><ul style="margin:0;padding-left:18px">${r.tareas.map((t) => li(`${escHtml(t.titulo)}${t.ref && t.ref.nombre ? ` <span style="color:#5E6E64">· ${escHtml(t.ref.nombre)}</span>` : ''}${venc(t.vence)}`)).join('')}</ul>`);
-  if (r.acciones.length) partes.push(`<h2 style="font-size:14px;margin:14px 0 6px;color:#2D6A45">Próximas acciones (${r.acciones.length})</h2><ul style="margin:0;padding-left:18px">${r.acciones.map((a) => li(`${escHtml(a.accion)} <span style="color:#5E6E64">· ${a.etq} ${escHtml(a.nombre)}</span>${venc(a.fecha)}`)).join('')}</ul>`);
-  if (r.sinLeer) partes.push(`<p style="margin:14px 0 0;font-size:14px">Tienes ${r.sinLeer} ${r.sinLeer === 1 ? 'aviso sin leer' : 'avisos sin leer'} en el CRM.</p>`);
-  const total = r.tareas.length + r.acciones.length;
-  const nom = String(nombre).split(' ')[0];
-  return { asunto: total ? `Tu día en el CRM: ${total} ${total === 1 ? 'pendiente' : 'pendientes'}` : 'Tienes avisos sin leer en el CRM',
-    html: plantillaCorreo(`Buenos días, ${nom}`, `<p style="margin:0;font-size:14px;color:#5E6E64">Esto es lo que tienes para hoy, ${escHtml(fechaLargaISO(hoy))}.</p>${partes.join('')}`, 'Resumen diario del CRM de Farm Brokers. Puedes desactivarlo en Equipo › Personas.'),
-    texto: [`Buenos días, ${nom}. Lo que tienes para hoy:`, ...r.tareas.map((t) => `- Tarea: ${t.titulo}`), ...r.acciones.map((a) => `- ${a.accion} (${a.etq} ${a.nombre})`), r.sinLeer ? `Avisos sin leer: ${r.sinLeer}` : '', CRM_URL].filter(Boolean).join('\n') };
+  if (!r.items.length && !r.sinLeer) return null;
+  const li = (x) => `<li style="margin:0 0 7px;font-size:14px;line-height:1.45">${escHtml(x.texto)}${x.detalle ? ` <span style="color:#5E6E64">· ${escHtml(x.detalle)}</span>` : ''}</li>`;
+  const grupo = (titulo, lista, color = '#2D6A45') => (lista.length ? `<h2 style="font-size:14px;margin:16px 0 6px;color:${color}">${titulo} (${lista.length})</h2><ul style="margin:0;padding-left:18px">${lista.map(li).join('')}</ul>` : '');
+  const atrasadas = r.items.filter((x) => x.fecha && x.fecha < hoy), sinFecha = r.items.filter((x) => !x.fecha);
+  const partes = [grupo('Atrasadas', atrasadas, '#B4452A')];
+  for (let i = 0; i < 7; i++) {
+    const dia = sumarDias(hoy, i), d = new Date(`${dia}T12:00:00`);
+    const nd = `${DIAS_SEMANA[d.getDay()]} ${d.getDate()}`;
+    partes.push(grupo(i === 0 ? `Hoy, ${nd}` : nd.charAt(0).toUpperCase() + nd.slice(1), r.items.filter((x) => x.fecha === dia)));
+  }
+  partes.push(grupo('Tareas sin fecha', sinFecha, '#5E6E64'));
+  if (r.sinLeer) partes.push(`<p style="margin:16px 0 0;font-size:14px">Tienes ${r.sinLeer} ${r.sinLeer === 1 ? 'aviso sin leer' : 'avisos sin leer'} en el CRM.</p>`);
+  const n = r.items.length, nom = String(nombre).split(' ')[0];
+  const lineas = r.items.map((x) => `- ${x.fecha ? (x.fecha < hoy ? 'ATRASADA ' : `${DIAS_SEMANA[new Date(`${x.fecha}T12:00:00`).getDay()]} `) : ''}${x.texto}${x.detalle ? ` (${x.detalle})` : ''}`);
+  return { asunto: n ? `Tu semana en el CRM: ${n} ${n === 1 ? 'pendiente' : 'pendientes'}${atrasadas.length ? `, ${atrasadas.length} ${atrasadas.length === 1 ? 'atrasada' : 'atrasadas'}` : ''}` : 'Tienes avisos sin leer en el CRM',
+    html: plantillaCorreo(`Buenos días, ${nom}`, `<p style="margin:0;font-size:14px;color:#5E6E64">Esto es lo que viene esta semana, del ${escHtml(fechaLargaISO(hoy))} al ${escHtml(fechaLargaISO(r.fin))}.</p>${partes.join('')}`, 'Resumen semanal del CRM de Farm Brokers, cada lunes. Puedes desactivarlo en Equipo › Personas.'),
+    texto: [`Buenos días, ${nom}. Lo que viene esta semana:`, ...lineas, r.sinLeer ? `Avisos sin leer: ${r.sinLeer}` : '', CRM_URL].filter(Boolean).join('\n') };
 }
 async function enviarResumenes(forzar = false) {
   const db = leer(), hoy = hoySantiago();
@@ -809,10 +819,10 @@ async function enviarResumenes(forzar = false) {
   return n;
 }
 if (!process.env.CRM_SYNC_OFF) {
-  // A partir de las 8:00 (hora de Chile), de lunes a sábado, una vez al día
+  // Los lunes, a partir de las 8:00 (hora de Chile), una vez
   setInterval(() => {
     const ahoraCL = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Santiago' }));
-    if (ahoraCL.getHours() >= 8 && ahoraCL.getDay() !== 0) enviarResumenes().catch(() => {});
+    if (ahoraCL.getDay() === 1 && ahoraCL.getHours() >= 8) enviarResumenes().catch(() => {});
   }, 10 * 60 * 1000).unref();
 }
 router.put('/equipo/avisos', async (req, res) => {
@@ -829,8 +839,8 @@ router.post('/correo/prueba', async (req, res) => {
   const email = correoDe(db, nombre);
   if (!email) return res.status(400).json({ error: `${nombre === autor ? 'No tienes' : `${nombre} no tiene`} correo registrado. Agrégalo en "Editar contacto".` });
   const tipo = (req.body || {}).tipo === 'resumen' ? 'resumen' : 'prueba';
-  const m = tipo === 'resumen' ? correoResumen(db, nombre) || { asunto: 'Tu día en el CRM: sin pendientes', html: plantillaCorreo(`Buenos días, ${nombre.split(' ')[0]}`, '<p style="margin:0;font-size:14px">Hoy no tienes tareas ni acciones pendientes. Así se verá tu resumen de cada mañana cuando tengas pendientes.</p>'), texto: 'Hoy no tienes pendientes.' }
-    : { asunto: 'Prueba de avisos del CRM', html: plantillaCorreo('¡Los avisos por correo funcionan!', `<p style="margin:0;font-size:15px;line-height:1.5">Hola ${escHtml(nombre.split(' ')[0])}, este es un correo de prueba del CRM de Farm Brokers. Desde ahora te llegarán aquí las tareas que te asignen, las firmas de clientes y el resumen de cada mañana.</p>`), texto: 'Correo de prueba del CRM de Farm Brokers.' };
+  const m = tipo === 'resumen' ? correoResumen(db, nombre) || { asunto: 'Tu semana en el CRM: sin pendientes', html: plantillaCorreo(`Buenos días, ${nombre.split(' ')[0]}`, '<p style="margin:0;font-size:14px">Esta semana no tienes tareas ni acciones pendientes. Así se verá tu resumen de cada lunes cuando tengas pendientes.</p>'), texto: 'Esta semana no tienes pendientes.' }
+    : { asunto: 'Prueba de avisos del CRM', html: plantillaCorreo('¡Los avisos por correo funcionan!', `<p style="margin:0;font-size:15px;line-height:1.5">Hola ${escHtml(nombre.split(' ')[0])}, este es un correo de prueba del CRM de Farm Brokers. Desde ahora te llegarán aquí las tareas que te asignen, las firmas de clientes y, cada lunes, el resumen de tu semana.</p>`), texto: 'Correo de prueba del CRM de Farm Brokers.' };
   try { await enviarCorreo({ para: email, ...m }); res.json({ ok: true, para: email }); }
   catch (e) { res.status(502).json({ error: `No se pudo enviar: ${e.message}` }); }
 });
