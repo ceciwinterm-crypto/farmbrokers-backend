@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.5';
+const VERSION = 'crm-v7.6';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -572,6 +572,7 @@ function notificar(db, para, texto, ref, de) {
   if (!para || para === de) return;
   db.notificaciones = db.notificaciones || [];
   db.notificaciones.push({ id: id(), para, texto, ref: ref || null, fecha: ahora(), leida: false, de: de || '' });
+  avisarPorCorreo(db, para, texto, de);
   if (db.notificaciones.length > 5000) db.notificaciones.splice(0, db.notificaciones.length - 5000);
 }
 const ADMIN_KEY = String(process.env.CRM_ADMIN_KEY || '');
@@ -600,7 +601,7 @@ router.get('/', (req, res) => {
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
     cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
-    tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
+    correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
     esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {} });
 });
@@ -702,6 +703,125 @@ router.post('/campos/:id/envio', async (req, res) => {
     return campo;
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
+
+// ───────────────────────── Avisos por correo al equipo (Resend) ─────────────────────────
+// Variables en Railway: RESEND_API_KEY (obligatoria), MAIL_FROM (ej. "Farm Brokers CRM <notificaciones@farmbrokers.cl>"), CRM_URL (opcional)
+const CRM_URL = process.env.CRM_URL || 'https://farmbrokers-frontend.vercel.app/#crm';
+const correoConfigurado = () => !!(process.env.RESEND_API_KEY || global.__correoMock);
+const remitenteCorreo = () => process.env.MAIL_FROM || 'Farm Brokers CRM <onboarding@resend.dev>';
+async function enviarCorreo({ para, asunto, html, texto }) {
+  if (global.__correoMock) return global.__correoMock({ para, asunto, html, texto });
+  if (!process.env.RESEND_API_KEY) throw new Error('Falta la variable RESEND_API_KEY en Railway.');
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST', headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: remitenteCorreo(), to: [para], subject: asunto, html, text: texto }),
+  });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.message || `El servicio de correo respondió ${r.status}`);
+  return j;
+}
+function plantillaCorreo(titulo, cuerpoHtml, pie) {
+  return `<!doctype html><html><body style="margin:0;background:#F3F6F2;font-family:Helvetica,Arial,sans-serif;color:#17261D">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3F6F2;padding:24px 12px"><tr><td align="center">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #DCE3DC">
+<tr><td style="background:#1F4D31;padding:16px 24px;color:#ffffff;font-size:15px;font-weight:bold;letter-spacing:.04em">FARM BROKERS CHILE <span style="font-weight:normal;opacity:.75">· CRM</span></td></tr>
+<tr><td style="padding:22px 24px 8px"><h1 style="margin:0 0 12px;font-size:19px;line-height:1.3;color:#1F4D31">${escHtml(titulo)}</h1>${cuerpoHtml}</td></tr>
+<tr><td style="padding:8px 24px 24px"><a href="${escHtml(CRM_URL)}" style="display:inline-block;background:#2D6A45;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:9px;font-weight:bold;font-size:14px">Abrir el CRM</a></td></tr>
+<tr><td style="padding:14px 24px;border-top:1px solid #E9EEE9;font-size:12px;color:#5E6E64">${pie || 'Recibes este aviso porque eres parte del equipo de Farm Brokers. Puedes elegir qué avisos recibir en el CRM, en Equipo › Personas.'}</td></tr>
+</table></td></tr></table></body></html>`;
+}
+const prefsCorreo = (db, nombre) => ({ inmediato: true, resumen: true, ...((((db.config || {}).avisosCorreo) || {})[nombre] || {}) });
+const correoDe = (db, nombre) => String(((((db.config || {}).contactos) || {})[nombre] || {}).email || '').split(/[,;\s]+/).find((x) => /@/.test(x)) || '';
+const colaCorreos = [];
+let procesandoCorreos = false;
+function avisarPorCorreo(db, para, texto, de) {
+  const email = correoDe(db, para);
+  if (!email || !correoConfigurado() || !prefsCorreo(db, para).inmediato) return;
+  colaCorreos.push({ nombre: para, para: email, asunto: texto.length > 90 ? `${texto.slice(0, 87)}…` : texto,
+    html: plantillaCorreo('Tienes un aviso en el CRM', `<p style="margin:0 0 6px;font-size:15px;line-height:1.5">${escHtml(texto)}</p>${de ? `<p style="margin:0;font-size:13px;color:#5E6E64">De: ${escHtml(de)}</p>` : ''}`),
+    texto: `${texto}\n\nAbre el CRM: ${CRM_URL}` });
+  setImmediate(procesarCorreos);
+}
+async function procesarCorreos() {
+  if (procesandoCorreos) return;
+  procesandoCorreos = true;
+  try {
+    while (colaCorreos.length) {
+      const m = colaCorreos.shift();
+      let error = '';
+      try { await enviarCorreo(m); } catch (e) { error = e.message; }
+      await modificar((db) => { db.correosLog = [...(db.correosLog || []), { fecha: ahora(), para: m.nombre, asunto: m.asunto, error }].slice(-200); }).catch(() => {});
+      await new Promise((r) => setTimeout(r, 600)); // el servicio acepta pocas solicitudes por segundo
+    }
+  } finally { procesandoCorreos = false; }
+}
+// Resumen de la mañana: tareas y acciones del día de cada persona
+const hoySantiago = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
+function resumenDe(db, nombre, hoy = hoySantiago()) {
+  const tareas = (db.tareas || []).filter((t) => t.asignadoA === nombre && t.estado !== 'hecha' && (!t.vence || t.vence <= hoy));
+  const ids = new Set(tareas.map((t) => t.id));
+  const acciones = [];
+  for (const [col, etq] of [['campos', 'Campo'], ['clientes', 'Cliente'], ['tasaciones', 'Tasación']]) {
+    for (const x of db[col] || []) if (x.responsable === nombre && x.proximaAccion && x.proximaFecha && x.proximaFecha <= hoy && !ids.has(x.accionTareaId)) acciones.push({ etq, nombre: x.nombre || x.titulo, accion: x.proximaAccion, fecha: x.proximaFecha });
+  }
+  const sinLeer = (db.notificaciones || []).filter((n) => n.para === nombre && !n.leida).length;
+  return { tareas, acciones, sinLeer };
+}
+function correoResumen(db, nombre, hoy = hoySantiago()) {
+  const r = resumenDe(db, nombre, hoy);
+  if (!r.tareas.length && !r.acciones.length && !r.sinLeer) return null;
+  const venc = (f) => (f && f < hoy ? ' <span style="color:#B4452A;font-weight:bold">(atrasada)</span>' : '');
+  const li = (t) => `<li style="margin:0 0 7px;font-size:14px;line-height:1.45">${t}</li>`;
+  const partes = [];
+  if (r.tareas.length) partes.push(`<h2 style="font-size:14px;margin:14px 0 6px;color:#2D6A45">Tareas (${r.tareas.length})</h2><ul style="margin:0;padding-left:18px">${r.tareas.map((t) => li(`${escHtml(t.titulo)}${t.ref && t.ref.nombre ? ` <span style="color:#5E6E64">· ${escHtml(t.ref.nombre)}</span>` : ''}${venc(t.vence)}`)).join('')}</ul>`);
+  if (r.acciones.length) partes.push(`<h2 style="font-size:14px;margin:14px 0 6px;color:#2D6A45">Próximas acciones (${r.acciones.length})</h2><ul style="margin:0;padding-left:18px">${r.acciones.map((a) => li(`${escHtml(a.accion)} <span style="color:#5E6E64">· ${a.etq} ${escHtml(a.nombre)}</span>${venc(a.fecha)}`)).join('')}</ul>`);
+  if (r.sinLeer) partes.push(`<p style="margin:14px 0 0;font-size:14px">Tienes ${r.sinLeer} ${r.sinLeer === 1 ? 'aviso sin leer' : 'avisos sin leer'} en el CRM.</p>`);
+  const total = r.tareas.length + r.acciones.length;
+  const nom = String(nombre).split(' ')[0];
+  return { asunto: total ? `Tu día en el CRM: ${total} ${total === 1 ? 'pendiente' : 'pendientes'}` : 'Tienes avisos sin leer en el CRM',
+    html: plantillaCorreo(`Buenos días, ${nom}`, `<p style="margin:0;font-size:14px;color:#5E6E64">Esto es lo que tienes para hoy, ${escHtml(fechaLargaISO(hoy))}.</p>${partes.join('')}`, 'Resumen diario del CRM de Farm Brokers. Puedes desactivarlo en Equipo › Personas.'),
+    texto: [`Buenos días, ${nom}. Lo que tienes para hoy:`, ...r.tareas.map((t) => `- Tarea: ${t.titulo}`), ...r.acciones.map((a) => `- ${a.accion} (${a.etq} ${a.nombre})`), r.sinLeer ? `Avisos sin leer: ${r.sinLeer}` : '', CRM_URL].filter(Boolean).join('\n') };
+}
+async function enviarResumenes(forzar = false) {
+  const db = leer(), hoy = hoySantiago();
+  if (!correoConfigurado() || (!forzar && ((db.config || {}).resumenEnviado === hoy))) return 0;
+  await modificar((d) => { d.config = { ...(d.config || {}), resumenEnviado: hoy }; });
+  let n = 0;
+  for (const p of personasEquipo(db)) {
+    const email = correoDe(db, p.nombre);
+    if (!email || !prefsCorreo(db, p.nombre).resumen) continue;
+    const m = correoResumen(db, p.nombre, hoy); if (!m) continue;
+    colaCorreos.push({ nombre: p.nombre, para: email, ...m }); n++;
+  }
+  setImmediate(procesarCorreos);
+  return n;
+}
+if (!process.env.CRM_SYNC_OFF) {
+  // A partir de las 8:00 (hora de Chile), de lunes a sábado, una vez al día
+  setInterval(() => {
+    const ahoraCL = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Santiago' }));
+    if (ahoraCL.getHours() >= 8 && ahoraCL.getDay() !== 0) enviarResumenes().catch(() => {});
+  }, 10 * 60 * 1000).unref();
+}
+router.put('/equipo/avisos', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req), nombre = txt(b.nombre, 80) || autor;
+  if (nombre !== autor && !esAdmin(req)) return res.status(403).json({ error: 'Solo puedes cambiar tus propios avisos.' });
+  const r = await modificar((db) => {
+    db.config = { ...(db.config || {}), avisosCorreo: { ...((db.config || {}).avisosCorreo || {}), [nombre]: { inmediato: b.inmediato !== false, resumen: b.resumen !== false } } };
+    return { avisosCorreo: db.config.avisosCorreo };
+  });
+  res.json(r);
+});
+router.post('/correo/prueba', async (req, res) => {
+  const autor = usuarioDe(req), db = leer(), nombre = txt((req.body || {}).nombre, 80) || autor;
+  const email = correoDe(db, nombre);
+  if (!email) return res.status(400).json({ error: `${nombre === autor ? 'No tienes' : `${nombre} no tiene`} correo registrado. Agrégalo en "Editar contacto".` });
+  const tipo = (req.body || {}).tipo === 'resumen' ? 'resumen' : 'prueba';
+  const m = tipo === 'resumen' ? correoResumen(db, nombre) || { asunto: 'Tu día en el CRM: sin pendientes', html: plantillaCorreo(`Buenos días, ${nombre.split(' ')[0]}`, '<p style="margin:0;font-size:14px">Hoy no tienes tareas ni acciones pendientes. Así se verá tu resumen de cada mañana cuando tengas pendientes.</p>'), texto: 'Hoy no tienes pendientes.' }
+    : { asunto: 'Prueba de avisos del CRM', html: plantillaCorreo('¡Los avisos por correo funcionan!', `<p style="margin:0;font-size:15px;line-height:1.5">Hola ${escHtml(nombre.split(' ')[0])}, este es un correo de prueba del CRM de Farm Brokers. Desde ahora te llegarán aquí las tareas que te asignen, las firmas de clientes y el resumen de cada mañana.</p>`), texto: 'Correo de prueba del CRM de Farm Brokers.' };
+  try { await enviarCorreo({ para: email, ...m }); res.json({ ok: true, para: email }); }
+  catch (e) { res.status(502).json({ error: `No se pudo enviar: ${e.message}` }); }
 });
 
 // ───────────────────────── Orden de visita ─────────────────────────
@@ -1542,6 +1662,7 @@ router.post('/publico-plano/:token/aceptar', async (req, res) => {
     const cli = c.clienteId && db.clientes.find((y) => y.id === c.clienteId);
     if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó la confidencialidad y vio el plano de ${campo.nombre}` }];
     registrar(db, quien, `Aceptó la confidencialidad del plano de ${campo.nombre}`, { col: 'campos', id: campo.id });
+    notificar(db, c.creadoPor, `${nombre} aceptó la confidencialidad y ya puede ver el plano de ${campo.nombre}`, { col: 'campos', id: campo.id }, quien);
     return publicoPlano(db, campo, c);
   });
   if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
@@ -2422,6 +2543,7 @@ router.post('/publico/:token/firmar', async (req, res) => {
     campo.proximaFecha = campo.proximaFecha || new Date().toLocaleDateString('en-CA');
     campo.actualizado = ahora();
     registrar(db, quien, `Firmó el mandato de ${campo.nombre}`, { col: 'campos', id: campo.id });
+    for (const p of new Set([cap.creadoPor, campo.responsable].filter(Boolean))) notificar(db, p, `${nombre} firmó el mandato de ${campo.nombre}`, { col: 'campos', id: campo.id }, quien);
     return publicoDe(campo);
   });
   if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
@@ -3095,4 +3217,5 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
 });
 
 router._interno = { aplicarWeb, valoresWeb, setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._correo = { enviarResumenes, correoResumen, colaCorreos };
 module.exports = router;
