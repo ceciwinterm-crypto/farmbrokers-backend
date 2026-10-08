@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.4';
+const VERSION = 'crm-v8.5';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1677,7 +1677,6 @@ function publicoPlano(db, campo, c) {
     plano: c.aceptacion && disponible && conKmz ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro, partes: (campo.geo.partes || []).map((p) => ({ nombre: p.nombre, desde: p.desde, hasta: p.hasta, areaHa: p.areaHa })) } : null,
     planos: c.aceptacion && disponible ? pls.map((a) => ({ id: a.id, nombre: a.nombre, vistas: a.vistas })) : [],
     incluye: { kmz: conKmz, planos: pls.length },
-    fichaPorCorreo: !!(fichaDeLink(campo, c) && correoConfigurado()),
   };
 }
 // Hojas y archivo original de los planos, solo para quien aceptó el acuerdo
@@ -1719,7 +1718,6 @@ router.get('/publico-plano/:token', async (req, res) => {
 });
 router.post('/publico-plano/:token/aceptar', async (req, res) => {
   const b = req.body || {};
-  let nuevaAceptacion = null;
   const r = await modificar((db) => {
     const x = buscarCompartido(db, req.params.token); if (!x) return null;
     const { campo, c } = x;
@@ -1731,7 +1729,6 @@ router.post('/publico-plano/:token/aceptar', async (req, res) => {
     const nombre = txt(b.nombre, 160), rut = txt(b.rut, 20), email = txt(b.email, 160);
     if (nombre.length < 3) return { error: 'Escribe tu nombre completo.' };
     if (!rutValido(rut)) return { error: 'El RUT no es válido.' };
-    if (!/^[^\s@]+@[^\s@]+\.[a-z]{2,}$/i.test(email)) return { error: 'Escribe tu email: ahí te enviamos la ficha del campo.' };
     c.aceptacion = { nombre, rut: rutFormato(rut), email, fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash: pub.hash, texto: pub.acuerdo };
     const quien = `${nombre} (cliente)`;
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó el acuerdo de confidencialidad y accedió al plano (RUT ${c.aceptacion.rut}, código ${pub.hash.slice(0, 12).toUpperCase()})` }];
@@ -1739,52 +1736,13 @@ router.post('/publico-plano/:token/aceptar', async (req, res) => {
     if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó la confidencialidad y vio el plano de ${campo.nombre}` }];
     registrar(db, quien, `Aceptó la confidencialidad del plano de ${campo.nombre}`, { col: 'campos', id: campo.id });
     notificar(db, c.creadoPor, `${nombre} aceptó la confidencialidad y ya puede ver el plano de ${campo.nombre}`, { col: 'campos', id: campo.id }, quien);
-    nuevaAceptacion = { campoId: campo.id, token: c.token };
     return publicoPlano(db, campo, c);
   });
   if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
   if (r.error) return res.status(409).json(r);
   res.json(r);
-  if (nuevaAceptacion) enviarFichaAceptacion(nuevaAceptacion).catch(() => {});
 });
 
-// Al aceptar el acuerdo, al cliente le llega por correo la ficha del campo en PDF (adjunta)
-async function enviarFichaAceptacion({ campoId, token }) {
-  const db = leer(), campo = db.campos.find((x) => x.id === campoId); if (!campo) return;
-  const c = (campo.compartidos || []).find((x) => x.token === token); if (!c || !c.aceptacion || !c.aceptacion.email) return;
-  const ft = fichaDeLink(campo, c), ruta = ft && path.join(ARCHIVOS, campo.id, `ficha-${ft}.pdf`);
-  const anotar = (texto, extra) => modificar((d2) => { const k = d2.campos.find((x) => x.id === campoId); if (!k) return; const cc = (k.compartidos || []).find((x) => x.token === token); if (cc) cc.fichaCorreo = { fecha: ahora(), email: c.aceptacion.email, ...extra }; k.historial = [...(k.historial || []), { fecha: ahora(), autor: 'CRM', texto }]; });
-  if (!ruta || !fs.existsSync(ruta)) return anotar(`No se envió la ficha por correo a ${c.aceptacion.nombre}: el campo no tenía la ficha en PDF generada.`, { ok: false });
-  if (!correoConfigurado()) return anotar(`No se envió la ficha por correo a ${c.aceptacion.nombre}: el correo del CRM no está configurado.`, { ok: false });
-  const titulo = (campo.web && campo.web.titulo) || campo.nombre, corredor = c.creadoPor || 'Farm Brokers';
-  const ct = ((db.config && db.config.contactos) || {})[c.creadoPor] || {};
-  const nombre = String(c.aceptacion.nombre || '').trim().split(/\s+/)[0];
-  const vence = new Date(c.vence).toLocaleDateString('es-CL', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'America/Santiago' });
-  const link = `${String(CRM_URL).replace(/#.*$/, '')}#plano/${c.token}`;
-  const html = `<!doctype html><html><body style="margin:0;background:#F3F6F2;font-family:Helvetica,Arial,sans-serif;color:#17261D">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#F3F6F2;padding:24px 12px"><tr><td align="center">
-<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:14px;overflow:hidden;border:1px solid #DCE3DC">
-<tr><td style="background:#1F4D31;padding:16px 24px;color:#ffffff;font-size:15px;font-weight:bold;letter-spacing:.04em">FARM BROKERS CHILE</td></tr>
-<tr><td style="padding:24px 24px 6px;font-size:15px;line-height:1.6">
-<p style="margin:0 0 12px">Hola ${escHtml(nombre)},</p>
-<p style="margin:0 0 12px">Gracias por aceptar el acuerdo de confidencialidad. Te adjuntamos la <strong>ficha de ${escHtml(titulo)}</strong> en PDF.</p>
-<p style="margin:0 0 18px">El plano${c.kmz !== false && campo.geo ? ' y el KMZ' : ''} siguen disponibles en tu link personal hasta el ${escHtml(vence)}.</p>
-<a href="${escHtml(link)}" style="display:inline-block;background:#2D6A45;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:9px;font-weight:bold;font-size:14px">Ver el plano</a>
-<p style="margin:22px 0 4px">Cualquier consulta o para coordinar una visita, escríbeme.</p>
-<p style="margin:0;color:#3D4C42">${escHtml(corredor)}<br>Farm Brokers Chile${ct.telefono ? `<br>${escHtml(ct.telefono)}` : ''}${ct.email ? `<br>${escHtml(ct.email)}` : ''}</p>
-</td></tr>
-<tr><td style="padding:16px 24px;border-top:1px solid #E9EEE9;font-size:11.5px;color:#5E6E64">Información confidencial, entregada según el acuerdo que aceptaste. Farm Brokers Chile SpA · farmbrokers.cl</td></tr>
-</table></td></tr></table></body></html>`;
-  const texto = `Hola ${nombre},\n\nGracias por aceptar el acuerdo de confidencialidad. Te adjuntamos la ficha de ${titulo} en PDF.\nEl plano sigue disponible en tu link personal hasta el ${vence}: ${link}\n\n${corredor}\nFarm Brokers Chile${ct.telefono ? `\n${ct.telefono}` : ''}${ct.email ? `\n${ct.email}` : ''}`;
-  const archivo = `Ficha ${titulo.replace(/[^\wÁÉÍÓÚáéíóúÑñ .,-]/g, '')} - Farm Brokers.pdf`;
-  try {
-    await enviarCorreo({ para: c.aceptacion.email, asunto: `Ficha de ${titulo} - Farm Brokers`, html, texto, adjuntos: [{ nombre: archivo, base64: fs.readFileSync(ruta).toString('base64') }], responder: ct.email || '' });
-    await anotar(`Se envió la ficha por correo a ${c.aceptacion.nombre} (${c.aceptacion.email}) al aceptar la confidencialidad`, { ok: true });
-  } catch (e) {
-    await anotar(`No se pudo enviar la ficha por correo a ${c.aceptacion.email}: ${e.message}`, { ok: false, error: e.message });
-    await modificar((d2) => notificar(d2, c.creadoPor, `No se pudo enviar la ficha de ${campo.nombre} a ${c.aceptacion.nombre} (${c.aceptacion.email}). Envíasela tú.`, { col: 'campos', id: campo.id }, 'CRM'));
-  }
-}
 // KMZ personalizado: lleva grabado a quién se entregó
 const TABLA_CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 const crc32 = (buf) => { let c = 0xffffffff; for (let i = 0; i < buf.length; i++) c = TABLA_CRC[(c ^ buf[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
