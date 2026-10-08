@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.1';
+const VERSION = 'crm-v7.2';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -233,7 +233,31 @@ const CAMPOS_CAMPO = ['codigo', 'nombre', 'tipo', 'etapa', 'region', 'sector', '
   'precioTexto', 'precioCLP', 'precioUF', 'observaciones', 'corredor', 'asociado', 'propietario', 'telefono', 'email', 'rol', 'linkWeb', 'linkPortal',
   'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles', 'visibilidad', 'operacion'];
 const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
-  'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar'];
+  'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar', 'clase', 'rut'];
+// Clientes: persona natural o empresa, con varios contactos y varias búsquedas (cada búsqueda hace su propio match)
+const RE_EMPRESA = /\b(spa|s\.?p\.?a\.?|ltda\.?|limitada|s\.\s?a\.?|sociedad|agr[ií]cola|agroindustrial|inversiones|inmobiliaria|holding|vi[ñn]a|vi[ñn]edos?|compa[ñn][ií]a|cia\.?|e\.?i\.?r\.?l\.?|corp(oraci[oó]n)?|grupo|group|fondo|administradora|forestal|exportadora|frut[ií]cola|asesor[ií]as|servicios|comercial|empresas?|family office)\b/i;
+const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos', 'presupuesto', 'perfiles'];
+function limpiarBusqueda(b, i) {
+  const r = { id: /^[a-z0-9-]{4,40}$/i.test(String((b && b.id) || '')) ? b.id : id() };
+  r.nombre = txt(b && b.nombre, 60);
+  r.requerimiento = txt(b && b.requerimiento, 4000);
+  r.tipo = b && b.tipo ? (TIPOS.includes(b.tipo) ? b.tipo : tipoNorm(b.tipo)) : '';
+  r.operacion = ['compra', 'arriendo', 'ambas'].includes(b && b.operacion) ? b.operacion : 'compra';
+  r.regiones = (Array.isArray(b && b.regiones) ? b.regiones : parseRegiones(b && b.regiones)).map(regionCodigo).filter(Boolean);
+  r.zona = txt(b && b.zona, 400);
+  r.haMin = num(b && b.haMin); r.haMax = num(b && b.haMax);
+  r.cultivos = (Array.isArray(b && b.cultivos) ? b.cultivos : []).filter((c) => CULTIVOS[c] || c === 'frutales');
+  r.presupuesto = txt(b && b.presupuesto, 400);
+  r.perfiles = limpiarPerfiles(b && b.perfiles);
+  r.activa = !(b && (b.activa === false || b.activa === 'false'));
+  if (!r.nombre) r.nombre = i === 0 ? 'Búsqueda principal' : `Búsqueda ${i + 1}`;
+  return r;
+}
+function limpiarContacto(c) {
+  return { id: /^[a-z0-9-]{4,40}$/i.test(String((c && c.id) || '')) ? c.id : id(), nombre: txt(c && c.nombre, 120), cargo: txt(c && c.cargo, 80),
+    telefono: txt(c && c.telefono, 60), email: txt(c && c.email, 200), principal: !!(c && c.principal && c.principal !== 'false') };
+}
+const busquedasDe = (cli) => (Array.isArray(cli.busquedas) && cli.busquedas.length ? cli.busquedas : [cli]);
 const CAMPOS_TASACION = ['titulo', 'cliente', 'telefono', 'email', 'campoId', 'rol', 'comuna', 'codigo', 'etapa', 'honorariosUF', 'responsable', 'proximaAccion', 'proximaFecha'];
 
 function limpiar(col, b, previo = {}) {
@@ -267,6 +291,29 @@ function limpiar(col, b, previo = {}) {
     r.fechaRequerimiento = /^\d{4}-\d{2}/.test(o.fechaRequerimiento || '') ? o.fechaRequerimiento.slice(0, 10) : '';
     r.proximaFecha = fecha(o.proximaFecha);
     r.revisar = !!o.revisar && o.revisar !== 'false';
+    r.clase = ['persona', 'empresa'].includes(o.clase) ? o.clase : RE_EMPRESA.test(r.nombre) ? 'empresa' : 'persona';
+    r.rut = r.clase === 'empresa' ? txt(o.rut, 20) : '';
+    // Contactos: si no vienen, se arma el primero con los datos de contacto que tenía el cliente
+    let contactos = (Array.isArray(o.contactos) ? o.contactos : []).map(limpiarContacto).filter((c) => c.nombre || c.telefono || c.email).slice(0, 30);
+    if (!Array.isArray(o.contactos) && (r.contactoNombre || r.telefono || r.email)) {
+      const mails = r.email.split(/[,;]\s*/).filter(Boolean);
+      contactos = [limpiarContacto({ nombre: r.contactoNombre || (r.clase === 'persona' ? r.nombre : ''), telefono: r.telefono, email: mails[0] || '', principal: true }),
+        ...mails.slice(1).map((m) => limpiarContacto({ email: m }))];
+    }
+    if (contactos.length && !contactos.some((c) => c.principal)) contactos[0].principal = true;
+    contactos.forEach((c, i) => { if (c.principal && contactos.findIndex((x) => x.principal) !== i) c.principal = false; });
+    r.contactos = contactos;
+    const ppal = contactos.find((c) => c.principal);
+    if (Array.isArray(o.contactos)) { r.contactoNombre = ppal ? ppal.nombre : ''; r.telefono = ppal ? ppal.telefono : ''; r.email = contactos.map((c) => c.email).filter(Boolean).join(', '); }
+    // Búsquedas: si no vienen, lo que buscaba el cliente pasa a ser su primera búsqueda
+    const bs = Array.isArray(o.busquedas) && o.busquedas.length ? o.busquedas : [Object.fromEntries(CAMPOS_BUSQUEDA.filter((k) => k !== 'nombre').map((k) => [k, r[k]]))];
+    r.busquedas = bs.slice(0, 12).map(limpiarBusqueda);
+    // Copia en el cliente para listas y filtros: lo de la primera búsqueda activa, y regiones y perfiles de todas
+    const b0 = r.busquedas.find((b) => b.activa) || r.busquedas[0];
+    for (const k of ['requerimiento', 'tipo', 'operacion', 'zona', 'haMin', 'haMax', 'presupuesto']) r[k] = b0[k];
+    r.cultivos = b0.cultivos;
+    r.regiones = [...new Set(r.busquedas.flatMap((b) => b.regiones))];
+    r.perfiles = [...new Set(r.busquedas.flatMap((b) => b.perfiles))];
     return r;
   }
   const r = {};
@@ -380,7 +427,15 @@ function calcularMatches(db) {
   for (const campo of db.campos) {
     if (['Vendido', 'Descartado', 'Prospección', 'Retirado de la web'].includes(campo.etapa)) continue;
     const lista = [];
-    for (const cli of clientes) { const r = evaluar(campo, cli); if (r) lista.push(r); }
+    for (const cli of clientes) {
+      const bs = busquedasDe(cli).filter((b) => b.activa !== false);
+      let mejor = null;
+      for (const b of bs) {
+        const r = evaluar(campo, b === cli ? cli : { ...cli, ...b, id: cli.id });
+        if (r && (!mejor || r.score > mejor.score)) { mejor = r; if (b !== cli) { r.busquedaId = b.id; if (bs.length > 1) r.razones.unshift(`Búsqueda: ${b.nombre}`); } }
+      }
+      if (mejor) lista.push(mejor);
+    }
     if (lista.length) out[campo.id] = lista.sort((a, b) => b.score - a.score);
   }
   return out;
@@ -478,7 +533,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 function guardar(db) {
@@ -623,27 +678,44 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
   });
 }
 
-// Registrar envío de un campo a clientes
+// Registrar envío de un campo a clientes (y a qué contacto de cada uno)
 router.post('/campos/:id/envio', async (req, res) => {
-  const autor = usuarioDe(req);
-  const ids = Array.isArray((req.body || {}).clienteIds) ? req.body.clienteIds.map(String) : [];
-  const canal = ['correo', 'whatsapp'].includes(req.body.canal) ? req.body.canal : 'otro';
-  if (!ids.length) return res.status(400).json({ error: 'No hay clientes seleccionados.' });
+  const autor = usuarioDe(req), b = req.body || {};
+  const destinos = Array.isArray(b.destinos) ? b.destinos.map((d) => ({ clienteId: String(d.clienteId || ''), contactoId: String(d.contactoId || '') }))
+    : (Array.isArray(b.clienteIds) ? b.clienteIds : []).map((x) => ({ clienteId: String(x), contactoId: '' }));
+  const canal = ['correo', 'whatsapp'].includes(b.canal) ? b.canal : 'otro';
+  if (!destinos.length) return res.status(400).json({ error: 'No hay clientes seleccionados.' });
   const r = await modificar((db) => {
     const campo = db.campos.find((x) => x.id === req.params.id);
     if (!campo) return null;
     const nombres = [];
-    for (const cid of ids) {
-      const cli = db.clientes.find((x) => x.id === cid); if (!cli) continue;
-      campo.envios = [...(campo.envios || []), { clienteId: cid, fecha: ahora(), autor, canal }];
-      cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Se le envió ${campo.nombre} por ${canal}` }];
-      nombres.push(cli.nombre);
+    for (const d of destinos) {
+      const cli = db.clientes.find((x) => x.id === d.clienteId); if (!cli) continue;
+      const ct = (cli.contactos || []).find((c) => c.id === d.contactoId);
+      const quien = ct && ct.nombre && ct.nombre !== cli.nombre ? `${ct.nombre} (${cli.nombre})` : cli.nombre;
+      campo.envios = [...(campo.envios || []), { clienteId: cli.id, contactoId: ct ? ct.id : '', fecha: ahora(), autor, canal }];
+      cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Se le envió ${campo.nombre} por ${canal}${ct && ct.nombre ? ` a ${ct.nombre}` : ''}` }];
+      nombres.push(quien);
     }
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Enviado por ${canal} a ${nombres.join(', ')}` }];
-    registrar(db, autor, `Envió ${campo.nombre} a ${nombres.length} cliente${nombres.length === 1 ? '' : 's'} por ${canal}`, { col: 'campos', id: campo.id });
+    registrar(db, autor, `Envió ${campo.nombre} a ${nombres.join(', ')} por ${canal}`, { col: 'campos', id: campo.id });
     return campo;
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
+
+// Mensaje libre a un cliente (queda en su historial)
+router.post('/clientes/:id/contacto', async (req, res) => {
+  const autor = usuarioDe(req), b = req.body || {};
+  const canal = ['correo', 'whatsapp'].includes(b.canal) ? b.canal : 'otro';
+  const r = await modificar((db) => {
+    const cli = db.clientes.find((x) => x.id === req.params.id); if (!cli) return null;
+    const ct = (cli.contactos || []).find((c) => c.id === String(b.contactoId || ''));
+    const resumen = txt(b.resumen, 200);
+    cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Le escribió por ${canal}${ct && ct.nombre ? ` a ${ct.nombre}` : ''}${resumen ? `: ${resumen}` : ''}` }];
+    return cli;
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el cliente.' });
 });
 
 // Importar la planilla (hojas como filas de celdas)
