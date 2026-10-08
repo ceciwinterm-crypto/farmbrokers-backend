@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.6';
+const VERSION = 'crm-v7.7';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -706,13 +706,24 @@ router.post('/campos/:id/envio', async (req, res) => {
 });
 
 // ───────────────────────── Avisos por correo al equipo (Resend) ─────────────────────────
-// Variables en Railway: RESEND_API_KEY (obligatoria), MAIL_FROM (ej. "Farm Brokers CRM <notificaciones@farmbrokers.cl>"), CRM_URL (opcional)
+// Variables en Railway: BREVO_API_KEY o RESEND_API_KEY (una de las dos), MAIL_FROM (ej. "Farm Brokers CRM <contacto@farmbrokers.cl>"), CRM_URL (opcional)
+// Brevo sirve sin tocar el dominio (basta verificar el correo remitente); Resend exige verificar el dominio en el DNS.
 const CRM_URL = process.env.CRM_URL || 'https://farmbrokers-frontend.vercel.app/#crm';
-const correoConfigurado = () => !!(process.env.RESEND_API_KEY || global.__correoMock);
+const correoConfigurado = () => !!(process.env.BREVO_API_KEY || process.env.RESEND_API_KEY || global.__correoMock);
 const remitenteCorreo = () => process.env.MAIL_FROM || 'Farm Brokers CRM <onboarding@resend.dev>';
 async function enviarCorreo({ para, asunto, html, texto }) {
   if (global.__correoMock) return global.__correoMock({ para, asunto, html, texto });
-  if (!process.env.RESEND_API_KEY) throw new Error('Falta la variable RESEND_API_KEY en Railway.');
+  if (process.env.BREVO_API_KEY) {
+    const m = remitenteCorreo().match(/^\s*(.*?)\s*<([^>]+)>\s*$/) || [null, 'Farm Brokers CRM', remitenteCorreo().trim()];
+    const r = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST', headers: { 'api-key': process.env.BREVO_API_KEY, 'Content-Type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify({ sender: { name: m[1] || 'Farm Brokers CRM', email: m[2] }, to: [{ email: para }], subject: asunto, htmlContent: html, textContent: texto }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.message || `Brevo respondió ${r.status}`);
+    return j;
+  }
+  if (!process.env.RESEND_API_KEY) throw new Error('Falta la variable BREVO_API_KEY (o RESEND_API_KEY) en Railway.');
   const r = await fetch('https://api.resend.com/emails', {
     method: 'POST', headers: { Authorization: `Bearer ${process.env.RESEND_API_KEY}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from: remitenteCorreo(), to: [para], subject: asunto, html, text: texto }),
