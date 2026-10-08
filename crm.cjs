@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.3';
+const VERSION = 'crm-v7.4';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -711,7 +711,7 @@ const fechaLargaISO = (iso) => { const d = new Date(`${String(iso || '').slice(0
 function textoOrden(o) {
   const com = o.datos.comision || '2 % + IVA';
   return [
-    `El Cliente certifica y declara haber solicitado a Farm Brokers Chile SpA, oficina de corretaje de propiedades, rol único tributario N° 77.089.307-0, orden para visitar la propiedad descrita anteriormente, y deja expresa constancia de que ésta es la primera oficina en ofrecer esta propiedad. Por lo tanto, se compromete a encargar a Farm Brokers Chile SpA la realización de cualquier gestión ante el propietario para adquirirla o arrendarla, comprometiéndose a pagar una comisión correspondiente a ${com} del valor total del contrato respectivo de compraventa y/o arriendo, en caso de efectuarse el negocio.`,
+    `El Cliente certifica y declara haber solicitado a Farm Brokers Chile SpA, oficina de corretaje de propiedades, rol único tributario N° 77.089.307-0, orden para visitar la propiedad descrita anteriormente, y deja expresa constancia de que ésta es la primera oficina en ofrecer esta propiedad. Por lo tanto, se compromete a encargar a Farm Brokers Chile SpA la realización de cualquier gestión ante el propietario para adquirirla o arrendarla, comprometiéndose a pagar una comisión correspondiente a ${com} del valor total del contrato respectivo de compraventa y/o arriendo, en caso de efectuarse el negocio, salvo que las partes acuerden por escrito una comisión distinta.`,
     'Las partes se obligan, para sí y para los colaboradores que designen, a mantener la más estricta confidencialidad respecto de toda conversación, información y documentación referente al proceso de compra y/o arriendo de la propiedad, quedando estrictamente prohibida su divulgación a cualquier tercero, así como la utilización de tal información o conocimiento en cualquier otra actividad, ya sea en beneficio propio o de terceros.',
     'En caso de que el suscrito transmita a terceros cualquier información de la propiedad sin consentimiento previo y por escrito de Farm Brokers Chile SpA; en caso de tratar directamente con los propietarios, haciendo el negocio por su cuenta directa o indirectamente; o en caso de que la propiedad sea adquirida por personas relacionadas familiar o laboralmente con el suscrito, aunque la orden de venta de la propiedad haya vencido, sea ésta exclusiva o no exclusiva, el suscrito estará obligado a pagar íntegramente la comisión correspondiente a Farm Brokers Chile SpA.',
     'Esta orden es personal e intransferible y, para todos los efectos legales, las partes fijan su domicilio en la ciudad de Santiago.',
@@ -781,7 +781,7 @@ router.post('/ordenes/:id/anular', async (req, res) => {
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la orden.' });
 });
-const publicoOrden = (o) => ({ fecha: o.fecha, fechaTexto: fechaLargaISO(o.fecha), datos: o.datos, texto: textoOrden(o), hash: hashOrden(o), estado: o.estado,
+const publicoOrden = (o) => ({ fecha: o.fecha, fechaTexto: fechaLargaISO(o.fecha), datos: o.datos, texto: o.firma ? o.firma.texto : textoOrden(o), hash: o.firma ? o.firma.hash : hashOrden(o), estado: o.estado,
   firma: o.firma ? { nombre: o.firma.nombre, rut: o.firma.rut, fecha: o.firma.fecha, codigo: o.firma.hash.slice(0, 12).toUpperCase() } : null });
 router.get('/publico-orden/:token', (req, res) => {
   const o = (leer().ordenes || []).find((x) => x.token === req.params.token);
