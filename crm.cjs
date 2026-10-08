@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.4';
+const VERSION = 'crm-v7.5';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1425,14 +1425,18 @@ router.post('/campos/:id/compartir', async (req, res) => {
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
-    if (!campo.geo) return { error: 'Este campo no tiene plano. Sube primero su KMZ.' };
+    const pls = planosCampo(campo);
+    if (!campo.geo && !pls.length) return { error: 'Este campo no tiene KMZ ni planos. Súbelos primero en "Archivos y plano".' };
+    const conKmz = !!campo.geo && b.kmz !== false;
+    const planosIds = Array.isArray(b.planos) ? pls.filter((a) => b.planos.includes(a.id)).map((a) => a.id) : b.planos === false ? [] : pls.map((a) => a.id);
+    if (!conKmz && !planosIds.length) return { error: 'Elige qué enviar: el KMZ, los planos o ambos.' };
     const cli = b.clienteId ? db.clientes.find((x) => x.id === b.clienteId) : null;
     const dias = Math.max(1, Math.min(365, Math.round(Number(b.dias) || 15)));
     const c = {
       token: crypto.randomBytes(16).toString('hex'), clienteId: cli ? cli.id : '', destinatario: txt(b.nombre, 160) || (cli ? cli.nombre : ''),
       email: txt(b.email, 160) || (cli ? emailsCli(cli)[0] || '' : ''), telefono: txt(b.telefono, 40) || (cli ? cli.telefono : ''),
       creado: ahora(), creadoPor: autor, vence: new Date(Date.now() + dias * 864e5).toISOString(), descarga: b.descarga !== false, activo: true,
-      aceptacion: null, descargas: [], vistas: 0,
+      aceptacion: null, descargas: [], vistas: 0, kmz: conKmz, planos: planosIds,
     };
     if (!c.destinatario) return { error: 'Indica a quién le envías el plano.' };
     campo.compartidos = [...(campo.compartidos || []), c];
@@ -1464,18 +1468,57 @@ function buscarCompartido(db, token) {
   for (const campo of db.campos) { const c = (campo.compartidos || []).find((x) => x.token === token); if (c) return { campo, c }; }
   return null;
 }
+// Planos del loteo (PDF o imagen) que se pueden mostrar: los que ya tienen sus hojas preparadas
+const planosCampo = (campo) => (campo.archivos || []).filter((a) => a.tipo === 'plano' && (a.vistas || []).length);
+const planosDeLink = (campo, c) => planosCampo(campo).filter((a) => !Array.isArray(c.planos) || c.planos.includes(a.id)); // links antiguos: todos
 function publicoPlano(db, campo, c) {
   const vencido = Date.now() > new Date(c.vence).getTime();
-  const disponible = c.activo && !vencido && !!campo.geo;
+  const conKmz = c.kmz !== false && !!campo.geo, pls = planosDeLink(campo, c);
+  const disponible = c.activo && !vencido && (conKmz || pls.length > 0);
   const texto = acuerdoPara(db, campo);
   return {
     titulo: (campo.web && campo.web.titulo) || campo.nombre, lugar: [campo.sector, REGION_TEXTO[campo.region]].filter(Boolean).join(', '),
-    destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !campo.geo ? 'El plano ya no está disponible.' : '',
+    destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !(conKmz || pls.length) ? 'El plano ya no está disponible.' : '',
     acuerdo: texto, hash: hashBloques([texto, campo.id]), descarga: c.descarga,
     aceptacion: c.aceptacion ? { nombre: c.aceptacion.nombre, rut: c.aceptacion.rut, fecha: c.aceptacion.fecha, codigo: c.aceptacion.hash.slice(0, 12).toUpperCase() } : null,
-    plano: c.aceptacion && disponible ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro } : null,
+    plano: c.aceptacion && disponible && conKmz ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro } : null,
+    planos: c.aceptacion && disponible ? pls.map((a) => ({ id: a.id, nombre: a.nombre, vistas: a.vistas })) : [],
+    incluye: { kmz: conKmz, planos: pls.length },
   };
 }
+// Hojas y archivo original de los planos, solo para quien aceptó el acuerdo
+function planoPermitido(db, token, fid) {
+  const x = buscarCompartido(db, token); if (!x) return null;
+  const pub = publicoPlano(db, x.campo, x.c);
+  if (!pub.disponible || !x.c.aceptacion) return null;
+  const a = planosDeLink(x.campo, x.c).find((y) => y.id === fid);
+  return a ? { ...x, a } : null;
+}
+router.get('/publico-plano/:token/planos/:fid/vista/:n', (req, res) => {
+  const r = planoPermitido(leer(), req.params.token, req.params.fid), n = Number(req.params.n);
+  if (!r || !Number.isInteger(n) || n < 0 || n >= r.a.vistas.length) return res.status(404).end();
+  const ruta = path.join(ARCHIVOS, r.campo.id, `${r.a.id}-v${n}`);
+  if (!fs.existsSync(ruta)) return res.status(404).end();
+  res.set('Content-Type', 'image/jpeg'); res.set('Cache-Control', 'private, max-age=3600');
+  fs.createReadStream(ruta).pipe(res);
+});
+router.get('/publico-plano/:token/planos/:fid', async (req, res) => {
+  const r = await modificar((db) => {
+    const x = planoPermitido(db, req.params.token, req.params.fid); if (!x) return null;
+    if (!x.c.descarga) return { error: 'Este plano se puede ver en línea, pero no descargar.' };
+    const quien = `${x.c.aceptacion.nombre} (cliente)`;
+    x.c.descargas = [...(x.c.descargas || []), { fecha: ahora(), archivo: x.a.nombre }];
+    x.campo.historial = [...(x.campo.historial || []), { fecha: ahora(), autor: quien, texto: `Descargó el plano ${x.a.nombre}` }];
+    return { campoId: x.campo.id, a: x.a };
+  });
+  if (!r) return res.status(404).send('Este plano no está disponible.');
+  if (r.error) return res.status(403).send(r.error);
+  const ruta = path.join(ARCHIVOS, r.campoId, r.a.id);
+  if (!fs.existsSync(ruta)) return res.status(404).send('El archivo ya no está disponible.');
+  res.set('Content-Type', r.a.mime || 'application/octet-stream');
+  res.set('Content-Disposition', `attachment; filename="${encodeURIComponent(r.a.nombre)}"; filename*=UTF-8''${encodeURIComponent(r.a.nombre)}`);
+  fs.createReadStream(ruta).pipe(res);
+});
 router.get('/publico-plano/:token', async (req, res) => {
   const r = await modificar((db) => { const x = buscarCompartido(db, req.params.token); if (!x) return null; x.c.vistas = (x.c.vistas || 0) + 1; return publicoPlano(db, x.campo, x.c); });
   r ? res.json(r) : res.status(404).json({ error: 'Este link no es válido. Pide uno nuevo a Farm Brokers.' });
