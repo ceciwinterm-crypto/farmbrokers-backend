@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v7.9';
+const VERSION = 'crm-v8.0';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -54,6 +54,8 @@ const VISIBILIDADES = ['publica', 'reservada', 'interna'];
 const tieneLinkWeb = (c) => [c.linkWeb, c.linkPortal].some((u) => /^https?:\/\/(www\.)?farmbrokers\.cl\/propiedad\/[^/]+/i.test(String(u || '').trim()));
 // Convierte los campos antiguos: "Publicado" pasa a "En venta" y se asigna la visibilidad
 function normalizarCampo(c) {
+  // Campos con varios KMZ subidos antes de que se pudieran dibujar juntos: se unen una vez
+  if (c.geoVersion !== 2 && (c.archivos || []).filter(esKmzArchivo).length > 1) { try { recalcularGeo(c); } catch (e) { /* se reintenta en la próxima lectura */ } }
   const eraPublicado = c.etapa === 'Publicado' || c.etapa === 'Activo';
   if (eraPublicado) c.etapa = etapaOferta(c.operacion);
   if (['Publicado', 'Activo'].includes(c.etapaAntesDeRetiro)) c.etapaAntesDeRetiro = etapaOferta(c.operacion);
@@ -1295,6 +1297,37 @@ function geoDeArchivo(buf, nombre) {
   return g;
 }
 const esPlano = (a) => a.tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre || '');
+function esKmzArchivo(a) { return !!a && (a.tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre || '')) && !/pdf|image/i.test(a.mime || ''); }
+function puntoEnAnillo([x, y], a) {
+  let dentro = false;
+  for (let i = 0, j = a.length - 1; i < a.length; j = i++) { const [xi, yi] = a[i], [xj, yj] = a[j]; if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) dentro = !dentro; }
+  return dentro;
+}
+// Une todos los KMZ del campo en un solo plano: cada archivo es una "parte" que se dibuja con su color
+function recalcularGeo(campo) {
+  campo.geoVersion = 2;
+  const partes = [];
+  for (const a of (campo.archivos || []).filter(esKmzArchivo)) {
+    try { partes.push({ a, g: geoDeArchivo(fs.readFileSync(path.join(ARCHIVOS, campo.id, a.id)), a.nombre) }); } catch (e) { /* archivo sin contorno */ }
+  }
+  if (!partes.length) { if (campo.geo && campo.geo.fuente === 'kmz') delete campo.geo; return null; }
+  const anillos = [], meta = [];
+  for (const { a, g } of partes) {
+    const resto = Math.max(0, 200 - anillos.length); if (!resto) break;
+    const suyos = g.anillos.slice(0, resto);
+    meta.push({ archivo: a.nombre, id: a.id, nombre: a.nombre.replace(/\.(kmz|kml)$/i, ''), desde: anillos.length, hasta: anillos.length + suyos.length, areaHa: g.areaHa, centro: g.centro });
+    anillos.push(...suyos);
+  }
+  const todos = anillos.flat();
+  const bbox = [Math.min(...todos.map((c) => c[0])), Math.min(...todos.map((c) => c[1])), Math.max(...todos.map((c) => c[0])), Math.max(...todos.map((c) => c[1]))];
+  // Superficie total: si un KMZ queda dentro de otro (por ejemplo un lote dentro del loteo) no se suma dos veces
+  const dentroDeOtro = (m) => meta.some((o) => o !== m && o.areaHa > m.areaHa && anillos.slice(o.desde, o.hasta).some((r) => puntoEnAnillo([m.centro.lng, m.centro.lat], r)));
+  const areaHa = Math.round(meta.filter((m) => !dentroDeOtro(m)).reduce((t, m) => t + m.areaHa, 0) * 100) / 100;
+  const partesG = meta.map((m) => { const { centro, ...resto } = m; return { ...resto, dentro: dentroDeOtro(m) }; });
+  const g = { fuente: 'kmz', anillos, bbox, areaHa, centro: { lat: (bbox[1] + bbox[3]) / 2, lng: (bbox[0] + bbox[2]) / 2 }, fecha: ahora(), archivo: meta[meta.length - 1].archivo, partes: partesG };
+  aplicarGeo(campo, g);
+  return g;
+}
 function aplicarGeo(campo, g) {
   campo.geo = g;
   if (!campo.coordenadas) campo.coordenadas = `${g.centro.lat.toFixed(6)}, ${g.centro.lng.toFixed(6)}`;
@@ -1321,9 +1354,9 @@ router.post('/campos/:id/archivo', async (req, res) => {
     campo.archivos = [...(campo.archivos || []), a];
     const marca = { plano: 'plano', foto: 'fotos', dominio: 'dominio', hipotecas: 'hipotecas', avaluo: 'avaluo', aguas: 'aguas' }[a.tipo];
     if (marca) campo.checklist = { ...(campo.checklist || {}), [marca]: true };
-    if (g) aplicarGeo(campo, g);
+    if (g) g = recalcularGeo(campo) || g;
     auditar(db, autor, `Subió el archivo ${a.nombre}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
-    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Subió ${a.nombre}${g ? ` (plano del predio: ${g.anillos.length} ${g.anillos.length === 1 ? 'polígono' : 'polígonos'}, ${g.areaHa.toLocaleString('es-CL')} ha)` : ''}` }];
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Subió ${a.nombre}${g ? ` (plano del predio: ${(g.partes || []).length > 1 ? `${g.partes.length} KMZ dibujados juntos, ` : ''}${g.anillos.length} ${g.anillos.length === 1 ? 'polígono' : 'polígonos'}, ${g.areaHa.toLocaleString('es-CL')} ha)` : ''}` }];
     campo.actualizado = ahora();
     return { campo, archivo: a };
   });
@@ -1388,7 +1421,7 @@ router.delete('/campos/:id/archivos/:fid', async (req, res) => {
     campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
     try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
     borrarVistas(campo, a);
-    if (campo.geo && campo.geo.fuente === 'kmz' && campo.geo.archivo === a.nombre) delete campo.geo;
+    if (esKmzArchivo(a) && campo.geo && campo.geo.fuente === 'kmz') recalcularGeo(campo);
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eliminó el archivo ${a.nombre}` }];
     return campo;
   });
@@ -1629,7 +1662,7 @@ function publicoPlano(db, campo, c) {
     destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !(conKmz || pls.length) ? 'El plano ya no está disponible.' : '',
     acuerdo: texto, hash: hashBloques([texto, campo.id]), descarga: c.descarga,
     aceptacion: c.aceptacion ? { nombre: c.aceptacion.nombre, rut: c.aceptacion.rut, fecha: c.aceptacion.fecha, codigo: c.aceptacion.hash.slice(0, 12).toUpperCase() } : null,
-    plano: c.aceptacion && disponible && conKmz ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro } : null,
+    plano: c.aceptacion && disponible && conKmz ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro, partes: (campo.geo.partes || []).map((p) => ({ nombre: p.nombre, desde: p.desde, hasta: p.hasta, areaHa: p.areaHa })) } : null,
     planos: c.aceptacion && disponible ? pls.map((a) => ({ id: a.id, nombre: a.nombre, vistas: a.vistas })) : [],
     incluye: { kmz: conKmz, planos: pls.length },
     ficha: disponible ? fichaDeLink(campo, c) : '', fichasBase: FICHAS_URL,
@@ -1714,6 +1747,13 @@ function kmlPersonalizado(campo, c) {
   const a = c.aceptacion, titulo = (campo.web && campo.web.titulo) || campo.nombre;
   const marca = `CONFIDENCIAL. Entregado por Farm Brokers Chile a ${a.nombre}, RUT ${a.rut}, el ${a.fecha.slice(0, 10)}. Uso sujeto al acuerdo de confidencialidad aceptado (código ${a.hash.slice(0, 12).toUpperCase()}). Prohibida su difusión.`;
   let kml = '';
+  const partes = campo.geo.partes || [];
+  if (partes.length > 1) {
+    const colores = ['ff5ad6ff', 'ffffd65a', 'ffb87aff', 'ff7af28c', 'ff4da2ff', 'ffffffff'];
+    const estilos = colores.map((c, i) => `<Style id="p${i}"><LineStyle><color>${c}</color><width>3</width></LineStyle><PolyStyle><color>33${c.slice(2)}</color></PolyStyle></Style>`).join('');
+    const marcas = partes.map((p, i) => `<Placemark><name>${escXml(p.nombre)}</name><description>${escXml(marca)}</description><styleUrl>#p${i % colores.length}</styleUrl><MultiGeometry>${campo.geo.anillos.slice(p.desde, p.hasta).map((r) => `<Polygon><outerBoundaryIs><LinearRing><coordinates>${r.map(([x, y]) => `${x},${y},0`).join(' ')}</coordinates></LinearRing></outerBoundaryIs></Polygon>`).join('')}</MultiGeometry></Placemark>`).join('');
+    return `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${escXml(titulo)} (confidencial)</name><description>${escXml(marca)}</description>${estilos}${marcas}</Document></kml>`;
+  }
   const archivo = campo.geo.archivo && (campo.archivos || []).find((x) => x.nombre === campo.geo.archivo);
   if (archivo) { try { const buf = fs.readFileSync(path.join(ARCHIVOS, campo.id, archivo.id)); kml = buf.readUInt32LE(0) === 0x04034b50 ? leerZip(buf) : buf.toString('utf8'); } catch (e) { kml = ''; } }
   if (kml && /<Document[^>]*>/i.test(kml)) return kml.replace(/<Document([^>]*)>/i, `<Document$1><description>${escXml(marca)}</description>`);
@@ -2021,7 +2061,7 @@ function ejecutarEliminacion(db, sol, autor) {
     campo.archivos = campo.archivos.filter((x) => x.id !== a.id);
     try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {}
     borrarVistas(campo, a);
-    if (campo.geo && campo.geo.fuente === 'kmz' && campo.geo.archivo === a.nombre) delete campo.geo;
+    if (esKmzArchivo(a) && campo.geo && campo.geo.fuente === 'kmz') recalcularGeo(campo);
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eliminó el archivo ${a.nombre} (pedido por ${sol.solicitadoPor})` }];
     auditar(db, autor, `Eliminó el archivo ${a.nombre}, pedido por ${sol.solicitadoPor}`, { col: 'campos', id: campo.id, nombre: campo.nombre });
     return true;
@@ -2506,7 +2546,7 @@ router.post('/publico/:token/archivo', async (req, res) => {
     campo.archivos = [...(campo.archivos || []), a];
     const marca = { kmz: 'plano', plano: 'plano', foto: 'fotos', dominio: 'dominio', hipotecas: 'hipotecas', avaluo: 'avaluo', aguas: 'aguas' }[tipo];
     if (marca) campo.checklist = { ...(campo.checklist || {}), [marca]: true };
-    if (tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre)) { try { aplicarGeo(campo, geoDeArchivo(buf, a.nombre)); } catch (e) { /* plano en PDF u otro formato */ } }
+    if (tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre)) { try { recalcularGeo(campo); } catch (e) { /* plano en PDF u otro formato */ } }
     return { ok: true, archivo: { id: a.id, tipo: a.tipo, nombre: a.nombre, tamano: a.tamano, fecha: a.fecha } };
   });
   if (!r) return res.status(404).json({ error: 'Este link no es válido.' });
@@ -3245,6 +3285,6 @@ router.post('/tasaciones/:id/campo', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tasación.' });
 });
 
-router._interno = { aplicarWeb, valoresWeb, setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
+router._interno = { recalcularGeo, aplicarWeb, valoresWeb, setWp: (f) => { wpLlamarImpl = f; }, descripcionHtml, propuestaWeb, setTraerBinario: (f) => { traerBinario = f; }, sugerirCampo, kmlPersonalizado, zipUno, leerZip, antecedentesCampo, setClaude: (f) => { global.__claudeMock = f; }, geoDeArchivo, armarGeo, anillosDeGeoJSON, resumenTasacion, campoDesdeTasacion, tipoNorm,  sincronizarWeb, listarSitio, setTraer: (f) => { traerPagina = f; },  analizarPropiedad, buscarCoordenadas,  bloquesMandato, faltantesMandato, rutValido, limpiarDatosPropietario,  importarHojas, evaluar, calcularMatches, parseRegiones, parseHa, parsePrecio, parseRango, parseFechaMY, cultivosEn };
 router._correo = { enviarResumenes, correoResumen, colaCorreos };
 module.exports = router;
