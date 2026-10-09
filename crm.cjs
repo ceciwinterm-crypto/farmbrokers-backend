@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.6';
+const VERSION = 'crm-v8.7';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -37,6 +37,7 @@ const idCorredor = (nombre) => String(nombre).normalize('NFD').replace(/[\u0300-
 const limpiarPerfiles = (v) => [...new Set((Array.isArray(v) ? v : []).map(String).filter((x) => /^[a-z0-9_-]{2,40}$/.test(x)))].slice(0, 10);
 const zlib = require('zlib');
 const https = require('https');
+const http = require('http');
 const ARCHIVOS = path.join(DIR, 'archivos');
 
 // ───────────────────────── Catálogos ─────────────────────────
@@ -1796,7 +1797,7 @@ router.get('/publico-plano/:token/kmz', async (req, res) => {
 const HOSTS_IMG = [/(^|\.)farmbrokers\.cl$/, /^server\.arcgisonline\.com$/, /^([abc]\.)?tile\.openstreetmap\.org$/];
 function descargarBinario(url, redirecciones = 3) {
   return new Promise((ok, mal) => {
-    const req = https.get(url, { headers: { 'User-Agent': 'FarmBrokersCRM/1.0 (+https://farmbrokers.cl)' }, timeout: 15000 }, (res) => {
+    const req = (String(url).startsWith('http:') ? http : https).get(url, { headers: { 'User-Agent': 'FarmBrokersCRM/1.0 (+https://farmbrokers.cl)' }, timeout: 15000 }, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirecciones > 0) { res.resume(); return ok(descargarBinario(new URL(res.headers.location, url).toString(), redirecciones - 1)); }
       if (res.statusCode !== 200) { res.resume(); return mal(new Error(`respondió ${res.statusCode}`)); }
       const partes = []; let total = 0;
@@ -1812,7 +1813,9 @@ const cacheImg = new Map(); let pesoCache = 0;
 router.get('/publico-img', async (req, res) => {
   let u;
   try { u = new URL(String(req.query.u || '')); } catch (e) { return res.status(400).end(); }
-  if (u.protocol !== 'https:' || !HOSTS_IMG.some((r) => r.test(u.hostname))) return res.status(403).end();
+  // Fotos de cualquier sitio público (no direcciones internas); solo se entregan si de verdad son imágenes
+  const privado = /^(localhost|.*\.local|.*\.internal|.*\.railway\.internal)$/i.test(u.hostname) || /^(127\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|0\.|\[)/.test(u.hostname);
+  if (!['https:', 'http:'].includes(u.protocol) || privado) return res.status(403).end();
   const clave = u.toString();
   let item = cacheImg.get(clave);
   if (!item || Date.now() - item.t > 24 * 3600 * 1000) {
