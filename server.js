@@ -992,7 +992,7 @@ function claseDesdeTexto(v){
 }
 
 const manejadorSuelos = async (req, res) => {
-  const { rol, comuna, region } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
+  const { rol, comuna, region, soloGeo } = Object.keys(req.body || {}).length ? req.body : (req.query || {});
   if (!rol || !comuna) return res.status(400).json({ ok:false, error:'Faltan rol y comuna' });
 
   const debug = [];
@@ -1108,6 +1108,14 @@ const manejadorSuelos = async (req, res) => {
       } catch (e) { debug.push({ paso:'predio-union-error', error: e.message }); }
     }
     const superficieHa = turf.area(predio) / 10000;
+
+    // "Solo KMZ": basta el poligono del rol; se omiten suelos, SIT Rural, frutales, etc. (lentos)
+    if (soloGeo) {
+      const kNom0 = Object.keys(propsRol).find(k => /^nompred|^nom_pred|^nombre/i.test(k));
+      return res.json({ ok:true, soloGeo:true, superficieHa: superficieHa.toFixed(2), superficieSII,
+        nombrePredio: kNom0 ? String(propsRol[kNom0] || '').trim() : '',
+        predioGeo: predio.geometry, bbox: turf.bbox(predio), fuente:'CIREN - IDE Minagri (referencial)' });
+    }
 
     // 3) Capas del estudio agrologico (cache)
     if (!cacheSuelosCapas.lista) {
