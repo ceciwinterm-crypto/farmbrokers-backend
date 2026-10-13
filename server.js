@@ -1860,6 +1860,39 @@ const manejadorSuelos = async (req, res) => {
   }
 };
 app.post('/suelos-rol', manejadorSuelos);
+
+// ── Respaldo para "Solo KMZ": poligono del rol desde Catastral.cl (cartografia SII) ──
+// La clave va en la variable de entorno CATASTRAL_KEY (Railway), nunca en el codigo.
+const CATASTRAL_API = 'https://apiv2.catastral.cl';
+const cacheCatastralComunas = { lista: null, desde: 0 };
+app.post('/poligono-catastral', async (req, res) => {
+  const { rol, comuna } = req.body || {};
+  const key = process.env.CATASTRAL_KEY;
+  if (!key) return res.json({ ok:false, mensaje:'Falta la clave de Catastral.cl en el servidor (variable CATASTRAL_KEY en Railway).' });
+  const m = String(rol || '').trim().match(/^0*(\d+)\s*[-–/ ]\s*0*(\d+)$/);
+  if (!m || !comuna) return res.json({ ok:false, mensaje:'El rol debe tener la forma manzana-predio, por ejemplo 123-45.' });
+  try {
+    const H = { 'X-API-Key': key };
+    if (!cacheCatastralComunas.lista || Date.now() - cacheCatastralComunas.desde > 7 * 864e5) {
+      const rc = await fetch(CATASTRAL_API + '/comunas', { headers: H });
+      if (!rc.ok) return res.json({ ok:false, mensaje:'Catastral.cl no respondió (' + rc.status + '). Revisa la clave o el cupo diario.' });
+      cacheCatastralComunas.lista = await rc.json(); cacheCatastralComunas.desde = Date.now();
+    }
+    const buscada = normU(comuna).replace(/[^A-Z ]/g, '');
+    const lista = cacheCatastralComunas.lista;
+    const c = lista.find(x => normU(x.nombre) === buscada) ||
+              lista.find(x => { const n = normU(x.nombre); return n.includes(buscada) || buscada.includes(n); });
+    if (!c) return res.json({ ok:false, mensaje:'Catastral.cl no reconoce la comuna "' + comuna + '".' });
+    const rp = await fetch(CATASTRAL_API + '/predio/' + c.codigo + '/' + Number(m[1]) + '/' + Number(m[2]) + '/poligono', { headers: H });
+    if (rp.status === 404) return res.json({ ok:false, mensaje:'Catastral.cl tampoco tiene el polígono de este rol.' });
+    if (!rp.ok) return res.json({ ok:false, mensaje:'Catastral.cl respondió con error ' + rp.status + (rp.status === 429 ? ' (se acabó el cupo del día).' : '.') });
+    const j = await rp.json();
+    if (!j || !j.geometry) return res.json({ ok:false, mensaje:'Catastral.cl no trae geometría para este rol.' });
+    res.json({ ok:true, predioGeo: j.geometry, superficieHa: ((j.geom_area_m2 || 0) / 10000).toFixed(2), comunaCatastral: c.nombre, fuente:'SII vía Catastral.cl (referencial)' });
+  } catch (e) {
+    res.json({ ok:false, mensaje:'No se pudo consultar Catastral.cl: ' + e.message });
+  }
+});
 app.get('/suelos-rol', manejadorSuelos); // permite probar por link: /suelos-rol?rol=75-32&comuna=galvarino
 
 // ──────── DIAGNOSTICO SIT RURAL v2 (abrir en el navegador: /diag-sitrural) ────────
