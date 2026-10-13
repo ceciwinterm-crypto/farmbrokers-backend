@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.7';
+const VERSION = 'crm-v8.8';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -606,7 +606,7 @@ router.get('/', (req, res) => {
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
-    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, ofertas: (db.ofertas || []).slice(-300) });
+    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, miembros: miembrosEquipo(db), ofertas: (db.ofertas || []).slice(-300) });
 });
 
 for (const col of ['campos', 'clientes', 'tasaciones']) {
@@ -1834,7 +1834,7 @@ router.get('/publico-img', async (req, res) => {
 // ───────────────────────── Nombres del equipo ─────────────────────────
 function personasEquipo(db) {
   const cuenta = {};
-  const ignorar = (n) => !n || /\((propietario|cliente)\)$/.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo'].includes(n);
+  const ignorar = (n) => !n || /\([^)]*\)$/.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo', 'CRM'].includes(n);
   const sumar = (n, k = 1) => { if (!ignorar(n)) cuenta[n] = (cuenta[n] || 0) + k; };
   for (const col of ['campos', 'clientes', 'tasaciones']) for (const x of db[col]) { (x.historial || []).forEach((h) => sumar(h.autor)); if (x.responsable) sumar(x.responsable); }
   (db.actividad || []).forEach((a) => sumar(a.autor));
@@ -1845,6 +1845,12 @@ function personasEquipo(db) {
   extra.forEach((n) => sumar(n, 0));
   return Object.entries(cuenta).map(([nombre, registros]) => ({ nombre, registros, ultimoIngreso: (cfg.vistos || {})[nombre] || '' }))
     .sort((a, b) => b.registros - a.registros || a.nombre.localeCompare(b.nombre, 'es'));
+}
+// El equipo real (a quién se le pueden asignar tareas): quienes entran al CRM, los agregados a mano y las administradoras
+function miembrosEquipo(db) {
+  const cfg = db.config || {};
+  const fuera = (n) => !n || /\(|formulario|cliente|propietario/i.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo', 'CRM'].includes(n);
+  return [...new Set([...(cfg.miembros || []), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || [])].filter((n) => !fuera(n)))].sort((a, b) => a.localeCompare(b, 'es'));
 }
 router.post('/equipo/renombrar', async (req, res) => {
   const de = txt((req.body || {}).de, 80), a = txt((req.body || {}).a, 80);
@@ -2272,6 +2278,7 @@ router.post('/tareas', async (req, res) => {
   if (titulo.length < 3) return res.status(400).json({ error: 'Escribe qué hay que hacer.' });
   if (!para) return res.status(400).json({ error: 'Elige a quién se la asignas.' });
   const r = await modificar((db) => {
+    if (para !== autor && !miembrosEquipo(db).includes(para)) return { error: `${para} no es parte del equipo. Agrégalo primero en Equipo › Personas.` };
     const ref = b.ref && b.ref.col && db[b.ref.col] && db[b.ref.col].find((x) => x.id === b.ref.id) ? { col: b.ref.col, id: b.ref.id, nombre: nombreRef(db, b.ref) } : null;
     const t = { id: id(), titulo, detalle: txt(b.detalle, 2000), asignadoA: para, creadoPor: autor, fecha: ahora(), vence: /^\d{4}-\d{2}-\d{2}$/.test(b.vence || '') ? b.vence : '',
       estado: 'pendiente', ref, comentarios: [] };
@@ -2281,6 +2288,7 @@ router.post('/tareas', async (req, res) => {
     notificar(db, para, `${autor} te asignó una tarea: ${titulo}${ref ? ` (${ref.nombre})` : ''}`, { tarea: t.id }, autor);
     return t;
   });
+  if (r && r.error) return res.status(400).json(r);
   res.json(r);
 });
 router.put('/tareas/:id', async (req, res) => {
@@ -2288,6 +2296,7 @@ router.put('/tareas/:id', async (req, res) => {
   const r = await modificar((db) => {
     const t = (db.tareas || []).find((x) => x.id === req.params.id); if (!t) return null;
     const antes = { ...t };
+    if (b.asignadoA) { const nuevo = txt(b.asignadoA, 80); if (nuevo !== t.asignadoA && nuevo !== autor && !miembrosEquipo(db).includes(nuevo)) return { error: `${nuevo} no es parte del equipo. Agrégalo primero en Equipo › Personas.` }; }
     if (b.estado && ESTADOS_TAREA.includes(b.estado)) t.estado = b.estado;
     if (b.titulo) t.titulo = txt(b.titulo, 200);
     if (b.asignadoA) t.asignadoA = txt(b.asignadoA, 80);
@@ -2307,6 +2316,7 @@ router.put('/tareas/:id', async (req, res) => {
     if (t.asignadoA !== antes.asignadoA) { auditar(db, autor, `Reasignó la tarea “${t.titulo}” a ${t.asignadoA}`, t.ref); notificar(db, t.asignadoA, `${autor} te asignó una tarea: ${t.titulo}`, { tarea: t.id }, autor); }
     return t;
   });
+  if (r && r.error) return res.status(400).json(r);
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tarea.' });
 });
 router.post('/tareas/:id/comentario', async (req, res) => {
