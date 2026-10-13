@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v9.1';
+const VERSION = 'crm-v9.2';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -56,7 +56,8 @@ const tieneLinkWeb = (c) => [c.linkWeb, c.linkPortal].some((u) => /^https?:\/\/(
 // Convierte los campos antiguos: "Publicado" pasa a "En venta" y se asigna la visibilidad
 function normalizarCampo(c) {
   // Campos con varios KMZ subidos antes de que se pudieran dibujar juntos: se unen una vez
-  if (c.geoVersion !== 2 && (c.archivos || []).filter(esKmzArchivo).length > 1) { try { recalcularGeo(c); } catch (e) { /* se reintenta en la próxima lectura */ } }
+  // Se vuelven a leer los KMZ: varios por campo (v2) y los de Perú que antes se rechazaban por estar fuera de Chile (v3)
+  { const nk = (c.archivos || []).filter(esKmzArchivo).length; if (c.geoVersion !== 3 && nk && (nk > 1 || !c.geo)) { try { recalcularGeo(c); } catch (e) { /* se reintenta en la próxima lectura */ } } }
   const eraPublicado = c.etapa === 'Publicado' || c.etapa === 'Activo';
   if (eraPublicado) c.etapa = etapaOferta(c.operacion);
   if (['Publicado', 'Activo'].includes(c.etapaAntesDeRetiro)) c.etapaAntesDeRetiro = etapaOferta(c.operacion);
@@ -1328,7 +1329,7 @@ function puntoEnAnillo([x, y], a) {
 }
 // Une todos los KMZ del campo en un solo plano: cada archivo es una "parte" que se dibuja con su color
 function recalcularGeo(campo) {
-  campo.geoVersion = 2;
+  campo.geoVersion = 3;
   const partes = [];
   for (const a of (campo.archivos || []).filter(esKmzArchivo)) {
     try { partes.push({ a, g: geoDeArchivo(fs.readFileSync(path.join(ARCHIVOS, campo.id, a.id)), a.nombre) }); } catch (e) { /* archivo sin contorno */ }
@@ -2623,7 +2624,7 @@ router.post('/campos/:id/publicar-web', async (req, res) => {
   if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
   const t = (k, n = 300) => txt(b[k], n);
   if (!t('titulo')) return res.status(400).json({ error: 'Falta el título.' });
-  if (campo.visibilidad === 'reservada') return res.status(409).json({ error: 'Este campo es de venta reservada: el propietario no quiere que se publique. Si eso cambió, pásalo a visibilidad Pública y vuelve a intentarlo.' });
+  if (campo.visibilidad === 'reservada') return res.status(409).json({ error: 'Este campo es off market: no se publica. Si eso cambió, pásalo a visibilidad Pública.' });
   // Bloqueos para no crear publicaciones duplicadas
   const linkPublicado = [campo.linkWeb, campo.linkPortal].find((u) => slugDe(u));
   if (linkPublicado) return res.status(409).json({ error: 'Este campo ya está publicado en farmbrokers.cl. Los cambios de la publicación se hacen en WordPress.', link: linkPublicado });
@@ -2840,7 +2841,7 @@ function aLineas(html) {
     .replace(/<li[^>]*>/gi, '\n• ').replace(/<(br|\/p|\/li|\/div|\/h[1-6]|\/tr|\/ul|\/ol|\/section|\/article)[^>]*>/gi, '\n').replace(/<[^>]+>/g, ' '))
     .split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
 }
-const coordOk = (lat, lng) => lat < -17 && lat > -56.5 && lng < -66 && lng > -110;
+const coordOk = (lat, lng) => lat < 0 && lat > -56.5 && lng < -66 && lng > -110; // Chile y Perú
 function buscarCoordenadas(html) {
   const pruebas = [
     /"lat(?:itude)?"\s*:\s*"?(-\d{1,2}\.\d{3,})"?\s*,\s*"(?:lng|long|longitude)"\s*:\s*"?(-\d{1,3}\.\d{3,})/i,
@@ -3041,6 +3042,7 @@ router.post('/campos/:id/buscar-web', async (req, res) => {
   const db = leer(), campo = db.campos.find((x) => x.id === req.params.id);
   if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
   if (linkFB(campo)) return res.json({ estado: 'enlazado', campo });
+  if (campo.visibilidad === 'reservada') return res.json({ estado: 'no', motivo: 'Es un campo off market (no está publicado).' });
   // 1) Otro campo del CRM que ya tiene esa publicación (por ejemplo, creado por la sincronización)
   const cod = norm(campo.codigo).toUpperCase();
   const enCRM = db.campos.filter((x) => x.id !== campo.id && x.web && (x.web.fotos || []).length && linkFB(x)).map((x) => {
