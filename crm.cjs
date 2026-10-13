@@ -270,7 +270,7 @@ function limpiar(col, b, previo = {}) {
   const fecha = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : '');
   if (col === 'campos') {
     const r = {};
-    for (const k of CAMPOS_CAMPO) r[k] = txt(o[k], k === 'descripcionFicha' ? 8000 : ['observaciones', 'infraestructura'].includes(k) ? 4000 : 400);
+    for (const k of CAMPOS_CAMPO) r[k] = txt(o[k], k === 'descripcionFicha' ? 20000 : ['observaciones', 'infraestructura'].includes(k) ? 4000 : 400);
     r.tipo = TIPOS.includes(o.tipo) ? o.tipo : tipoNorm(o.tipo) || 'agricola';
     r.etapa = ['Publicado', 'Activo'].includes(o.etapa) ? etapaOferta(o.operacion) : ETAPAS.campos.includes(o.etapa) ? o.etapa : 'Captación';
     r.visibilidad = VISIBILIDADES.includes(o.visibilidad) ? o.visibilidad : '';
@@ -2522,10 +2522,13 @@ const REGION_WEB = { XV: 'Región de Arica y Parinacota', I: 'Región de Tarapac
   VI: "Región de O'Higgins", VII: 'Región del Maule', XVI: 'Región de Ñuble', VIII: 'Región del Biobío', IX: 'Región de la Araucanía', XIV: 'Región de los Ríos', X: 'Región de los Lagos', XI: 'Región de Aysén', XII: 'Región de Magallanes' };
 const escHtml = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function descripcionHtml(lineas) {
-  const out = []; let lista = [];
-  const cerrar = () => { if (lista.length) { out.push(`<ul>${lista.map((x) => `<li>${escHtml(x)}</li>`).join('')}</ul>`); lista = []; } };
+  const out = []; let lista = [], tabla = [];
+  const cerrarTabla = () => { if (tabla.length) { const filas = tabla.map((f) => f.replace(/^\||\|$/g, '').split('|').map((x) => x.trim())); out.push(`<table><thead><tr>${filas[0].map((c) => `<th>${escHtml(c)}</th>`).join('')}</tr></thead><tbody>${filas.slice(1).map((f) => `<tr>${f.map((c) => `<td>${escHtml(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`); tabla = []; } };
+  const cerrar = () => { cerrarTabla(); if (lista.length) { out.push(`<ul>${lista.map((x) => `<li>${escHtml(x)}</li>`).join('')}</ul>`); lista = []; } };
   for (const l0 of lineas) {
     const l = String(l0).trim(); if (!l) continue;
+    if (/^\|.*\|$/.test(l)) { if (lista.length) { out.push(`<ul>${lista.map((x) => `<li>${escHtml(x)}</li>`).join('')}</ul>`); lista = []; } tabla.push(l); continue; }
+    cerrarTabla();
     if (/^[•–-]\s*/.test(l)) { lista.push(l.replace(/^[•–-]\s*/, '')); continue; }
     cerrar();
     const m = l.match(/^([A-ZÁÉÍÓÚÑ][^:]{1,40}):\s*(.*)$/);
