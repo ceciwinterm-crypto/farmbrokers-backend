@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v9.0';
+const VERSION = 'crm-v9.1';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -81,7 +81,7 @@ const TIPOS_BASE = { agricola: 'Agrícola', loteo: 'Loteo', forestal: 'Forestal'
 let tiposExtra = {}; // tipos agregados por el equipo (se cargan desde el archivo del CRM)
 const todosLosTipos = () => ({ ...TIPOS_BASE, ...tiposExtra });
 const TIPOS = { includes: (k) => Object.prototype.hasOwnProperty.call(todosLosTipos(), k) };
-const REGIONES = ['XV', 'I', 'II', 'III', 'IV', 'V', 'RM', 'VI', 'VII', 'XVI', 'VIII', 'IX', 'XIV', 'X', 'XI', 'XII'];
+const REGIONES = ['XV', 'I', 'II', 'III', 'IV', 'V', 'RM', 'VI', 'VII', 'XVI', 'VIII', 'IX', 'XIV', 'X', 'XI', 'XII', 'PE']; // PE: Perú (campos fuera de Chile)
 const CULTIVOS = {
   paltos: /\bpalt(o|os|a|as)\b/, citricos: /citric|limon|naranj|mandarin|clementin/, nogales: /nogal|nuez|nueces|chandler/,
   cerezos: /cerez|ceres/, avellanos: /avellan/, almendros: /almendr/, manzanos: /manzan/, perales: /\bperas?\b|\bperal/,
@@ -119,6 +119,7 @@ function regionCodigo(t) {
   if (!s) return '';
   if (s === 'RM' || s.startsWith('METRO') || s === '13') return 'RM';
   if (s.startsWith('AYSEN')) return 'XI';
+  if (s === 'PE' || s.startsWith('PERU')) return 'PE';
   const arab = { 1: 'I', 2: 'II', 3: 'III', 4: 'IV', 5: 'V', 6: 'VI', 7: 'VII', 8: 'VIII', 9: 'IX', 10: 'X', 11: 'XI', 12: 'XII', 14: 'XIV', 15: 'XV', 16: 'XVI' };
   if (/^\d{1,2}$/.test(s)) return arab[Number(s)] || '';
   return REGIONES.includes(s) ? s : '';
@@ -126,7 +127,7 @@ function regionCodigo(t) {
 
 function expandir(a, b) {
   const i = REGIONES.indexOf(a), j = REGIONES.indexOf(b);
-  if (i < 0 || j < 0) return [a, b].filter(Boolean);
+  if (i < 0 || j < 0 || a === 'PE' || b === 'PE') return [a, b].filter(Boolean);
   return REGIONES.slice(Math.min(i, j), Math.max(i, j) + 1);
 }
 
@@ -368,7 +369,9 @@ function evaluar(campo, cli, hoy = new Date()) {
   let sLugar;
   const tieneRegion = cli.regiones && cli.regiones.length;
   if (tieneRegion) conocidos++;
-  if (tieneRegion && campo.region && cli.regiones.includes(campo.region)) { sLugar = 25; razones.push(`Busca en región ${campo.region}`); }
+  // Los campos en Perú solo calzan con clientes que buscan en Perú (o que lo mencionan)
+  if (campo.region === 'PE' && !(cli.regiones || []).includes('PE') && !hitZona) return null;
+  if (tieneRegion && campo.region && cli.regiones.includes(campo.region)) { sLugar = 25; razones.push(campo.region === 'PE' ? 'Busca en Perú' : `Busca en región ${campo.region}`); }
   else if (tieneRegion && campo.region && !hitZona) return null;
   else sLugar = hitZona ? 25 : 17;
   if (hitZona) {
@@ -1018,7 +1021,7 @@ const CORREDOR = {
 const REGION_TEXTO = { XV: 'Región de Arica y Parinacota', I: 'Región de Tarapacá', II: 'Región de Antofagasta', III: 'Región de Atacama',
   IV: 'Región de Coquimbo', V: 'Región de Valparaíso', RM: 'Región Metropolitana', VI: "Región del Libertador General Bernardo O'Higgins",
   VII: 'Región del Maule', XVI: 'Región de Ñuble', VIII: 'Región del Biobío', IX: 'Región de La Araucanía', XIV: 'Región de Los Ríos',
-  X: 'Región de Los Lagos', XI: 'Región de Aysén', XII: 'Región de Magallanes' };
+  X: 'Región de Los Lagos', XI: 'Región de Aysén', XII: 'Región de Magallanes', PE: 'Perú' };
 const TIPO_PREDIO = { agricola: 'Campo agrícola', loteo: 'Campo loteo', parcela: 'Parcela', forestal: 'Campo forestal', ganadero: 'Campo ganadero' };
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 const TIPOS_ARCHIVO = ['kmz', 'foto', 'dominio', 'hipotecas', 'avaluo', 'aguas', 'plano', 'otro'];
