@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.8';
+const VERSION = 'crm-v8.9';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -1582,7 +1582,7 @@ router.post('/kmz/analizar', (req, res) => {
 // ───────────────────────── Plano con acuerdo de confidencialidad ─────────────────────────
 const ACUERDO_BASE = `ACUERDO DE CONFIDENCIALIDAD
 
-Quien suscribe, en adelante "el Interesado", declara recibir de FARM BROKERS CHILE SPA, rol único tributario N° 77.089.307-0, en adelante "el Corredor", información sobre la propiedad {CAMPO}, en adelante "la Propiedad", incluyendo su plano, su ubicación exacta y el archivo KMZ, con el solo fin de evaluar su eventual compra.
+Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT}, en adelante "el Interesado", declara recibir de FARM BROKERS CHILE SPA, rol único tributario N° 77.089.307-0, en adelante "el Corredor", información sobre la propiedad {CAMPO}, en adelante "la Propiedad", incluyendo su plano, su ubicación exacta y el archivo KMZ, con el solo fin de evaluar su eventual compra.
 
 1. El Interesado se obliga a mantener la más estricta confidencialidad respecto de la información recibida, y a no divulgarla, copiarla ni entregarla a terceros sin autorización previa, expresa y por escrito del Corredor, salvo a sus asesores directos, quienes quedarán sujetos a la misma obligación.
 
@@ -1594,7 +1594,13 @@ Quien suscribe, en adelante "el Interesado", declara recibir de FARM BROKERS CHI
 
 El Interesado acepta este acuerdo en forma electrónica, con los datos y la fecha que se registran al momento de su aceptación.`;
 const textoAcuerdo = (db) => (db.config && db.config.acuerdo) || ACUERDO_BASE;
-const acuerdoPara = (db, campo) => textoAcuerdo(db).replace(/\{CAMPO\}/g, (campo.web && campo.web.titulo) || campo.nombre);
+// {NOMBRE} y {RUT} se completan con los datos de quien acepta (si el texto editado no los trae, se agregan tras "Quien suscribe")
+const acuerdoPara = (db, campo) => {
+  let t = textoAcuerdo(db);
+  if (!/\{NOMBRE\}/.test(t)) t = /Quien suscribe,?/i.test(t) ? t.replace(/Quien suscribe,?/i, 'Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT},') : `Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT}, acepta lo siguiente:\n\n${t}`;
+  return t.replace(/\{CAMPO\}/g, (campo.web && campo.web.titulo) || campo.nombre);
+};
+const acuerdoFirmado = (t, nombre, rut) => String(t).replace(/\{NOMBRE\}/g, nombre).replace(/\{RUT\}/g, rut);
 
 router.put('/config/acuerdo', async (req, res) => {
   const t = txt((req.body || {}).texto, 20000);
@@ -1673,7 +1679,7 @@ function publicoPlano(db, campo, c) {
   return {
     titulo: (campo.web && campo.web.titulo) || campo.nombre, lugar: [campo.sector, REGION_TEXTO[campo.region]].filter(Boolean).join(', '),
     destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !(conKmz || pls.length) ? 'El plano ya no está disponible.' : '',
-    acuerdo: texto, hash: hashBloques([texto, campo.id]), descarga: c.descarga,
+    acuerdo: c.aceptacion && c.aceptacion.texto ? c.aceptacion.texto : texto, hash: hashBloques([texto, campo.id]), descarga: c.descarga,
     aceptacion: c.aceptacion ? { nombre: c.aceptacion.nombre, rut: c.aceptacion.rut, email: c.aceptacion.email || '', fecha: c.aceptacion.fecha, codigo: c.aceptacion.hash.slice(0, 12).toUpperCase() } : null,
     plano: c.aceptacion && disponible && conKmz ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro, partes: (campo.geo.partes || []).map((p) => ({ nombre: p.nombre, desde: p.desde, hasta: p.hasta, areaHa: p.areaHa })) } : null,
     planos: c.aceptacion && disponible ? pls.map((a) => ({ id: a.id, nombre: a.nombre, vistas: a.vistas })) : [],
@@ -1730,9 +1736,10 @@ router.post('/publico-plano/:token/aceptar', async (req, res) => {
     const nombre = txt(b.nombre, 160), rut = txt(b.rut, 20), email = txt(b.email, 160);
     if (nombre.length < 3) return { error: 'Escribe tu nombre completo.' };
     if (!rutValido(rut)) return { error: 'El RUT no es válido.' };
-    c.aceptacion = { nombre, rut: rutFormato(rut), email, fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash: pub.hash, texto: pub.acuerdo };
+    const firmado = acuerdoFirmado(pub.acuerdo, nombre, rutFormato(rut));
+    c.aceptacion = { nombre, rut: rutFormato(rut), email, fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash: hashBloques([firmado, campo.id]), hashPlantilla: pub.hash, texto: firmado };
     const quien = `${nombre} (cliente)`;
-    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó el acuerdo de confidencialidad y accedió al plano (RUT ${c.aceptacion.rut}, código ${pub.hash.slice(0, 12).toUpperCase()})` }];
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó el acuerdo de confidencialidad y accedió al plano (RUT ${c.aceptacion.rut}, código ${c.aceptacion.hash.slice(0, 12).toUpperCase()})` }];
     const cli = c.clienteId && db.clientes.find((y) => y.id === c.clienteId);
     if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó la confidencialidad y vio el plano de ${campo.nombre}` }];
     registrar(db, quien, `Aceptó la confidencialidad del plano de ${campo.nombre}`, { col: 'campos', id: campo.id });
