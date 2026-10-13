@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v8.9';
+const VERSION = 'crm-v9.0';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -606,7 +606,7 @@ router.get('/', (req, res) => {
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
-    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, miembros: miembrosEquipo(db), ofertas: (db.ofertas || []).slice(-300) });
+    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, miembros: miembrosEquipo(db), brochures: (db.brochures || []).slice(-500).map(({ token, clienteId, campos, fecha, autor, vistas }) => ({ token, clienteId, campos, fecha, autor, vistas })), ofertas: (db.ofertas || []).slice(-300) });
 });
 
 for (const col of ['campos', 'clientes', 'tasaciones']) {
@@ -788,9 +788,27 @@ function resumenDe(db, nombre, hoy = hoySantiago()) {
   const sinLeer = (db.notificaciones || []).filter((n) => n.para === nombre && !n.leida).length;
   return { items, sinLeer, fin };
 }
+// Lo que hizo el equipo en los últimos 7 días (para el correo del lunes)
+function semanaEquipo(db) {
+  const desde = Date.now() - 7 * 864e5, en = (f) => new Date(f || 0).getTime() >= desde;
+  const noPersona = /^(Importación|Sistema|Sincronización web|CRM)$|\(/;
+  let captados = 0, mandatos = 0, fichas = 0, planos = 0, aceptados = 0, cierres = 0;
+  for (const c of db.campos) {
+    const h0 = (c.historial || [])[0];
+    if (en(c.creado || (h0 && h0.fecha)) && !noPersona.test((h0 && h0.autor) || '')) captados++;
+    if (c.captacion && c.captacion.firma && en(c.captacion.firma.fecha)) mandatos++;
+    fichas += (c.envios || []).filter((e) => en(e.fecha)).length;
+    for (const k of c.compartidos || []) { if (en(k.creado)) planos++; if (k.aceptacion && en(k.aceptacion.fecha)) aceptados++; }
+    cierres += (c.historial || []).filter((h) => en(h.fecha) && /^Etapa: .+ → (Vendido|Arrendado)/.test(h.texto || '')).length;
+  }
+  return [['Campos captados', captados], ['Mandatos firmados', mandatos], ['Fichas enviadas', fichas], ['Planos y KMZ enviados', planos], ['Acuerdos aceptados', aceptados],
+    ['Brochures', (db.brochures || []).filter((b) => en(b.fecha)).length], ['Órdenes de visita', (db.ordenes || []).filter((o) => en(o.creado)).length],
+    ['Formularios de la web', (db.ofertas || []).filter((o) => en(o.fecha)).length], ['Negocios cerrados', cierres]];
+}
 function correoResumen(db, nombre, hoy = hoySantiago()) {
   const r = resumenDe(db, nombre, hoy);
-  if (!r.items.length && !r.sinLeer) return null;
+  const sem = semanaEquipo(db), hubo = sem.some(([, n]) => n);
+  if (!r.items.length && !r.sinLeer && !hubo) return null;
   const li = (x) => `<li style="margin:0 0 7px;font-size:14px;line-height:1.45">${escHtml(x.texto)}${x.detalle ? ` <span style="color:#5E6E64">· ${escHtml(x.detalle)}</span>` : ''}</li>`;
   const grupo = (titulo, lista, color = '#2D6A45') => (lista.length ? `<h2 style="font-size:14px;margin:16px 0 6px;color:${color}">${titulo} (${lista.length})</h2><ul style="margin:0;padding-left:18px">${lista.map(li).join('')}</ul>` : '');
   const atrasadas = r.items.filter((x) => x.fecha && x.fecha < hoy), sinFecha = r.items.filter((x) => !x.fecha);
@@ -804,9 +822,9 @@ function correoResumen(db, nombre, hoy = hoySantiago()) {
   if (r.sinLeer) partes.push(`<p style="margin:16px 0 0;font-size:14px">Tienes ${r.sinLeer} ${r.sinLeer === 1 ? 'aviso sin leer' : 'avisos sin leer'} en el CRM.</p>`);
   const n = r.items.length, nom = String(nombre).split(' ')[0];
   const lineas = r.items.map((x) => `- ${x.fecha ? (x.fecha < hoy ? 'ATRASADA ' : `${DIAS_SEMANA[new Date(`${x.fecha}T12:00:00`).getDay()]} `) : ''}${x.texto}${x.detalle ? ` (${x.detalle})` : ''}`);
-  return { asunto: n ? `Tu semana en el CRM: ${n} ${n === 1 ? 'pendiente' : 'pendientes'}${atrasadas.length ? `, ${atrasadas.length} ${atrasadas.length === 1 ? 'atrasada' : 'atrasadas'}` : ''}` : 'Tienes avisos sin leer en el CRM',
-    html: plantillaCorreo(`Buenos días, ${nom}`, `<p style="margin:0;font-size:14px;color:#5E6E64">Esto es lo que viene esta semana, del ${escHtml(fechaLargaISO(hoy))} al ${escHtml(fechaLargaISO(r.fin))}.</p>${partes.join('')}`, 'Resumen semanal del CRM de Farm Brokers, cada lunes. Puedes desactivarlo en Equipo › Personas.'),
-    texto: [`Buenos días, ${nom}. Lo que viene esta semana:`, ...lineas, r.sinLeer ? `Avisos sin leer: ${r.sinLeer}` : '', CRM_URL].filter(Boolean).join('\n') };
+  return { asunto: n ? `Tu semana en el CRM: ${n} ${n === 1 ? 'pendiente' : 'pendientes'}${atrasadas.length ? `, ${atrasadas.length} ${atrasadas.length === 1 ? 'atrasada' : 'atrasadas'}` : ''}` : r.sinLeer ? 'Tienes avisos sin leer en el CRM' : 'La semana del equipo en el CRM',
+    html: plantillaCorreo(`Buenos días, ${nom}`, `${hubo ? `<h2 style="font-size:14px;margin:0 0 8px;color:#1F4D31">La semana pasada en el equipo</h2><table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;margin:0 0 18px;border-collapse:collapse">${sem.filter(([, n]) => n).map(([l, n]) => `<tr><td style="padding:5px 0;border-bottom:1px solid #E9EEE9;font-size:14px">${escHtml(l)}</td><td style="padding:5px 0;border-bottom:1px solid #E9EEE9;font-size:15px;font-weight:bold;color:#1F4D31;text-align:right">${n}</td></tr>`).join('')}</table><p style="margin:0 0 4px;font-size:12.5px;color:#5E6E64">El detalle está en el CRM: Agenda › Informe PDF.</p>` : ''}<p style="margin:${hubo ? '14px' : '0'} 0 0;font-size:14px;color:#5E6E64">Esto es lo que viene esta semana, del ${escHtml(fechaLargaISO(hoy))} al ${escHtml(fechaLargaISO(r.fin))}.</p>${partes.join('')}`, 'Resumen semanal del CRM de Farm Brokers, cada lunes. Puedes desactivarlo en Equipo › Personas.'),
+    texto: [`Buenos días, ${nom}.`, hubo ? `La semana pasada en el equipo: ${sem.filter(([, n]) => n).map(([l, n]) => `${l}: ${n}`).join(', ')}.` : '', 'Lo que viene esta semana:', ...lineas, r.sinLeer ? `Avisos sin leer: ${r.sinLeer}` : '', CRM_URL].filter(Boolean).join('\n') };
 }
 async function enviarResumenes(forzar = false) {
   const db = leer(), hoy = hoySantiago();
