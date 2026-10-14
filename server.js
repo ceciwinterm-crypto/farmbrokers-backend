@@ -80,20 +80,64 @@ const almacen = require('./almacen');
 const FB_CLAVE = process.env.FB_CLAVE;
 if (!FB_CLAVE) console.warn('AVISO: falta FB_CLAVE — el respaldo de tasaciones queda deshabilitado por seguridad');
 
-// ── Tiempo limite en TODAS las llamadas a servicios externos ───────────────
-// Sin esto, si CIREN o la DGA quedan colgados el servidor espera indefinidamente
-// y termina agotando sus conexiones. 25 s es holgado para estos servicios.
+// ── Fuentes externas: tiempo limite, reintento y aviso ─────────────────────
+// Cada llamada a un servicio externo tiene un tiempo maximo segun la fuente. Si una fuente
+// oficial (SII, CIREN, SIT Rural, DGA…) no responde o da error temporal, se reintenta una vez.
+// Si falla igual, queda anotada y la respuesta de la ruta incluye "avisosFuentes", para que la
+// plataforma muestre en pantalla que dato falto (y el informe se pueda generar igual).
+const { AsyncLocalStorage } = require('async_hooks');
+const alsFuentes = new AsyncLocalStorage();
+const FUENTES = [
+  // [nombre, patron del host, tiempo maximo (ms), reintentar ante error de servidor]
+  ['SII', /simpleapi\.cl|catastral\.cl|sii\.cl/i, 25000, false],   // SimpleAPI cobra por consulta: solo se reintenta si no hubo conexion
+  ['CIREN', /ciren\.cl/i, 40000, true],
+  ['SITRURAL', /sitrural\.cl/i, 40000, true],
+  ['DGA', /dga\.mop\.gob\.cl|dga\.cl/i, 30000, true],
+  ['Distancias', /project-osrm\.org|nominatim\.openstreetmap\.org/i, 15000, true],
+  ['Energia', /minenergia\.cl/i, 30000, true],
+  ['Open-Meteo', /open-meteo\.com/i, 20000, true],
+  ['Google Maps', /maps\.googleapis\.com/i, 20000, true],
+];
+const fuenteDe = (u) => FUENTES.find(([, re]) => re.test(u));
+const esperar = (ms) => new Promise((r) => setTimeout(r, ms));
+const reenviable = (b) => b == null || typeof b === 'string' || b instanceof URLSearchParams || Buffer.isBuffer(b);
 const fetchOriginal = global.fetch;
-global.fetch = function (url, opciones) {
+global.fetch = async function (url, opciones) {
   const o = opciones || {};
   if (o.signal) return fetchOriginal(url, o);
-  // Los servicios cartograficos deben responder rapido; la generacion del informe
-  // con IA se demora legitimamente varios minutos y NO debe cortarse.
   const u = String(url || '');
-  const esIA = /api\.anthropic\.com/i.test(u);
-  const ms = o.timeoutMs || (esIA ? 600000 : 45000);
-  return fetchOriginal(url, { ...o, signal: AbortSignal.timeout(ms) });
+  // La generacion del informe con IA se demora legitimamente varios minutos y NO debe cortarse
+  if (/api\.anthropic\.com/i.test(u)) return fetchOriginal(url, { ...o, signal: AbortSignal.timeout(o.timeoutMs || 600000) });
+  const f = fuenteDe(u);
+  if (!f) return fetchOriginal(url, { ...o, signal: AbortSignal.timeout(o.timeoutMs || 45000) });
+  const [nombre, , ms, reintentarEstado] = f;
+  const intentos = reenviable(o.body) ? 2 : 1;
+  let ultimoError = null;
+  for (let i = 0; i < intentos; i++) {
+    try {
+      const r = await fetchOriginal(url, { ...o, signal: AbortSignal.timeout(o.timeoutMs || ms) });
+      const temporal = [429, 502, 503, 504].includes(r.status);
+      if (!temporal || !reintentarEstado || i === intentos - 1) {
+        if (temporal || r.status >= 500) anotarFuente(nombre, `respondio con error ${r.status}`);
+        return r;
+      }
+    } catch (e) { ultimoError = e; }
+    if (i < intentos - 1) await esperar(1500);
+  }
+  anotarFuente(nombre, ultimoError && /timeout|abort/i.test(String(ultimoError.name || ultimoError.message)) ? 'no respondio a tiempo (se reintento 1 vez)' : 'no se pudo conectar (se reintento 1 vez)');
+  throw ultimoError || new Error(`${nombre} no respondio`);
 };
+function anotarFuente(fuente, detalle) {
+  const st = alsFuentes.getStore();
+  console.warn(`[fuente] ${fuente}: ${detalle}`);
+  if (st && !st.avisos.some((a) => a.fuente === fuente)) st.avisos.push({ fuente, detalle });
+}
+app.use((req, res, next) => {
+  const st = { avisos: [] };
+  const json = res.json.bind(res);
+  res.json = (b) => (st.avisos.length && b && typeof b === 'object' && !Array.isArray(b) && !b.avisosFuentes ? json({ ...b, avisosFuentes: st.avisos }) : json(b));
+  alsFuentes.run(st, next);
+});
 
 // ── Proteccion de los endpoints de datos ───────────────────────────────────
 // El backend queda expuesto en internet: sin esto, cualquiera con la URL puede
@@ -2319,6 +2363,30 @@ app.get('/img-sitrural', async (req, res) => {
     res.set('Cache-Control', 'public, max-age=3600');
     res.send(Buffer.from(await r.arrayBuffer()));
   } catch (e) { res.status(500).send(e.message); }
+});
+
+// ──────── IMAGEN SATELITAL (Google Static Maps) ────────
+// La clave de Google vive solo en el servidor (variable GOOGLE_MAPS_KEY en Railway); nunca llega al navegador.
+app.get('/mapa-satelital', async (req, res) => {
+  const KEY = process.env.GOOGLE_MAPS_KEY;
+  if (!KEY) return res.status(404).json({ error: 'sin-clave', mensaje: 'La imagen de Google no está configurada (falta GOOGLE_MAPS_KEY en Railway). Se usa la imagen gratuita de Esri.' });
+  const lat = Number(req.query.lat), lon = Number(req.query.lon);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon) || Math.abs(lat) > 90 || Math.abs(lon) > 180) return res.status(400).json({ error: 'Coordenadas no válidas.' });
+  const zoom = Math.min(20, Math.max(10, Number(req.query.zoom) || 15));
+  const p = `${lat.toFixed(6)},${lon.toFixed(6)}`;
+  const url = `https://maps.googleapis.com/maps/api/staticmap?center=${p}&zoom=${zoom}&size=800x500&maptype=satellite&markers=color:red%7C${p}&key=${encodeURIComponent(KEY)}`;
+  try {
+    const r = await fetch(url);
+    const tipo = r.headers.get('content-type') || '';
+    if (!r.ok || !/^image\//.test(tipo)) {
+      const txt = (await r.text().catch(() => '')).slice(0, 300);
+      console.warn('[mapa-satelital] Google respondió', r.status, txt);
+      return res.status(502).json({ error: 'Google Maps no entregó la imagen (revisa la clave y que la "Maps Static API" esté habilitada). Se usa la imagen de Esri.' });
+    }
+    res.set('Content-Type', tipo);
+    res.set('Cache-Control', 'private, max-age=3600');
+    res.send(Buffer.from(await r.arrayBuffer()));
+  } catch (e) { res.status(502).json({ error: 'No se pudo conectar con Google Maps: ' + e.message }); }
 });
 
 // ──────── ESCASEZ HIDRICA: decretos vigentes segun pagina oficial DGA ────────

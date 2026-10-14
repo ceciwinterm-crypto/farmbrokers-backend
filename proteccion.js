@@ -66,7 +66,7 @@ setInterval(() => { const t = Date.now(); for (const [k, v] of fallosClave) if (
 
 // Rutas que consultan fuentes externas (SII, CIREN, SITRURAL, DGA, IA…): cuestan cuota y tiempo
 const RUTAS_EXTERNAS = ['/buscar-propietario', '/consultar-inia', '/energia-cercana', '/consultar-normativa-solar', '/buscar-comparables', '/buscar-rol', '/suelos-rol', '/poligono-catastral',
-  '/distancias', '/deslindes', '/derechos-agua', '/leyenda-ciren', '/img-sitrural', '/escasez', '/sitrural-recargar', '/diag-sitrural', '/diag-dga'];
+  '/distancias', '/deslindes', '/derechos-agua', '/leyenda-ciren', '/img-sitrural', '/escasez', '/sitrural-recargar', '/diag-sitrural', '/diag-dga', '/mapa-satelital'];
 const RUTAS_IA = ['/generar-informe', '/generar-word'];
 const N = (v, d) => (Number(v) > 0 ? Number(v) : d);
 
