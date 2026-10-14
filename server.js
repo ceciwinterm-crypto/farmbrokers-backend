@@ -1,15 +1,17 @@
 // Servidor backend para Farm Brokers - Plataforma de Tasaciones
 
 const express = require('express');
-const cors = require('cors');
 const app = express();
 
 app.set('trust proxy', 1);   // Railway pasa la IP real del visitante en X-Forwarded-For
-app.use(cors());
+const proteccion = require('./proteccion');
+proteccion.instalarCors(app);   // solo las paginas de Farm Brokers pueden llamar al servidor desde el navegador
 app.use(express.json({ limit: '60mb' }));   // el informe viaja con sus imagenes en base64
 // Usuarios individuales: si la peticion trae un token de sesion valido, queda en req.usuario
 const auth = require('./auth');
 app.use(auth.leerSesion);
+// Proteccion: limite de peticiones y validacion de datos
+proteccion.instalar(app);
 app.use('/auth', auth.router);
 app.use('/api/crm', require('./crm.cjs'));
 app.use(require('./crm.cjs').cortos); // links cortos de fichas: fichas.farmbrokers.cl/f/<código>
