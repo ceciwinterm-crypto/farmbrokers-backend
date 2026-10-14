@@ -1475,11 +1475,21 @@ router.put('/campos/:id/archivos/:fid', async (req, res) => {
   const r = await modificar((db) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
     const a = (campo.archivos || []).find((x) => x.id === req.params.fid); if (!a) return null;
+    // Foto de portada: la elige el equipo (es la principal de la ficha y del brochure)
+    if ((req.body || {}).portada === true) {
+      if (a.tipo !== 'foto') return { error: 'Solo una foto puede ser portada.' };
+      for (const x of campo.archivos) if (x.tipo === 'foto') x.portada = x.id === a.id;
+      campo.actualizado = ahora();
+      campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Eligió ${a.nombre} como foto de portada` }];
+      return campo;
+    }
     a.enFicha = enFicha;
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: enFicha ? `Agregó el plano ${a.nombre} a la ficha` : `Sacó el plano ${a.nombre} de la ficha` }];
     return campo;
   });
-  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el archivo.' });
+  if (!r) return res.status(404).json({ error: 'No se encontró el archivo.' });
+  if (r.error) return res.status(400).json(r);
+  res.json(r);
 });
 
 router.delete('/campos/:id/archivos/:fid', async (req, res) => {
