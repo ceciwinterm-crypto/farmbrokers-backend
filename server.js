@@ -4,8 +4,13 @@ const express = require('express');
 const cors = require('cors');
 const app = express();
 
+app.set('trust proxy', 1);   // Railway pasa la IP real del visitante en X-Forwarded-For
 app.use(cors());
 app.use(express.json({ limit: '60mb' }));   // el informe viaja con sus imagenes en base64
+// Usuarios individuales: si la peticion trae un token de sesion valido, queda en req.usuario
+const auth = require('./auth');
+app.use(auth.leerSesion);
+app.use('/auth', auth.router);
 app.use('/api/crm', require('./crm.cjs'));
 app.use(require('./crm.cjs').cortos); // links cortos de fichas: fichas.farmbrokers.cl/f/<código>
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
@@ -93,21 +98,29 @@ global.fetch = function (url, opciones) {
 // consumir la cuota de SimpleAPI y consultar propietarios y RUT.
 // Rutas publicas: solo la raiz (estado del servicio).
 const RUTAS_PUBLICAS = ['/'];
+// Acceso: usuario con sesion (correo y contrasena) o, mientras se permita, la clave antigua del equipo
+function claveAntiguaOk(req) {
+  if (!FB_CLAVE || !auth.claveAntiguaPermitida()) return false;
+  const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
+  return String(dada) === String(FB_CLAVE);
+}
 app.use((req, res, next) => {
   if (req.method === 'GET' && RUTAS_PUBLICAS.includes(req.path)) return next();
   if (req.method === 'OPTIONS') return next();
-  if (!FB_CLAVE) return next();   // sin clave configurada, se comporta como antes
-  const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
-  if (String(dada) === String(FB_CLAVE)) return next();
-  return res.status(401).json({ error: 'Acceso no autorizado. Configura la clave de respaldo en Inicio → Respaldo en la nube.' });
+  if (req.usuario) return next();
+  if (!FB_CLAVE && !auth.hayUsuarios()) return next();   // sin clave ni usuarios configurados, se comporta como antes
+  if (claveAntiguaOk(req)) return next();
+  if (req.sesionInvalida) return res.status(401).json({ error: 'Tu sesion vencio. Vuelve a entrar con tu correo y contrasena.', sesion: 'vencida' });
+  return res.status(401).json({ error: 'Acceso no autorizado. Entra con tu correo y contrasena.', sesion: 'requerida' });
 });
 
 function claveOk(req, res) {
+  if (req.usuario) return true;
   if (!FB_CLAVE) { res.status(503).json({ error: 'El respaldo no esta configurado en el servidor (falta FB_CLAVE).' }); return false; }
-  const dada = req.get('X-FB-Clave') || (req.body && req.body.clave) || req.query.clave || '';
-  if (String(dada) !== String(FB_CLAVE)) { res.status(401).json({ error: 'Clave incorrecta.' }); return false; }
+  if (!claveAntiguaOk(req)) { res.status(401).json({ error: 'Clave incorrecta o sesion vencida.' }); return false; }
   return true;
 }
+const quienEs = (req) => (req.usuario ? req.usuario.nombre : 'Clave del equipo');
 
 app.post('/almacen-estado', (req, res) => {   // POST: la clave viaja en la cabecera, no en la URL
   if (!claveOk(req, res)) return;
@@ -120,7 +133,7 @@ app.post('/tasacion-guardar', (req, res) => {
   try {
     const { id, nombre, datos } = req.body || {};
     if (!id || !datos) return res.status(400).json({ error: 'Faltan id o datos de la tasacion' });
-    res.json({ ok: true, ...almacen.guardar(id, nombre, datos) });
+    res.json({ ok: true, ...almacen.guardar(id, nombre, datos, quienEs(req)) });
   } catch (e) { res.status(500).json({ error: 'No se pudo guardar: ' + e.message }); }
 });
 

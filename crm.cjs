@@ -37,6 +37,7 @@ const idCorredor = (nombre) => String(nombre).normalize('NFD').replace(/[\u0300-
 const limpiarPerfiles = (v) => [...new Set((Array.isArray(v) ? v : []).map(String).filter((x) => /^[a-z0-9_-]{2,40}$/.test(x)))].slice(0, 10);
 const zlib = require('zlib');
 const https = require('https');
+const auth = require('./auth');
 const http = require('http');
 const ARCHIVOS = path.join(DIR, 'archivos');
 
@@ -113,7 +114,7 @@ const norm = (s) => String(s == null ? '' : s).toLowerCase().normalize('NFD').re
   .replace(/\bsanta\b/g, 'sta').replace(/\bsanto\b/g, 'sto').replace(/\s+/g, ' ').trim();
 const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v));
 let aliasNombres = {}; // nombres corregidos: lo que una persona escribió al entrar → su nombre definitivo
-const usuarioDe = (req) => { let u = req.get('x-crm-user') || ''; try { u = decodeURIComponent(u); } catch (e) {} u = txt(u, 80) || 'Equipo'; return aliasNombres[u] || u; };
+const usuarioDe = (req) => { if (req.usuario) return req.usuario.nombre; let u = req.get('x-crm-user') || ''; try { u = decodeURIComponent(u); } catch (e) {} u = txt(u, 80) || 'Equipo'; return aliasNombres[u] || u; };
 
 function regionCodigo(t) {
   const s = norm(t).toUpperCase().replace(/[.°º]/g, '').replace(/^(\d{1,2})A$/, '$1');
@@ -543,7 +544,17 @@ function leer() {
   try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
+// Cada registro guarda quién lo creó y quién lo modificó por última vez (según su historial)
+function marcarAutores(db) {
+  for (const col of ['campos', 'clientes', 'tasaciones']) for (const x of db[col] || []) {
+    const h = x.historial || [];
+    if (!x.creadoPor && h[0] && h[0].autor) x.creadoPor = h[0].autor;
+    const u = h[h.length - 1];
+    if (u && u.autor && (!x.modificado || String(u.fecha) > String(x.modificado))) { x.modificadoPor = u.autor; x.modificado = u.fecha; }
+  }
+}
 function guardar(db) {
+  marcarAutores(db);
   fs.mkdirSync(DIR, { recursive: true });
   if (fs.existsSync(FILE)) {
     for (let i = 2; i >= 1; i--) { const a = `${FILE}.bak${i}`, b = `${FILE}.bak${i + 1}`; if (fs.existsSync(a)) fs.renameSync(a, b); }
@@ -583,15 +594,18 @@ function notificar(db, para, texto, ref, de) {
   if (db.notificaciones.length > 5000) db.notificaciones.splice(0, db.notificaciones.length - 5000);
 }
 const ADMIN_KEY = String(process.env.CRM_ADMIN_KEY || '');
-const esAdmin = (req) => !!ADMIN_KEY && req.get('x-crm-admin') === ADMIN_KEY;
-const adminsDe = (db) => ((db.config && db.config.admins) || []);
+const esAdmin = (req) => (req.usuario ? req.usuario.rol === 'admin' : !!ADMIN_KEY && req.get('x-crm-admin') === ADMIN_KEY);
+const adminsDe = (db) => [...new Set([...((db.config && db.config.admins) || []), ...auth._interno.leer().usuarios.filter((u) => u.rol === 'admin' && u.activo !== false).map((u) => u.nombre)])];
 const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ? x.nombre : x.titulo) || 'sin nombre';
 
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
   if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/') || req.path.startsWith('/publico-brochure/') || req.path === '/publico-vende') return next();
+  if (req.usuario) return next(); // entró con su correo y contraseña
   const clave = process.env.CRM_KEY;
+  if (req.sesionInvalida) return res.status(401).json({ error: 'Tu sesión venció. Vuelve a entrar con tu correo y contraseña.', sesion: 'vencida' });
+  if (!auth.claveAntiguaPermitida()) return res.status(401).json({ error: 'Entra con tu correo y contraseña.', sesion: 'requerida' });
   if (!clave) return res.status(500).json({ error: 'Falta la variable CRM_KEY en Railway.' });
   if (req.get('x-crm-key') !== clave) return res.status(401).json({ error: 'Clave del equipo incorrecta.' });
   next();
@@ -610,7 +624,7 @@ router.get('/', (req, res) => {
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
-    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, miembros: miembrosEquipo(db), brochures: (db.brochures || []).slice(-500).map(({ token, clienteId, campos, fecha, autor, vistas }) => ({ token, clienteId, campos, fecha, autor, vistas })), ofertas: (db.ofertas || []).slice(-300) });
+    esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, sesion: req.usuario || null, cuentas: auth.hayUsuarios(), miembros: miembrosEquipo(db), brochures: (db.brochures || []).slice(-500).map(({ token, clienteId, campos, fecha, autor, vistas }) => ({ token, clienteId, campos, fecha, autor, vistas })), ofertas: (db.ofertas || []).slice(-300) });
 });
 
 for (const col of ['campos', 'clientes', 'tasaciones']) {
@@ -620,7 +634,7 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
     const autor = usuarioDe(req);
     const d = limpiar(col, req.body || {});
     if (!etiqueta(col, d) || etiqueta(col, d) === 'sin nombre') return res.status(400).json({ error: `El ${singular} necesita un nombre.` });
-    const nuevo = { id: id(), ...d, ...(col === 'clientes' && !d.fechaAlta ? { fechaAlta: new Date().toLocaleDateString('en-CA') } : {}), historial: [{ fecha: ahora(), autor, texto: `Creado en etapa ${d.etapa}` }], envios: [], creado: ahora(), actualizado: ahora() };
+    const nuevo = { id: id(), ...d, ...(col === 'clientes' && !d.fechaAlta ? { fechaAlta: new Date().toLocaleDateString('en-CA') } : {}), creadoPor: autor, modificadoPor: autor, historial: [{ fecha: ahora(), autor, texto: `Creado en etapa ${d.etapa}` }], envios: [], creado: ahora(), actualizado: ahora() };
     await modificar((db) => { db[col].push(nuevo); registrar(db, autor, `Creó ${singular} ${etiqueta(col, d)}`, { col, id: nuevo.id }); });
     res.json(nuevo);
   });
@@ -651,7 +665,7 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
       const ver = (v) => (Array.isArray(v) ? v.join(', ') : v == null ? '' : String(v));
       const cambios = Object.keys(upd).filter((k) => !IGNORAR.includes(k) && ver(prev[k]) !== ver(upd[k])).map((k) => ({ campo: k, antes: ver(prev[k]).slice(0, 300), despues: ver(upd[k]).slice(0, 300) }));
       if (cambios.length) auditar(db, autor, `Editó ${etiqueta(col, upd)}`, { col, id: prev.id, nombre: etiqueta(col, upd) }, cambios);
-      db[col][i] = { ...prev, ...upd, historial, actualizado: ahora() };
+      db[col][i] = { ...prev, ...upd, historial, actualizado: ahora(), modificadoPor: autor, modificado: ahora() };
       return db[col][i];
     });
     r ? res.json(r) : res.status(404).json({ error: `No se encontró el ${singular}.` });
@@ -1861,6 +1875,8 @@ router.get('/publico-img', async (req, res) => {
 });
 
 // ───────────────────────── Nombres del equipo ─────────────────────────
+// Quienes tienen cuenta personal activa también son parte del equipo
+const nombresCuentas = () => { try { return auth._interno.leer().usuarios.filter((u) => u.activo !== false).map((u) => u.nombre); } catch (e) { return []; } };
 function personasEquipo(db) {
   const cuenta = {};
   const ignorar = (n) => !n || /\([^)]*\)$/.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo', 'CRM'].includes(n);
@@ -1869,7 +1885,7 @@ function personasEquipo(db) {
   (db.actividad || []).forEach((a) => sumar(a.autor));
   const cfg = db.config || {};
   // Personas sin acciones todavía: agregadas a mano, con contacto, que entraron al CRM o con tareas
-  const extra = [...(cfg.miembros || []), ...Object.keys(cfg.contactos || {}), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || []),
+  const extra = [...nombresCuentas(), ...(cfg.miembros || []), ...Object.keys(cfg.contactos || {}), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || []),
     ...(db.tareas || []).flatMap((t) => [t.asignadoA, t.creadoPor])];
   extra.forEach((n) => sumar(n, 0));
   return Object.entries(cuenta).map(([nombre, registros]) => ({ nombre, registros, ultimoIngreso: (cfg.vistos || {})[nombre] || '' }))
@@ -1879,7 +1895,7 @@ function personasEquipo(db) {
 function miembrosEquipo(db) {
   const cfg = db.config || {};
   const fuera = (n) => !n || /\(|formulario|cliente|propietario/i.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo', 'CRM'].includes(n);
-  return [...new Set([...(cfg.miembros || []), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || [])].filter((n) => !fuera(n)))].sort((a, b) => a.localeCompare(b, 'es'));
+  return [...new Set([...nombresCuentas(), ...(cfg.miembros || []), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || [])].filter((n) => !fuera(n)))].sort((a, b) => a.localeCompare(b, 'es'));
 }
 router.post('/equipo/renombrar', async (req, res) => {
   const de = txt((req.body || {}).de, 80), a = txt((req.body || {}).a, 80);
@@ -1896,6 +1912,7 @@ router.post('/equipo/renombrar', async (req, res) => {
       (x.archivos || []).forEach((f) => cambia(f, 'autor'));
       (x.compartidos || []).forEach((c) => cambia(c, 'creadoPor'));
       if (x.captacion) cambia(x.captacion, 'creadoPor');
+      cambia(x, 'creadoPor'); cambia(x, 'modificadoPor');
       // Las firmas de mandatos y las aceptaciones de confidencialidad son constancias: no se modifican
     }
     (db.actividad || []).forEach((h) => cambia(h, 'autor'));
@@ -1906,6 +1923,8 @@ router.post('/equipo/renombrar', async (req, res) => {
     registrar(db, autor, `Cambió el nombre "${de}" por "${a}" en ${n} registros`, null);
     return { cambiados: n, alias: aliasNombres, equipo: personasEquipo(db) };
   });
+  // La cuenta personal con ese nombre también se renombra, para que lo nuevo quede con el nombre correcto
+  await auth._interno.modificar((u) => { for (const x of u.usuarios) if (x.nombre === de) x.nombre = a; }).catch(() => {});
   res.json(r);
 });
 

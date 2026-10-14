@@ -33,11 +33,13 @@ function rutaDe(id) { return path.join(DIR_TAS, id + '.json'); }
 // ── Guardar ─────────────────────────────────────────────────────────────────
 // Antes de sobreescribir, la version anterior se copia a /versiones (se conservan
 // las 3 ultimas). Es la red de seguridad ante un guardado equivocado.
-function guardar(id, nombre, datos) {
+function guardar(id, nombre, datos, quien) {
   asegurarCarpetas();
   if (!idValido(id)) throw new Error('Identificador de tasacion invalido');
   const ruta = rutaDe(id);
+  let previo = null;
   if (fs.existsSync(ruta)) {
+    try { previo = JSON.parse(fs.readFileSync(ruta, 'utf8')); } catch (e) { previo = null; }
     try {
       const marca = new Date().toISOString().replace(/[:.]/g, '-');
       fs.copyFileSync(ruta, path.join(DIR_VER, id + '__' + marca + '.json'));
@@ -46,13 +48,17 @@ function guardar(id, nombre, datos) {
             .forEach(f => { try { fs.unlinkSync(path.join(DIR_VER, f)); } catch (e) {} });
     } catch (e) { /* si falla la copia de respaldo, igual se guarda lo nuevo */ }
   }
-  const registro = { id, nombre: String(nombre || 'Tasacion'), guardado: new Date().toISOString(), datos };
+  const cuando = new Date().toISOString();
+  // Quien la creo se conserva; quien la modifico por ultima vez se actualiza en cada guardado
+  const registro = { id, nombre: String(nombre || 'Tasacion'), guardado: cuando, datos,
+    creado: (previo && (previo.creado || previo.guardado)) || cuando, creadoPor: (previo && previo.creadoPor) || (previo ? 'Antes de los usuarios' : (quien || '')),
+    modificadoPor: quien || '' };
   // Escritura atomica: primero a un temporal y luego se renombra, para que un
   // corte a medias no deje el archivo corrupto.
   const tmp = ruta + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(registro));
   fs.renameSync(tmp, ruta);
-  return { id, nombre: registro.nombre, guardado: registro.guardado, bytes: fs.statSync(ruta).size };
+  return { id, nombre: registro.nombre, guardado: registro.guardado, creadoPor: registro.creadoPor, modificadoPor: registro.modificadoPor, bytes: fs.statSync(ruta).size };
 }
 
 // ── Listar (solo la ficha, sin los datos pesados) ───────────────────────────
@@ -65,7 +71,7 @@ function listar() {
       const d = r.datos || {};
       const roles = (d.roles || []).filter(x => String(x.rol || '').trim());
       return {
-        id: r.id, nombre: r.nombre, guardado: r.guardado,
+        id: r.id, nombre: r.nombre, guardado: r.guardado, creadoPor: r.creadoPor || '', modificadoPor: r.modificadoPor || '',
         bytes: fs.statSync(ruta).size,
         numTasacion: d.numTasacion || '',
         predio: d.predioNombre || '',
