@@ -622,7 +622,7 @@ router.get('/', (req, res) => {
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
     cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
-    correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
+    correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500).map((o) => (o.firma || o.vence ? o : { ...o, vence: venceDe(o) })), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
     esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, sesion: req.usuario || null, cuentas: auth.hayUsuarios(), miembros: miembrosEquipo(db), brochures: (db.brochures || []).slice(-500).map(({ token, clienteId, campos, fecha, autor, vistas }) => ({ token, clienteId, campos, fecha, autor, vistas })), ofertas: (db.ofertas || []).slice(-300) });
 });
@@ -918,6 +918,14 @@ function datosOrdenDe(db, campo, cli, ct) {
     comision: (w.comision && /\d/.test(w.comision) ? w.comision : '') || '2 % + IVA',
   };
 }
+// Links de órdenes de visita: código largo al azar y vencimiento (por defecto 30 días; variable ORDEN_DIAS en Railway)
+const ORDEN_DIAS = Math.min(365, Math.max(1, Number(process.env.ORDEN_DIAS) || 30));
+const tokenOrden = () => crypto.randomBytes(32).toString('hex'); // 64 caracteres
+const venceOrden = (desde) => new Date(new Date(desde || Date.now()).getTime() + ORDEN_DIAS * 864e5).toISOString();
+// Órdenes creadas antes de esta versión (sin fecha de vencimiento): plazo contado desde hoy, para no cortar links ya enviados
+const venceDe = (o) => o.vence || [venceOrden(o.creado), venceOrden('2026-10-14T00:00:00Z')].sort().pop();
+const vencioOrden = (o) => !o.firma && o.estado === 'pendiente' && Date.now() > new Date(venceDe(o)).getTime();
+const tokenOrdenValido = (t) => /^[a-f0-9]{32,64}$/.test(String(t || ''));
 const limpiarDatosOrden = (d, base) => Object.fromEntries(CAMPOS_ORDEN.map((k) => [k, txt(d && d[k] != null ? d[k] : base[k], k === 'enlace' ? 300 : 200)]));
 router.post('/ordenes', async (req, res) => {
   const b = req.body || {}, autor = usuarioDe(req);
@@ -925,7 +933,7 @@ router.post('/ordenes', async (req, res) => {
     const campo = db.campos.find((x) => x.id === b.campoId); if (!campo) return { error: 'Elige el campo.' };
     const cli = db.clientes.find((x) => x.id === b.clienteId); if (!cli) return { error: 'Elige el cliente.' };
     const ct = (cli.contactos || []).find((x) => x.id === b.contactoId) || (cli.contactos || []).find((x) => x.principal) || null;
-    const o = { id: id(), token: crypto.randomBytes(16).toString('hex'), fecha: /^\d{4}-\d{2}-\d{2}$/.test(b.fecha || '') ? b.fecha : new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' }),
+    const o = { id: id(), token: tokenOrden(), vence: venceOrden(), fecha: /^\d{4}-\d{2}-\d{2}$/.test(b.fecha || '') ? b.fecha : new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' }),
       creado: ahora(), autor, campoId: campo.id, clienteId: cli.id, contactoId: ct ? ct.id : '', estado: 'pendiente' };
     o.datos = limpiarDatosOrden(b.datos, datosOrdenDe(db, campo, cli, ct));
     db.ordenes = [...(db.ordenes || []), o];
@@ -942,7 +950,8 @@ router.put('/ordenes/:id', async (req, res) => {
   const b = req.body || {};
   const r = await modificar((db) => {
     const o = (db.ordenes || []).find((x) => x.id === req.params.id); if (!o) return null;
-    if (o.estado === 'firmada') return { error: 'La orden ya está firmada: no se puede cambiar. Crea una nueva si hace falta.' };
+    if (o.estado === 'firmada' || o.firma) return { error: 'La orden ya está firmada: no se puede cambiar. Crea una nueva si hace falta.' };
+    if (o.estado === 'anulada') return { error: 'La orden está anulada: no se puede cambiar.' };
     o.datos = limpiarDatosOrden(b.datos, o.datos);
     if (/^\d{4}-\d{2}-\d{2}$/.test(b.fecha || '')) o.fecha = b.fecha;
     return o;
@@ -955,27 +964,51 @@ router.post('/ordenes/:id/anular', async (req, res) => {
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
     const o = (db.ordenes || []).find((x) => x.id === req.params.id); if (!o) return null;
+    if (o.firma) return { error: 'La orden ya está firmada: es una constancia y no se puede anular ni modificar.' };
+    if (o.estado === 'anulada') return o;
     o.estado = 'anulada'; o.anulada = { fecha: ahora(), autor };
     const campo = db.campos.find((x) => x.id === o.campoId);
     if (campo) campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Anuló la orden de visita de ${o.datos.clienteNombre || o.datos.empresa}` }];
     return o;
   });
-  r ? res.json(r) : res.status(404).json({ error: 'No se encontró la orden.' });
+  if (!r) return res.status(404).json({ error: 'No se encontró la orden.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
 });
-const publicoOrden = (o) => ({ fecha: o.fecha, fechaTexto: fechaLargaISO(o.fecha), datos: o.datos, texto: o.firma ? o.firma.texto : textoOrden(o), hash: o.firma ? o.firma.hash : hashOrden(o), estado: o.estado,
+// Renovar un link vencido (o por vencer): nuevo código y nuevo plazo. El link anterior deja de funcionar.
+router.post('/ordenes/:id/renovar', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const o = (db.ordenes || []).find((x) => x.id === req.params.id); if (!o) return null;
+    if (o.firma || o.estado !== 'pendiente') return { error: 'Solo se puede renovar el link de una orden pendiente de firma.' };
+    o.token = tokenOrden(); o.vence = venceOrden(); o.renovada = { fecha: ahora(), autor };
+    const campo = db.campos.find((x) => x.id === o.campoId);
+    if (campo) campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Renovó el link de la orden de visita de ${o.datos.clienteNombre || o.datos.empresa}` }];
+    return o;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró la orden.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+const publicoOrden = (o) => ({ vence: o.firma ? null : venceDe(o), fecha: o.fecha, fechaTexto: fechaLargaISO(o.fecha), datos: o.datos, texto: o.firma ? o.firma.texto : textoOrden(o), hash: o.firma ? o.firma.hash : hashOrden(o), estado: o.estado,
   firma: o.firma ? { nombre: o.firma.nombre, rut: o.firma.rut, fecha: o.firma.fecha, codigo: o.firma.hash.slice(0, 12).toUpperCase() } : null });
+const MSG_VENCIDA = 'Este link de la orden de visita venció. Pídele a Farm Brokers que te envíe uno nuevo.';
 router.get('/publico-orden/:token', (req, res) => {
+  if (!tokenOrdenValido(req.params.token)) return res.status(404).json({ error: 'Esta orden de visita no existe.' });
   const o = (leer().ordenes || []).find((x) => x.token === req.params.token);
   if (!o) return res.status(404).json({ error: 'Esta orden de visita no existe.' });
   if (o.estado === 'anulada') return res.status(410).json({ error: 'Esta orden de visita fue anulada por Farm Brokers.' });
+  if (vencioOrden(o)) return res.status(410).json({ error: MSG_VENCIDA });
   res.json(publicoOrden(o));
 });
 router.post('/publico-orden/:token/firmar', async (req, res) => {
   const b = req.body || {};
+  if (!tokenOrdenValido(req.params.token)) return res.status(404).json({ error: 'Esta orden de visita no existe.' });
   const r = await modificar((db) => {
     const o = (db.ordenes || []).find((x) => x.token === req.params.token); if (!o) return null;
     if (o.estado === 'anulada') return { error: 'Esta orden de visita fue anulada.' };
-    if (o.firma) return publicoOrden(o);
+    if (o.firma) return { ...publicoOrden(o), yaFirmada: true }; // una orden firmada no se vuelve a firmar ni cambia
+    if (vencioOrden(o)) return { error: MSG_VENCIDA };
     const h = hashOrden(o);
     if (b.hash !== h) return { error: 'La orden cambió mientras la leías. Recarga la página y vuelve a revisarla.' };
     if (b.acepto !== true) return { error: 'Debes marcar que aceptas la orden de visita.' };
