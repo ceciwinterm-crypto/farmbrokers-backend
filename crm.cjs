@@ -596,6 +596,8 @@ function notificar(db, para, texto, ref, de) {
 const ADMIN_KEY = String(process.env.CRM_ADMIN_KEY || '');
 const esAdmin = (req) => (req.usuario ? req.usuario.rol === 'admin' : !!ADMIN_KEY && req.get('x-crm-admin') === ADMIN_KEY);
 const adminsDe = (db) => [...new Set([...((db.config && db.config.admins) || []), ...auth._interno.leer().usuarios.filter((u) => u.rol === 'admin' && u.activo !== false).map((u) => u.nombre)])];
+// Nombre que ve el cliente: en off market siempre el del CRM, no el de la página web
+const tituloCampo = (c) => (c.visibilidad === 'reservada' ? c.nombre : (c.web && c.web.titulo) || c.nombre);
 const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ? x.nombre : x.titulo) || 'sin nombre';
 
 // ───────────────────────── Rutas ─────────────────────────
@@ -1677,7 +1679,7 @@ const textoAcuerdo = (db) => (db.config && db.config.acuerdo) || ACUERDO_BASE;
 const acuerdoPara = (db, campo) => {
   let t = textoAcuerdo(db);
   if (!/\{NOMBRE\}/.test(t)) t = /Quien suscribe,?/i.test(t) ? t.replace(/Quien suscribe,?/i, 'Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT},') : `Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT}, acepta lo siguiente:\n\n${t}`;
-  return t.replace(/\{CAMPO\}/g, (campo.web && campo.web.titulo) || campo.nombre);
+  return t.replace(/\{CAMPO\}/g, tituloCampo(campo));
 };
 const acuerdoFirmado = (t, nombre, rut) => String(t).replace(/\{NOMBRE\}/g, nombre).replace(/\{RUT\}/g, rut);
 
@@ -1756,7 +1758,7 @@ function publicoPlano(db, campo, c) {
   const disponible = c.activo && !vencido && (conKmz || pls.length > 0);
   const texto = acuerdoPara(db, campo);
   return {
-    titulo: (campo.web && campo.web.titulo) || campo.nombre, lugar: [campo.sector, REGION_TEXTO[campo.region]].filter(Boolean).join(', '),
+    titulo: tituloCampo(campo), lugar: [campo.sector, REGION_TEXTO[campo.region]].filter(Boolean).join(', '),
     destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !(conKmz || pls.length) ? 'El plano ya no está disponible.' : '',
     acuerdo: c.aceptacion && c.aceptacion.texto ? c.aceptacion.texto : texto, hash: hashBloques([texto, campo.id]), descarga: c.descarga,
     aceptacion: c.aceptacion ? { nombre: c.aceptacion.nombre, rut: c.aceptacion.rut, email: c.aceptacion.email || '', fecha: c.aceptacion.fecha, codigo: c.aceptacion.hash.slice(0, 12).toUpperCase() } : null,
@@ -1842,7 +1844,7 @@ function zipUno(nombre, datos) {
 }
 const escXml = (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 function kmlPersonalizado(campo, c) {
-  const a = c.aceptacion, titulo = (campo.web && campo.web.titulo) || campo.nombre;
+  const a = c.aceptacion, titulo = tituloCampo(campo);
   const marca = `CONFIDENCIAL. Entregado por Farm Brokers Chile a ${a.nombre}, RUT ${a.rut}, el ${a.fecha.slice(0, 10)}. Uso sujeto al acuerdo de confidencialidad aceptado (código ${a.hash.slice(0, 12).toUpperCase()}). Prohibida su difusión.`;
   let kml = '';
   const partes = campo.geo.partes || [];
@@ -2004,7 +2006,7 @@ async function servirFicha(req, res) {
   if (!r) return res.status(404).send('Esta ficha ya no está disponible. Pide una nueva a Farm Brokers: contacto@farmbrokers.cl');
   const ruta = path.join(ARCHIVOS, r.campo.id, `ficha-${t}.pdf`);
   if (!fs.existsSync(ruta)) return res.status(404).send('Esta ficha ya no está disponible.');
-  const nombre = `Ficha ${((r.campo.web && r.campo.web.titulo) || r.campo.nombre).replace(/[^\wÁÉÍÓÚáéíóúÑñ .,-]/g, '')} - Farm Brokers.pdf`;
+  const nombre = `Ficha ${tituloCampo(r.campo).replace(/[^\wÁÉÍÓÚáéíóúÑñ .,-]/g, '')} - Farm Brokers.pdf`;
   res.set('Content-Type', 'application/pdf');
   res.set('Content-Disposition', `${req.query.descargar ? 'attachment' : 'inline'}; filename="${encodeURIComponent(nombre)}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
   res.set('Cache-Control', 'private, max-age=300');
