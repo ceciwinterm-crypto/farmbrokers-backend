@@ -1065,6 +1065,7 @@ router.post('/importar', async (req, res) => {
 const CORREDOR = {
   razon: 'FARM BROKERS CHILE SPA', rut: '77.089.307-0',
   representante: 'don Daniel Haeussler Bobillier, Rut 13.660.318-3',
+  firmante: 'Daniel Haeussler Bobillier',
   domicilio: 'Estoril N° 120 of. 615, Comuna de Las Condes',
   pie: 'www.farmbrokers.cl · Phone +569 7193 90 40 · Email: contacto@farmbrokers.cl',
 };
@@ -1102,19 +1103,22 @@ function limpiarDatosPropietario(b, previo = {}) {
     tipo: v.tipo === 'empresa' ? 'empresa' : 'natural',
     personas: (Array.isArray(v.personas) ? v.personas : []).slice(0, 6).map((p) => ({ trat: trat(p.trat), nombre: t(p.nombre, 160), rut: t(p.rut, 20) })),
     empresa: { razon: t((v.empresa || {}).razon, 200), rut: t((v.empresa || {}).rut, 20), repTrat: trat((v.empresa || {}).repTrat), repNombre: t((v.empresa || {}).repNombre, 160), repRut: t((v.empresa || {}).repRut, 20) },
-    telefono: t(v.telefono, 40), email: t(v.email, 160),
+    telefono: t(v.telefono, 40), email: t(v.email, 160), domicilio: t(v.domicilio, 200),
   };
   if (!vendedor.personas.length) vendedor.personas = [{ trat: '', nombre: '', rut: '' }];
   const predios = (Array.isArray(o.predios) ? o.predios : []).slice(0, 10).map((p) => ({
-    tipo: TIPO_PREDIO[p.tipo] ? p.tipo : 'agricola', rol: t(p.rol, 30), comuna: t(p.comuna, 80), region: REGION_TEXTO[p.region] ? p.region : '',
+    tipo: TIPO_PREDIO[p.tipo] ? p.tipo : 'agricola', nombre: t(p.nombre, 160), rol: t(p.rol, 30), comuna: t(p.comuna, 80), region: REGION_TEXTO[p.region] ? p.region : '',
     hectareas: num(String(p.hectareas ?? '').replace(',', '.')), descripcion: t(p.descripcion, 400),
     lotes: num(p.lotes), lotesVenta: num(p.lotesVenta), m2Lote: num(p.m2Lote), planoSAG: !!p.planoSAG,
     tieneAgua: !!p.tieneAgua, aguaDetalle: t(p.aguaDetalle, 300),
     moneda: p.moneda === 'UF' ? 'UF' : 'CLP', precio: num(String(p.precio ?? '').replace(/\./g, '').replace(',', '.')),
   }));
   if (!predios.length) predios.push(limpiarDatosPropietario({ predios: [{}] }).predios[0]);
+  // Precio en varias líneas (ej. "Lote 3 Sector Casa Patronal" y "53 lotes restantes"); si no hay, se usa el precio de cada predio
+  const precios = (Array.isArray(o.precios) ? o.precios : []).slice(0, 20).map((x) => ({ concepto: t(x.concepto, 160), moneda: x.moneda === 'UF' ? 'UF' : 'CLP', precio: num(String(x.precio ?? '').replace(/\./g, '').replace(',', '.')) }))
+    .filter((x) => x.concepto || x.precio);
   return {
-    vendedor, predios, infraestructura: t(o.infraestructura, 600), sinPrecio: !!o.sinPrecio, comentarios: t(o.comentarios, 2000),
+    vendedor, predios, precios, infraestructura: t(o.infraestructura, 600), sinPrecio: !!o.sinPrecio, comentarios: t(o.comentarios, 2000),
     ventaSeparada: o.ventaSeparada !== false, pasoActual: Math.max(0, Math.min(5, Number(o.pasoActual) || 0)),
   };
 }
@@ -1140,10 +1144,11 @@ function faltantesMandato(d) {
     if (!p.comuna) f.push(`Comuna${q}`);
     if (!p.region) f.push(`Región${q}`);
     if (!p.hectareas) f.push(`Superficie${q}`);
-    if (!d.sinPrecio && !p.precio) f.push(`Precio${q}`);
+    if (!d.sinPrecio && !(d.precios || []).length && !p.precio) f.push(`Precio${q}`);
     if (p.tieneAgua && !p.aguaDetalle) f.push(`Detalle de los derechos de agua${q}`);
     if (p.tipo === 'loteo' && p.lotesVenta && p.lotes && p.lotesVenta > p.lotes) f.push(`Los lotes a la venta no pueden ser más que el total de lotes${q}`);
   });
+  (d.precios || []).forEach((x, i) => { if (!x.concepto) f.push(`Descripción de la línea de precio ${i + 1}`); if (!x.precio) f.push(`Monto de la línea de precio ${i + 1}`); });
   if (d.sinPrecio) f.push('Precio de venta (se definirá con la tasación)');
   return f;
 }
@@ -1152,6 +1157,7 @@ function fechaLarga(d) { return `${d.getDate()} de ${MESES[d.getMonth()]} de ${d
 
 function bloquesMandato(campo, fecha = new Date()) {
   const cap = campo.captacion, d = cap.datos, cfg = cap.config;
+  const eq = cap.modo === 'equipo'; // preparado por el equipo: sigue el modelo "Mandato de Venta El Maitén"
   const B = (t) => ({ t, b: true }), N = (t) => ({ t });
   const varios = d.predios.length > 1;
   const vend = [];
@@ -1162,13 +1168,20 @@ function bloquesMandato(campo, fecha = new Date()) {
     if (i > 0) vend.push(N(i === arr.length - 1 ? ' y ' : ', '));
     vend.push(N(`${p.trat} `), B(p.nombre.toUpperCase()), N(`, cédula nacional de identidad N° ${rutFormato(p.rut)}`));
   });
+  if (d.vendedor.domicilio) vend.push(N(`, con domicilio en ${d.vendedor.domicilio.replace(/[.\s]+$/, '')}`));
   const bloques = [
     { k: 'titulo', runs: [N(`MANDATO DE VENTA ${String(cfg.titulo || campo.nombre).toUpperCase()}`)] },
     { k: 'p', runs: [N(`En ${cfg.ciudad || 'Santiago'}, a ${fechaLarga(fecha)}, `), ...vend,
-      N(', en adelante “El Vendedor”, mediante el presente documento, otorga mandato de venta a '), B(CORREDOR.razon),
+      N(eq ? ', en adelante “El Vendedor”, ha convenido otorgar un mandato de venta a ' : ', en adelante “El Vendedor”, mediante el presente documento, otorga mandato de venta a '), B(CORREDOR.razon),
       N(`, rol único tributario Nº ${CORREDOR.rut}, representada por ${CORREDOR.representante}, con domicilio en ${CORREDOR.domicilio}, en adelante “El Corredor”, para gestionar y mediar la venta de lo(s) siguiente(s) inmueble(s):`)] },
   ];
   const items = d.predios.map((p) => {
+    if (p.nombre) { // forma del modelo "Predio El Maitén, Chancón, Comuna de Rancagua. Rol Propiedad: … con una superficie aproximada de …"
+      let t = `${p.nombre.replace(/[.,\s]+$/, '')}, Comuna de ${p.comuna}, ${REGION_TEXTO[p.region]}. Rol Propiedad: ${p.rol}, con una superficie aproximada de ${decimal(p.hectareas)} hectáreas`;
+      if (p.tipo === 'loteo' && p.lotes) t += ` y ${miles(p.lotes)} lotes de subdivisión${p.m2Lote ? ` de ${miles(p.m2Lote)} m²` : ''}${p.planoSAG ? ' con plano aprobado por el SAG' : ''}`;
+      if (p.descripcion) t += `. ${p.descripcion.replace(/[.\s]+$/, '')}`;
+      return `${t}.`;
+    }
     let t = `${TIPO_PREDIO[p.tipo]} ubicado en la Comuna de ${p.comuna}, ${REGION_TEXTO[p.region]}`;
     if (p.descripcion) t += `, ${p.descripcion.replace(/[.\s]+$/, '')}`;
     t += `, con una superficie aproximada de ${decimal(p.hectareas)} hectáreas`;
@@ -1176,24 +1189,35 @@ function bloquesMandato(campo, fecha = new Date()) {
     return `${t}. Rol SII: ${p.rol}, Comuna de ${p.comuna}.`;
   });
   const conAgua = d.predios.filter((p) => p.tieneAgua);
-  if (!conAgua.length) items.push(varios ? 'Ninguno de los predios cuenta con derechos de aprovechamiento de aguas.' : 'El predio no cuenta con derechos de aprovechamiento de aguas.');
+  if (eq) conAgua.forEach((p) => items.push(`Derechos de aprovechamiento de aguas${varios ? ` del predio Rol ${p.rol}` : ''}: ${p.aguaDetalle.replace(/[.\s]+$/, '')}.`));
+  else if (!conAgua.length) items.push(varios ? 'Ninguno de los predios cuenta con derechos de aprovechamiento de aguas.' : 'El predio no cuenta con derechos de aprovechamiento de aguas.');
   else conAgua.forEach((p) => items.push(`${varios ? `El predio Rol ${p.rol}` : 'El predio'} cuenta con derechos de aprovechamiento de aguas: ${p.aguaDetalle.replace(/[.\s]+$/, '')}.`));
   bloques.push({ k: 'lista', items });
-  bloques.push({ k: 'p', runs: [N(`Infraestructura: ${d.infraestructura ? d.infraestructura.replace(/[.\s]+$/, '') : 'No tiene'}.`)] });
+  if (!eq || d.infraestructura) bloques.push({ k: 'p', runs: [N(`Infraestructura: ${d.infraestructura ? d.infraestructura.replace(/[.\s]+$/, '') : 'No tiene'}.`)] });
   const hayLoteo = d.predios.some((p) => p.tipo === 'loteo' && p.lotes);
-  bloques.push({ k: 'p', runs: [N(`${varios && d.ventaSeparada ? `Los predios podrán venderse en conjunto o por separado${hayLoteo ? ', y los lotes del campo loteo también en forma individual' : ''}. ` : hayLoteo ? 'Los lotes podrán venderse en forma individual. ' : ''}Los términos de venta son los siguientes:`)] });
+  if (eq) bloques.push({ k: 'p', runs: [N('Los términos de venta de los inmuebles son los siguientes:')] });
+  else bloques.push({ k: 'p', runs: [N(`${varios && d.ventaSeparada ? `Los predios podrán venderse en conjunto o por separado${hayLoteo ? ', y los lotes del campo loteo también en forma individual' : ''}. ` : hayLoteo ? 'Los lotes podrán venderse en forma individual. ' : ''}Los términos de venta son los siguientes:`)] });
   bloques.push({ k: 'sub', runs: [N('1. PRECIO')] });
-  d.predios.forEach((p) => {
+  const lineas = d.precios || [];
+  if (lineas.length) {
+    lineas.forEach((x) => bloques.push({ k: 'p', runs: [B(`${x.concepto}: ${monto(x.precio, x.moneda)}`)] }));
+    if (lineas.length > 1 && lineas.every((x) => x.moneda === lineas[0].moneda)) bloques.push({ k: 'p', runs: [B(`Total: ${monto(lineas.reduce((a, x) => a + x.precio, 0), lineas[0].moneda)}`)] });
+  } else d.predios.forEach((p) => {
     const runs = [B(`${TIPO_PREDIO[p.tipo]} (Rol ${p.rol}): ${monto(p.precio, p.moneda)}`)];
     const nVenta = p.lotesVenta || p.lotes;
     if (p.tipo === 'loteo' && nVenta) runs.push(N(` por los ${miles(nVenta)} lotes, equivalente a ${monto(p.precio / nVenta, p.moneda)} por lote.`));
     bloques.push({ k: 'p', runs });
   });
-  bloques.push({ k: 'p', runs: [N('El monto final a pagar “al Vendedor” deberá documentarse mediante vale vista al momento de la firma del contrato final de compraventa, quedando con instrucciones de pago en notaría una vez inscritos los inmuebles a nombre del comprador en el CBR correspondiente.')] });
+  if (!eq) bloques.push({ k: 'p', runs: [N('El monto final a pagar “al Vendedor” deberá documentarse mediante vale vista al momento de la firma del contrato final de compraventa, quedando con instrucciones de pago en notaría una vez inscritos los inmuebles a nombre del comprador en el CBR correspondiente.')] });
   bloques.push({ k: 'sub', runs: [N('2. VIGENCIA')] });
   bloques.push({ k: 'p', runs: [N(`El presente mandato tendrá un plazo de vigencia de ${miles(cfg.vigencia)} días a partir de esta fecha y será renovable automáticamente por períodos sucesivos hasta que alguna de las partes quiera poner término.`)] });
   bloques.push({ k: 'sub', runs: [N('3. COMISIÓN')] });
-  bloques.push({ k: 'p', runs: [N(`En caso de que la gestión de venta de ${varios ? 'los predios' : 'el predio'} haya sido efectuada por el “Corredor”, el “Vendedor” se compromete a pagar al “Corredor” una comisión de ${decimal(cfg.comision)}% del precio final de compraventa de ${varios ? 'las propiedades' : 'la propiedad'}. El monto final a pagar de dicha comisión deberá documentarse mediante cheque o vale vista al momento de la firma del contrato final de compraventa, quedando con instrucciones de pago en notaría.`)] });
+  const pct = (x) => `${decimal(x)}%${cfg.iva ? ' + IVA' : ''}`;
+  const tot = totalMandato(d);
+  const condicion = cfg.comisionMenor && tot
+    ? `una comisión de ${pct(cfg.comision)} si el precio final de la compraventa de ${varios ? 'las propiedades' : 'la propiedad'} fuera ${monto(tot.valor, tot.moneda)} y si el precio fuera menor la comisión bajará a ${pct(cfg.comisionMenor)}, sin perjuicio de que ambos puedan acordar un porcentaje distinto dependiendo de las condiciones de la oferta de negocio`
+    : `una comisión de ${pct(cfg.comision)} del precio final de compraventa de ${varios ? 'las propiedades' : 'la propiedad'}`;
+  bloques.push({ k: 'p', runs: [N(`En caso de que la gestión de venta ${varios ? 'de los predios' : 'del predio'} haya sido efectuada por el “Corredor”, el “Vendedor” se compromete a pagar al “Corredor” ${condicion}. El monto final a pagar de dicha comisión deberá documentarse mediante cheque o vale vista al momento de la firma del contrato final de compraventa, quedando con instrucciones de pago en notaría.`)] });
   bloques.push({ k: 'sub', runs: [N('4. RESPONSABILIDAD')] });
   bloques.push({ k: 'p', runs: [N('“El Vendedor” asume la responsabilidad de entregar oportunamente todos los antecedentes técnicos, legales y comerciales que sean necesarios para confeccionar el contrato de compraventa.')] });
   bloques.push({ k: 'sub', runs: [N('5. EXCLUSIVIDAD')] });
@@ -1205,6 +1229,12 @@ function bloquesMandato(campo, fecha = new Date()) {
     : d.vendedor.personas.map((p) => p.nombre);
   bloques.push({ k: 'firmas', vendedor: firmantes, corredor: 'Farm Brokers Chile SPA' });
   return bloques;
+}
+// Precio total del mandato (si todas las líneas están en la misma moneda)
+function totalMandato(d) {
+  const l = (d.precios || []).length ? d.precios : d.predios.map((p) => ({ precio: p.precio, moneda: p.moneda }));
+  if (!l.length || l.some((x) => !x.precio) || l.some((x) => x.moneda !== l[0].moneda)) return null;
+  return { valor: l.reduce((a, x) => a + x.precio, 0), moneda: l[0].moneda };
 }
 const hashBloques = (b) => crypto.createHash('sha256').update(JSON.stringify(b)).digest('hex');
 const nombreVendedor = (d) => (d.vendedor.tipo === 'empresa' ? d.vendedor.empresa.razon : d.vendedor.personas.map((p) => p.nombre).filter(Boolean).join(' y '));
@@ -1218,7 +1248,9 @@ function volcarAlCampo(campo, d) {
   set('rol', ps.map((p) => p.rol).filter(Boolean).join(', '));
   set('sector', ps[0].comuna); set('region', ps[0].region);
   const ha = ps.reduce((s, p) => s + (p.hectareas || 0), 0); if (ha) campo.hectareas = Math.round(ha * 100) / 100;
-  if (!d.sinPrecio && ps.every((p) => p.precio && p.moneda === ps[0].moneda)) {
+  const totL = (d.precios || []).length ? totalMandato(d) : null;
+  if (totL) { if (totL.moneda === 'UF') { campo.precioUF = totL.valor; campo.precioCLP = null; } else { campo.precioCLP = totL.valor; campo.precioUF = null; } campo.precioTexto = monto(totL.valor, totL.moneda); }
+  else if (!d.sinPrecio && ps.every((p) => p.precio && p.moneda === ps[0].moneda)) {
     const tot = ps.reduce((s, p) => s + p.precio, 0);
     if (ps[0].moneda === 'UF') { campo.precioUF = tot; campo.precioCLP = null; } else { campo.precioCLP = tot; campo.precioUF = null; }
     campo.precioTexto = monto(tot, ps[0].moneda);
@@ -1232,7 +1264,7 @@ function volcarAlCampo(campo, d) {
 function publicoDe(campo) {
   const cap = campo.captacion;
   return {
-    titulo: cap.config.titulo || campo.nombre, estado: cap.estado, config: { comision: cap.config.comision, vigencia: cap.config.vigencia },
+    titulo: cap.config.titulo || campo.nombre, estado: cap.estado, modo: cap.modo || 'propietario', config: { comision: cap.config.comision, vigencia: cap.config.vigencia },
     datos: cap.datos, archivos: (campo.archivos || []).filter((a) => a.origen === 'propietario').map(({ id, tipo, nombre, tamano, fecha }) => ({ id, tipo, nombre, tamano, fecha })),
     faltan: faltantesMandato(cap.datos),
     firma: cap.firma ? { nombre: cap.firma.nombre, rut: cap.firma.rut, fecha: cap.firma.fecha, codigo: cap.firma.hash.slice(0, 12).toUpperCase() } : null,
@@ -1266,6 +1298,53 @@ router.post('/campos/:id/captacion', async (req, res) => {
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: previo ? `Actualizó el link del propietario (comisión ${config.comision}%, vigencia ${config.vigencia} días)` : `Creó el link para el propietario (comisión ${config.comision}%, vigencia ${config.vigencia} días)` }];
     if (!previo) registrar(db, autor, `Creó el link del propietario para ${campo.nombre}`, { col: 'campos', id: campo.id });
     return campo;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+
+// ── Equipo: preparar el mandato con los datos del CRM (el cliente solo revisa y firma)
+router.get('/campos/:id/mandato-equipo/base', (req, res) => {
+  const campo = leer().campos.find((x) => x.id === req.params.id);
+  if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
+  const cap = campo.captacion;
+  if (cap && cap.firma) return res.status(409).json({ error: 'El mandato ya está firmado.' });
+  const lotes = Number((String(campo.nombre + ' ' + (campo.descripcionFicha || '')).match(/(\d+)\s*lotes/i) || [])[1]) || null;
+  const datos = cap ? cap.datos : limpiarDatosPropietario({
+    vendedor: { tipo: 'natural', personas: [{ trat: '', nombre: campo.propietario || '', rut: '' }], telefono: campo.telefono || '', email: campo.email || '' },
+    predios: [{ tipo: campo.tipo === 'loteo' ? 'loteo' : 'agricola', nombre: `Predio ${campo.nombre}`, rol: campo.rol || '', comuna: campo.sector || '', region: campo.region || '',
+      hectareas: campo.hectareas, lotes: campo.tipo === 'loteo' ? lotes : null, tieneAgua: !!(campo.agua && !/^sin\b|no tiene/i.test(campo.agua)), aguaDetalle: campo.agua && !/^sin\b|no tiene/i.test(campo.agua) ? campo.agua : '',
+      moneda: campo.precioUF ? 'UF' : 'CLP', precio: campo.precioUF || campo.precioCLP || null }],
+    infraestructura: campo.infraestructura || '',
+  });
+  const config = cap ? cap.config : { comision: 2, vigencia: 180, ciudad: 'Santiago', titulo: `Predio ${campo.nombre}${campo.sector ? `, ${campo.sector}` : ''}`, iva: true, comisionMenor: null };
+  res.json({ datos, config, faltan: faltantesMandato(datos), modo: cap ? cap.modo || 'propietario' : 'equipo' });
+});
+router.post('/campos/:id/mandato-equipo', async (req, res) => {
+  const autor = usuarioDe(req), b = req.body || {};
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    const previo = campo.captacion;
+    if (previo && previo.firma) return { error: 'El mandato ya está firmado. No se puede cambiar.' };
+    const c = b.config || {};
+    const config = {
+      comision: Math.max(0, Math.min(20, Number(c.comision) || 2)),
+      comisionMenor: Number(c.comisionMenor) > 0 ? Math.min(20, Number(c.comisionMenor)) : null,
+      iva: c.iva !== false,
+      vigencia: Math.max(1, Math.min(3650, Math.round(Number(c.vigencia) || 180))),
+      ciudad: txt(c.ciudad || 'Santiago', 60),
+      titulo: txt(c.titulo || campo.nombre, 120),
+    };
+    const datos = limpiarDatosPropietario({ ...(b.datos || {}), pasoActual: 4, sinPrecio: false });
+    const faltan = faltantesMandato(datos);
+    campo.captacion = { token: (previo && previo.token) || crypto.randomBytes(16).toString('hex'), creado: (previo && previo.creado) || ahora(), creadoPor: (previo && previo.creadoPor) || autor,
+      modo: 'equipo', config, estado: faltan.length ? 'en_progreso' : 'completado', datos, actualizado: ahora(), firma: null, firmaCorredor: null };
+    volcarAlCampo(campo, datos);
+    campo.actualizado = ahora();
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `${previo ? 'Actualizó' : 'Preparó'} el mandato de venta para ${nombreVendedor(datos) || 'el propietario'} (comisión ${config.comision}%${config.iva ? ' + IVA' : ''}, vigencia ${config.vigencia} días)` }];
+    if (!previo) registrar(db, autor, `Preparó el mandato de ${campo.nombre}`, { col: 'campos', id: campo.id });
+    return { campo, faltan };
   });
   if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
   if (r.error) return res.status(409).json(r);
@@ -2761,6 +2840,7 @@ router.post('/publico/:token/datos', async (req, res) => {
     if (!campo) return null;
     const cap = campo.captacion;
     if (cap.firma) return { error: 'El mandato ya fue firmado. Si necesitas corregir algo, contacta a Farm Brokers.' };
+    if (cap.modo === 'equipo') return { error: 'Este mandato lo preparó Farm Brokers con sus datos. Si hay algo que corregir, avísenos y se lo enviamos actualizado.' };
     cap.datos = limpiarDatosPropietario((req.body || {}).datos, cap.datos);
     cap.actualizado = ahora();
     if (cap.estado === 'enviado') cap.estado = 'en_progreso';
@@ -2866,6 +2946,8 @@ router.post('/publico/:token/firmar', async (req, res) => {
     if (!firmantes.some((x) => rutLimpio(x) === rutLimpio(rut))) return { error: 'El RUT no coincide con el del vendedor indicado en el mandato.' };
     cap.firma = { nombre, rut: rutFormato(rut), fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash, bloques };
     cap.estado = 'firmado';
+    // Firma de Farm Brokers automática: queda firmado por ambas partes en el mismo momento
+    if (!cap.firmaCorredor) cap.firmaCorredor = { nombre: `${CORREDOR.firmante}, por Farm Brokers Chile SpA`, fecha: cap.firma.fecha, automatica: true, preparadoPor: cap.creadoPor || '' };
     campo.checklist = { ...(campo.checklist || {}), mandato: true };
     const quien = `${nombre} (propietario)`;
     const previa = campo.etapa;
