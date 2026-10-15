@@ -2840,8 +2840,9 @@ router.post('/publico/:token/datos', async (req, res) => {
     if (!campo) return null;
     const cap = campo.captacion;
     if (cap.firma) return { error: 'El mandato ya fue firmado. Si necesitas corregir algo, contacta a Farm Brokers.' };
-    if (cap.modo === 'equipo') return { error: 'Este mandato lo preparó Farm Brokers con sus datos. Si hay algo que corregir, avísenos y se lo enviamos actualizado.' };
-    cap.datos = limpiarDatosPropietario((req.body || {}).datos, cap.datos);
+    const entrante = { ...((req.body || {}).datos || {}) };
+    if (cap.modo === 'equipo') { delete entrante.precios; entrante.sinPrecio = false; } // el precio y las líneas de precio las define Farm Brokers
+    cap.datos = limpiarDatosPropietario(entrante, cap.datos);
     cap.actualizado = ahora();
     if (cap.estado === 'enviado') cap.estado = 'en_progreso';
     volcarAlCampo(campo, cap.datos);
