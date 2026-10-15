@@ -1153,6 +1153,12 @@ function faltantesMandato(d) {
   return f;
 }
 
+// Mandato preparado por el equipo: nada es obligatorio (lo que falte sale como línea en blanco para completar después)
+const faltanDe = (cap) => (cap.modo === 'equipo' ? [] : faltantesMandato(cap.datos));
+const blanco = (v, n = 14) => (v ? v : '_'.repeat(n));
+const rutB = (r) => (rutLimpio(r) ? rutFormato(r) : '_'.repeat(12));
+const tratB = (t) => (t ? `${t} ` : '');
+const montoB = (v, moneda) => (v ? monto(v, moneda) : `${moneda === 'UF' ? 'UF ' : '$'}__________`);
 function fechaLarga(d) { return `${d.getDate()} de ${MESES[d.getMonth()]} de ${d.getFullYear()}`; }
 
 function bloquesMandato(campo, fecha = new Date()) {
@@ -1163,10 +1169,10 @@ function bloquesMandato(campo, fecha = new Date()) {
   const vend = [];
   if (d.vendedor.tipo === 'empresa') {
     const e = d.vendedor.empresa;
-    vend.push(N('la sociedad '), B(e.razon.toUpperCase()), N(`, rol único tributario N° ${rutFormato(e.rut)}, representada por ${e.repTrat} ${e.repNombre}, cédula nacional de identidad N° ${rutFormato(e.repRut)}`));
+    vend.push(N('la sociedad '), B(blanco(e.razon.toUpperCase(), 24)), N(`, rol único tributario N° ${rutB(e.rut)}, representada por ${tratB(e.repTrat)}${blanco(e.repNombre, 24)}, cédula nacional de identidad N° ${rutB(e.repRut)}`));
   } else d.vendedor.personas.forEach((p, i, arr) => {
     if (i > 0) vend.push(N(i === arr.length - 1 ? ' y ' : ', '));
-    vend.push(N(`${p.trat} `), B(p.nombre.toUpperCase()), N(`, cédula nacional de identidad N° ${rutFormato(p.rut)}`));
+    vend.push(N(tratB(p.trat)), B(blanco(p.nombre.toUpperCase(), 24)), N(`, cédula nacional de identidad N° ${rutB(p.rut)}`));
   });
   if (d.vendedor.domicilio) vend.push(N(`, con domicilio en ${d.vendedor.domicilio.replace(/[.\s]+$/, '')}`));
   const bloques = [
@@ -1177,16 +1183,16 @@ function bloquesMandato(campo, fecha = new Date()) {
   ];
   const items = d.predios.map((p) => {
     if (p.nombre) { // forma del modelo "Predio El Maitén, Chancón, Comuna de Rancagua. Rol Propiedad: … con una superficie aproximada de …"
-      let t = `${p.nombre.replace(/[.,\s]+$/, '')}, Comuna de ${p.comuna}, ${REGION_TEXTO[p.region]}. Rol Propiedad: ${p.rol}, con una superficie aproximada de ${decimal(p.hectareas)} hectáreas`;
+      let t = `${p.nombre.replace(/[.,\s]+$/, '')}, Comuna de ${blanco(p.comuna)}${p.region ? `, ${REGION_TEXTO[p.region]}` : ''}. Rol Propiedad: ${blanco(p.rol, 10)}, con una superficie aproximada de ${p.hectareas ? decimal(p.hectareas) : '______'} hectáreas`;
       if (p.tipo === 'loteo' && p.lotes) t += ` y ${miles(p.lotes)} lotes de subdivisión${p.m2Lote ? ` de ${miles(p.m2Lote)} m²` : ''}${p.planoSAG ? ' con plano aprobado por el SAG' : ''}`;
       if (p.descripcion) t += `. ${p.descripcion.replace(/[.\s]+$/, '')}`;
       return `${t}.`;
     }
-    let t = `${TIPO_PREDIO[p.tipo]} ubicado en la Comuna de ${p.comuna}, ${REGION_TEXTO[p.region]}`;
+    let t = `${TIPO_PREDIO[p.tipo]} ubicado en la Comuna de ${blanco(p.comuna)}${p.region ? `, ${REGION_TEXTO[p.region]}` : ''}`;
     if (p.descripcion) t += `, ${p.descripcion.replace(/[.\s]+$/, '')}`;
-    t += `, con una superficie aproximada de ${decimal(p.hectareas)} hectáreas`;
+    t += `, con una superficie aproximada de ${p.hectareas ? decimal(p.hectareas) : '______'} hectáreas`;
     if (p.tipo === 'loteo' && p.lotes) t += `, subdividido en ${miles(p.lotes)} lotes${p.m2Lote ? ` de ${miles(p.m2Lote)} m²` : ''}${p.planoSAG ? ' con plano de subdivisión aprobado por el SAG' : ''}`;
-    return `${t}. Rol SII: ${p.rol}, Comuna de ${p.comuna}.`;
+    return `${t}. Rol SII: ${blanco(p.rol, 10)}, Comuna de ${blanco(p.comuna)}.`;
   });
   const conAgua = d.predios.filter((p) => p.tieneAgua);
   if (eq) conAgua.forEach((p) => items.push(`Derechos de aprovechamiento de aguas${varios ? ` del predio Rol ${p.rol}` : ''}: ${p.aguaDetalle.replace(/[.\s]+$/, '')}.`));
@@ -1200,12 +1206,12 @@ function bloquesMandato(campo, fecha = new Date()) {
   bloques.push({ k: 'sub', runs: [N('1. PRECIO')] });
   const lineas = d.precios || [];
   if (lineas.length) {
-    lineas.forEach((x) => bloques.push({ k: 'p', runs: [B(`${x.concepto}: ${monto(x.precio, x.moneda)}`)] }));
-    if (lineas.length > 1 && lineas.every((x) => x.moneda === lineas[0].moneda)) bloques.push({ k: 'p', runs: [B(`Total: ${monto(lineas.reduce((a, x) => a + x.precio, 0), lineas[0].moneda)}`)] });
+    lineas.forEach((x) => bloques.push({ k: 'p', runs: [B(`${blanco(x.concepto, 20)}: ${montoB(x.precio, x.moneda)}`)] }));
+    if (lineas.length > 1 && lineas.every((x) => x.moneda === lineas[0].moneda && x.precio)) bloques.push({ k: 'p', runs: [B(`Total: ${monto(lineas.reduce((a, x) => a + x.precio, 0), lineas[0].moneda)}`)] });
   } else d.predios.forEach((p) => {
-    const runs = [B(`${TIPO_PREDIO[p.tipo]} (Rol ${p.rol}): ${monto(p.precio, p.moneda)}`)];
+    const runs = [B(`${TIPO_PREDIO[p.tipo]} (Rol ${blanco(p.rol, 10)}): ${montoB(p.precio, p.moneda)}`)];
     const nVenta = p.lotesVenta || p.lotes;
-    if (p.tipo === 'loteo' && nVenta) runs.push(N(` por los ${miles(nVenta)} lotes, equivalente a ${monto(p.precio / nVenta, p.moneda)} por lote.`));
+    if (p.tipo === 'loteo' && nVenta && p.precio) runs.push(N(` por los ${miles(nVenta)} lotes, equivalente a ${monto(p.precio / nVenta, p.moneda)} por lote.`));
     bloques.push({ k: 'p', runs });
   });
   if (!eq) bloques.push({ k: 'p', runs: [N('El monto final a pagar “al Vendedor” deberá documentarse mediante vale vista al momento de la firma del contrato final de compraventa, quedando con instrucciones de pago en notaría una vez inscritos los inmuebles a nombre del comprador en el CBR correspondiente.')] });
@@ -1225,8 +1231,8 @@ function bloquesMandato(campo, fecha = new Date()) {
   bloques.push({ k: 'sub', runs: [N('6. CONFIDENCIALIDAD')] });
   bloques.push({ k: 'p', runs: [N('Ambas partes se obligan para sí y por los trabajadores que destinen en el marco de estas conversaciones, a mantener la más estricta confidencialidad respecto de toda información y documentación legal que las partes tengan acceso, quedándoles estrictamente prohibido la divulgación a cualquier tercero, así como la utilización de tal información o conocimiento en cualquier otra actividad ya sea en beneficio propio o de terceros, salvo consentimiento previo, expreso y por escrito de la contraparte. No obstante, “el Vendedor” autoriza al “Corredor” para realizar publicaciones con información comercial de venta de la(s) propiedad(es).')] });
   const firmantes = d.vendedor.tipo === 'empresa'
-    ? [`${d.vendedor.empresa.razon}, representada por ${d.vendedor.empresa.repNombre}`]
-    : d.vendedor.personas.map((p) => p.nombre);
+    ? [d.vendedor.empresa.razon ? `${d.vendedor.empresa.razon}${d.vendedor.empresa.repNombre ? `, representada por ${d.vendedor.empresa.repNombre}` : ''}` : '']
+    : d.vendedor.personas.map((p) => p.nombre || '');
   bloques.push({ k: 'firmas', vendedor: firmantes, corredor: 'Farm Brokers Chile SPA' });
   return bloques;
 }
@@ -1266,7 +1272,7 @@ function publicoDe(campo) {
   return {
     titulo: cap.config.titulo || campo.nombre, estado: cap.estado, modo: cap.modo || 'propietario', config: { comision: cap.config.comision, vigencia: cap.config.vigencia },
     datos: cap.datos, archivos: (campo.archivos || []).filter((a) => a.origen === 'propietario').map(({ id, tipo, nombre, tamano, fecha }) => ({ id, tipo, nombre, tamano, fecha })),
-    faltan: faltantesMandato(cap.datos),
+    faltan: faltanDe(cap), pendientes: cap.modo === 'equipo' ? faltantesMandato(cap.datos) : [],
     firma: cap.firma ? { nombre: cap.firma.nombre, rut: cap.firma.rut, fecha: cap.firma.fecha, codigo: cap.firma.hash.slice(0, 12).toUpperCase() } : null,
   };
 }
@@ -1319,7 +1325,7 @@ router.get('/campos/:id/mandato-equipo/base', (req, res) => {
     infraestructura: campo.infraestructura || '',
   });
   const config = cap ? cap.config : { comision: 2, vigencia: 180, ciudad: 'Santiago', titulo: `Predio ${campo.nombre}${campo.sector ? `, ${campo.sector}` : ''}`, iva: true, comisionMenor: null };
-  res.json({ datos, config, faltan: faltantesMandato(datos), modo: cap ? cap.modo || 'propietario' : 'equipo' });
+  res.json({ datos, config, faltan: [], pendientes: faltantesMandato(datos), modo: cap ? cap.modo || 'propietario' : 'equipo' });
 });
 router.post('/campos/:id/mandato-equipo', async (req, res) => {
   const autor = usuarioDe(req), b = req.body || {};
@@ -1337,14 +1343,14 @@ router.post('/campos/:id/mandato-equipo', async (req, res) => {
       titulo: txt(c.titulo || campo.nombre, 120),
     };
     const datos = limpiarDatosPropietario({ ...(b.datos || {}), pasoActual: 4, sinPrecio: false });
-    const faltan = faltantesMandato(datos);
+    const pendientes = faltantesMandato(datos);
     campo.captacion = { token: (previo && previo.token) || crypto.randomBytes(16).toString('hex'), creado: (previo && previo.creado) || ahora(), creadoPor: (previo && previo.creadoPor) || autor,
-      modo: 'equipo', config, estado: faltan.length ? 'en_progreso' : 'completado', datos, actualizado: ahora(), firma: null, firmaCorredor: null };
+      modo: 'equipo', config, estado: 'completado', datos, actualizado: ahora(), firma: null, firmaCorredor: null };
     volcarAlCampo(campo, datos);
     campo.actualizado = ahora();
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `${previo ? 'Actualizó' : 'Preparó'} el mandato de venta para ${nombreVendedor(datos) || 'el propietario'} (comisión ${config.comision}%${config.iva ? ' + IVA' : ''}, vigencia ${config.vigencia} días)` }];
     if (!previo) registrar(db, autor, `Preparó el mandato de ${campo.nombre}`, { col: 'campos', id: campo.id });
-    return { campo, faltan };
+    return { campo, faltan: [], pendientes };
   });
   if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
   if (r.error) return res.status(409).json(r);
@@ -1371,7 +1377,7 @@ router.get('/campos/:id/mandato', (req, res) => {
   if (!campo || !campo.captacion) return res.status(404).json({ error: 'Este campo no tiene link de propietario.' });
   const cap = campo.captacion;
   if (cap.firma) return res.json({ bloques: cap.firma.bloques, firma: { ...cap.firma, bloques: undefined, codigo: cap.firma.hash.slice(0, 12).toUpperCase() }, firmaCorredor: cap.firmaCorredor, borrador: false });
-  const faltan = faltantesMandato(cap.datos);
+  const faltan = faltanDe(cap);
   if (faltan.length) return res.status(409).json({ error: `Faltan datos para el mandato: ${faltan.join(', ')}.`, faltan });
   res.json({ bloques: bloquesMandato(campo), firma: null, firmaCorredor: null, borrador: true });
 });
@@ -2848,7 +2854,7 @@ router.post('/publico/:token/datos', async (req, res) => {
     volcarAlCampo(campo, cap.datos);
     const quien = `${nombreVendedor(cap.datos) || 'Propietario'} (propietario)`;
     if (enviar) {
-      const faltan = faltantesMandato(cap.datos);
+      const faltan = faltanDe(cap);
       if (cap.datos.sinPrecio) {
         cap.estado = 'tasacion';
         if (!db.tasaciones.some((t) => t.campoId === campo.id)) {
@@ -2921,7 +2927,7 @@ router.get('/publico/:token/mandato', (req, res) => {
   if (!campo) return res.status(404).json({ error: 'Este link no es válido.' });
   const cap = campo.captacion;
   if (cap.firma) return res.json({ bloques: cap.firma.bloques, hash: cap.firma.hash, firma: publicoDe(campo).firma, firmaCorredor: cap.firmaCorredor ? { nombre: cap.firmaCorredor.nombre, fecha: cap.firmaCorredor.fecha } : null });
-  const faltan = faltantesMandato(cap.datos);
+  const faltan = faltanDe(cap);
   if (faltan.length) return res.status(409).json({ error: 'Faltan datos para preparar el mandato.', faltan });
   const bloques = bloquesMandato(campo);
   res.json({ bloques, hash: hashBloques(bloques), firma: null });
@@ -2934,17 +2940,24 @@ router.post('/publico/:token/firmar', async (req, res) => {
     if (!campo) return null;
     const cap = campo.captacion;
     if (cap.firma) return { error: 'Este mandato ya fue firmado.' };
-    const faltan = faltantesMandato(cap.datos);
+    const faltan = faltanDe(cap);
     if (faltan.length) return { error: `Faltan datos: ${faltan.join(', ')}.` };
-    const bloques = bloquesMandato(campo);
-    const hash = hashBloques(bloques);
+    let bloques = bloquesMandato(campo);
+    let hash = hashBloques(bloques);
     if (b.hash !== hash) return { error: 'El texto del mandato cambió mientras lo revisabas. Vuelve a abrir la revisión y confirma de nuevo.', recargar: true };
     if (b.acepto !== true) return { error: 'Debes marcar que leíste y aceptas el mandato.' };
     const nombre = txt(b.nombre, 160), rut = txt(b.rut, 20);
     if (!nombre) return { error: 'Escribe tu nombre completo para firmar.' };
     if (!rutValido(rut)) return { error: 'El RUT no es válido. Revísalo e intenta de nuevo.' };
-    const firmantes = cap.datos.vendedor.tipo === 'empresa' ? [cap.datos.vendedor.empresa.repRut] : cap.datos.vendedor.personas.map((p) => p.rut);
-    if (!firmantes.some((x) => rutLimpio(x) === rutLimpio(rut))) return { error: 'El RUT no coincide con el del vendedor indicado en el mandato.' };
+    const v = cap.datos.vendedor;
+    const firmantes = (v.tipo === 'empresa' ? [v.empresa.repRut] : v.personas.map((p) => p.rut)).filter((x) => rutLimpio(x));
+    if (firmantes.length && !firmantes.some((x) => rutLimpio(x) === rutLimpio(rut))) return { error: 'El RUT no coincide con el del vendedor indicado en el mandato.' };
+    if (!firmantes.length) {
+      // El mandato se preparó sin RUT: queda con los datos de quien firma
+      if (v.tipo === 'empresa') { if (!v.empresa.repNombre) v.empresa.repNombre = nombre; v.empresa.repRut = rutFormato(rut); }
+      else { if (!v.personas[0].nombre) v.personas[0].nombre = nombre; v.personas[0].rut = rutFormato(rut); }
+      bloques = bloquesMandato(campo); hash = hashBloques(bloques);
+    }
     cap.firma = { nombre, rut: rutFormato(rut), fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash, bloques };
     cap.estado = 'firmado';
     // Firma de Farm Brokers automática: queda firmado por ambas partes en el mismo momento
