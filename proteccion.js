@@ -86,6 +86,7 @@ function instalar(app) {
   // Páginas públicas (links que reciben clientes y propietarios): por IP
   app.use('/api/crm/publico-img', limitar('publico-img', { ventanaMin: 10, max: 1500, clave: ipDe }));
   app.use(['/api/crm/publico', '/api/crm/publico-plano', '/api/crm/publico-orden', '/api/crm/publico-ficha', '/api/crm/publico-brochure', '/f', '/b'], limitar('publico', { ventanaMin: 10, max: 400, clave: ipDe }));
+  app.post('/api/crm/publico-tasacion', limitar('tasacion-web', { ventanaMin: 60, max: 8, clave: ipDe, mensaje: 'Ya recibimos varias solicitudes desde tu conexión. Si necesitas enviar otra, escríbenos a contacto@farmbrokers.cl.' }));
   app.post('/api/crm/publico-vende', limitar('vende', { ventanaMin: 60, max: 8, clave: ipDe, mensaje: 'Ya recibimos varios formularios desde tu conexión. Si necesitas enviar otro, espera un rato o escríbenos a contacto@farmbrokers.cl.' }));
   app.post(/^\/api\/crm\/publico[^/]*\/[^/]+\/(firmar|aceptar|mandato|archivo|kmz)/, limitar('publico-envios', { ventanaMin: 60, max: 60, clave: ipDe }));
   app.use(validarEntrada);

@@ -586,11 +586,11 @@ function registrar(db, autor, texto, ref) {
   if (db.actividad.length > 500) db.actividad.length = 500;
   auditar(db, autor, texto, ref);
 }
-function notificar(db, para, texto, ref, de) {
+function notificar(db, para, texto, ref, de, opciones = {}) {
   if (!para || para === de) return;
   db.notificaciones = db.notificaciones || [];
   db.notificaciones.push({ id: id(), para, texto, ref: ref || null, fecha: ahora(), leida: false, de: de || '' });
-  avisarPorCorreo(db, para, texto, de);
+  if (!opciones.sinCorreo) avisarPorCorreo(db, para, texto, de);
   if (db.notificaciones.length > 5000) db.notificaciones.splice(0, db.notificaciones.length - 5000);
 }
 const ADMIN_KEY = String(process.env.CRM_ADMIN_KEY || '');
@@ -603,7 +603,7 @@ const etiqueta = (col, x) => (col === 'campos' ? x.nombre : col === 'clientes' ?
 // ───────────────────────── Rutas ─────────────────────────
 router.use((req, res, next) => {
   if (req.method === 'OPTIONS') return next();
-  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/') || req.path.startsWith('/publico-brochure/') || req.path === '/publico-vende') return next();
+  if (req.path.startsWith('/publico/') || req.path.startsWith('/publico-plano/') || req.path.startsWith('/publico-orden/') || req.path === '/publico-img' || req.path.startsWith('/publico-ficha/') || req.path.startsWith('/publico-brochure/') || req.path === '/publico-vende' || req.path === '/publico-tasacion') return next();
   if (req.usuario) return next(); // entró con su correo y contraseña
   const clave = process.env.CRM_KEY;
   if (req.sesionInvalida) return res.status(401).json({ error: 'Tu sesión venció. Vuelve a entrar con tu correo y contraseña.', sesion: 'vencida' });
@@ -790,6 +790,22 @@ async function procesarCorreos() {
       await new Promise((r) => setTimeout(r, 600)); // el servicio acepta pocas solicitudes por segundo
     }
   } finally { procesandoCorreos = false; }
+}
+// Formularios de la web (vende tu campo, solicitud de tasación): correo con todos los datos
+// Destino: variable FORMULARIOS_EMAIL en Railway; si no está, el correo de las administradoras (Equipo › Personas) o contacto@farmbrokers.cl
+function correosFormularios(db) {
+  const env = String(process.env.FORMULARIOS_EMAIL || '').split(/[,;\s]+/).filter((x) => /@/.test(x));
+  if (env.length) return env;
+  const admins = adminsDe(db).map((n) => correoDe(db, n)).filter(Boolean);
+  return admins.length ? [...new Set(admins)] : ['contacto@farmbrokers.cl'];
+}
+function avisoFormularioWeb(db, { asunto, titulo, filas, responder }) {
+  if (!correoConfigurado()) return;
+  const tabla = filas.filter(([, v]) => v !== '' && v != null).map(([k, v]) => `<tr><td style="padding:5px 10px 5px 0;color:#5E6E64;font-size:13px;vertical-align:top;white-space:nowrap">${escHtml(k)}</td><td style="padding:5px 0;font-size:14px">${escHtml(String(v)).replace(/\n/g, '<br>')}</td></tr>`).join('');
+  const texto = `${titulo}\n\n${filas.filter(([, v]) => v !== '' && v != null).map(([k, v]) => `${k}: ${v}`).join('\n')}\n\nAbre el CRM: ${CRM_URL}`;
+  for (const para of correosFormularios(db)) colaCorreos.push({ nombre: `Formulario web → ${para}`, para, asunto, responder: responder || undefined,
+    html: plantillaCorreo(titulo, `<table cellpadding="0" cellspacing="0" style="border-collapse:collapse">${tabla}</table>`, 'Llegó desde el formulario de farmbrokers.cl. También quedó en el CRM.'), texto });
+  setImmediate(procesarCorreos);
 }
 // Resumen semanal (lunes 8:00): lo atrasado y lo que viene en los próximos 7 días de cada persona
 const hoySantiago = () => new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' });
@@ -2127,7 +2143,49 @@ router.post('/publico-vende', async (req, res) => {
     const texto = `${o.nombre} ofreció un campo en ${o.operacion} desde la web: ${[o.comuna, REGION_TEXTO[o.region], o.hectareas ? `${o.hectareas} ha` : ''].filter(Boolean).join(', ')}`;
     registrar(db, quien, texto, null);
     const para = adminsDe(db).length ? adminsDe(db) : personasEquipo(db).map((x) => x.nombre).slice(0, 10);
-    for (const n of para) notificar(db, n, texto, { oferta: o.id }, quien);
+    const destinos = correosFormularios(db); // a ellos les llega el correo completo, sin repetir el aviso corto
+    for (const n of para) notificar(db, n, texto, { oferta: o.id }, quien, { sinCorreo: correoConfigurado() && destinos.includes(correoDe(db, n)) });
+    avisoFormularioWeb(db, { asunto: `Nuevo campo ofrecido en la web: ${[o.comuna, o.hectareas ? `${o.hectareas} ha` : ''].filter(Boolean).join(', ') || o.nombre}`, titulo: `${o.nombre} quiere ${o.operacion === 'arriendo' ? 'arrendar' : 'vender'} su campo`, responder: /@/.test(o.email) ? o.email : '',
+      filas: [['Nombre', o.nombre], ['Teléfono', o.telefono], ['Email', o.email], ['Operación', o.operacion], ['Tipo', TIPOS_OFERTA[o.tipo] || o.tipo], ['Región', REGION_TEXTO[o.region] || ''], ['Comuna', o.comuna], ['Rol', o.rol],
+        ['Superficie', o.hectareas ? `${o.hectareas} ha` : ''], ['Agua', o.agua], ['Plantaciones', o.plantaciones], ['Construcciones', o.construcciones], ['Precio esperado', o.precio], ['Comentarios', o.descripcion]] });
+  });
+  res.json({ ok: true });
+});
+
+// ── Solicitud de tasación desde la web (formulario propio o "webhook" de otro formulario) ──
+// Acepta JSON o datos de formulario; reconoce los campos por su nombre (nombre, teléfono, correo, comuna, tipo, mensaje…)
+const intentosTasacion = new Map();
+router.post('/publico-tasacion', express.urlencoded({ extended: true, limit: '200kb' }), async (req, res) => {
+  const ip = ipDe(req), ahoraMs = Date.now(), previos = (intentosTasacion.get(ip) || []).filter((t) => ahoraMs - t < 3600e3);
+  if (previos.length >= 6) return res.status(429).json({ error: 'Recibimos varias solicitudes seguidas. Escríbenos a contacto@farmbrokers.cl.' });
+  // Aplana lo recibido: { campo: valor } incluso si viene como fields[x][value] / form_fields[x]
+  const plano = {};
+  const recorrer = (o, pref) => { if (o == null) return; if (typeof o !== 'object') { plano[pref] = String(o); return; } for (const [k, v] of Object.entries(o)) recorrer(v, pref ? `${pref}.${k}` : k); };
+  recorrer(req.body || {}, '');
+  if (plano.sitio) return res.json({ ok: true }); // trampa para robots
+  const buscar = (re) => { const k = Object.keys(plano).find((x) => re.test(norm(x).replace(/\.value$/, '')) && String(plano[x]).trim()); return k ? txt(plano[k], 3000) : ''; };
+  const t = {
+    nombre: buscar(/nombre|name/), telefono: buscar(/tel|fono|phone|celular|whats/), email: buscar(/correo|e-?mail/),
+    comuna: buscar(/comuna|ciudad|ubicaci/), region: buscar(/region/), tipo: buscar(/tipo/), rol: buscar(/\brol\b|avaluo/), hectareas: buscar(/hect|superficie|\bha\b/),
+    mensaje: buscar(/mensaje|message|comentario|consulta|detalle/), motivo: buscar(/motivo|para que|finalidad|proposito/),
+  };
+  if (t.nombre.length < 2) return res.status(400).json({ error: 'Escribe tu nombre.' });
+  if (!t.telefono && !/@/.test(t.email)) return res.status(400).json({ error: 'Déjanos un teléfono o un email para contactarte.' });
+  intentosTasacion.set(ip, [...previos, ahoraMs]);
+  const quien = `${t.nombre} (formulario web)`;
+  await modificar((db) => {
+    const tas = { id: id(), ...limpiar('tasaciones', { titulo: `Tasación ${t.comuna || t.nombre}${t.tipo ? ` (${t.tipo})` : ''}`, cliente: t.nombre, telefono: t.telefono, email: t.email, comuna: t.comuna, rol: t.rol, etapa: 'Solicitud',
+      proximaAccion: 'Contactar para cotizar la tasación', proximaFecha: new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' }) }),
+      origen: 'web', historial: [{ fecha: ahora(), autor: quien, texto: `Solicitó una tasación desde farmbrokers.cl.${[t.tipo && ` Tipo: ${t.tipo}.`, t.region && ` Región: ${t.region}.`, t.hectareas && ` Superficie: ${t.hectareas}.`, t.motivo && ` Motivo: ${t.motivo}.`, t.mensaje && ` Mensaje: ${t.mensaje}`].filter(Boolean).join('')}` }],
+      envios: [], creado: ahora(), actualizado: ahora(), creadoPor: quien, modificadoPor: quien };
+    db.tasaciones.push(tas);
+    const texto = `${t.nombre} pidió una tasación desde la web${t.comuna ? `: ${t.comuna}` : ''}`;
+    registrar(db, quien, texto, { col: 'tasaciones', id: tas.id });
+    const para = adminsDe(db).length ? adminsDe(db) : personasEquipo(db).map((x) => x.nombre).slice(0, 10);
+    const destinos = correosFormularios(db);
+    for (const n of para) notificar(db, n, texto, { col: 'tasaciones', id: tas.id }, quien, { sinCorreo: correoConfigurado() && destinos.includes(correoDe(db, n)) });
+    avisoFormularioWeb(db, { asunto: `Nueva solicitud de tasación: ${t.nombre}${t.comuna ? `, ${t.comuna}` : ''}`, titulo: `${t.nombre} pidió una tasación`, responder: /@/.test(t.email) ? t.email : '',
+      filas: [['Nombre', t.nombre], ['Teléfono', t.telefono], ['Email', t.email], ['Comuna', t.comuna], ['Región', t.region], ['Tipo de propiedad', t.tipo], ['Rol', t.rol], ['Superficie', t.hectareas], ['Motivo', t.motivo], ['Mensaje', t.mensaje]] });
   });
   res.json({ ok: true });
 });
