@@ -494,10 +494,14 @@ function calcularMatches(db) {
     for (const cli of clientes) {
       const bs = busquedasDe(cli).filter((b) => b.activa !== false);
       let mejor = null;
+      const porBusqueda = [];
       for (const b of bs) {
         const r = evaluar(campo, b === cli ? cli : { ...cli, ...b, id: cli.id });
+        if (r && b !== cli && bs.length > 1) porBusqueda.push({ busquedaId: b.id, nombre: b.nombre, score: r.score, nivel: r.nivel, razones: [...r.razones], alertas: [...r.alertas] });
         if (r && (!mejor || r.score > mejor.score)) { mejor = r; if (b !== cli) { r.busquedaId = b.id; if (bs.length > 1) r.razones.unshift(`Búsqueda: ${b.nombre}`); } }
       }
+      // Con varias búsquedas: el detalle de cada una, para ver los calces por separado
+      if (mejor && porBusqueda.length) mejor.porBusqueda = porBusqueda;
       if (mejor) lista.push(mejor);
     }
     if (lista.length) out[campo.id] = lista.sort((a, b) => b.score - a.score);
