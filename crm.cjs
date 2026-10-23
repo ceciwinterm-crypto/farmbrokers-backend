@@ -817,6 +817,7 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
       const cambios = Object.keys(upd).filter((k) => !IGNORAR.includes(k) && ver(prev[k]) !== ver(upd[k])).map((k) => ({ campo: k, antes: ver(prev[k]).slice(0, 300), despues: ver(upd[k]).slice(0, 300) }));
       if (cambios.length) auditar(db, autor, `Editó ${etiqueta(col, upd)}`, { col, id: prev.id, nombre: etiqueta(col, upd) }, cambios);
       db[col][i] = { ...prev, ...upd, historial, actualizado: ahora(), modificadoPor: autor, modificado: ahora() };
+      if (col === 'campos') sincronizarMandatoConFicha(db[col][i], prev, autor);
       return db[col][i];
     });
     r ? res.json(r) : res.status(404).json({ error: `No se encontró el ${singular}.` });
@@ -1465,13 +1466,56 @@ router.post('/campos/:id/captacion', async (req, res) => {
         hectareas: campo.hectareas, moneda: campo.precioUF ? 'UF' : 'CLP', precio: campo.precioUF || campo.precioCLP || null }],
     });
     campo.captacion = { token: (previo && previo.token) || crypto.randomBytes(16).toString('hex'), creado: (previo && previo.creado) || ahora(), creadoPor: (previo && previo.creadoPor) || autor,
-      config, estado: (previo && previo.estado) || 'enviado', datos: datosIniciales, actualizado: ahora(), firma: null, firmaCorredor: null };
+      config, estado: (previo && previo.estado) || 'enviado', datos: datosIniciales, actualizado: ahora(), firma: null, firmaCorredor: null, ...(previo && previo.anulados ? { anulados: previo.anulados } : {}) };
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: previo ? `Actualizó el link del propietario (comisión ${config.comision}%, vigencia ${config.vigencia} días)` : `Creó el link para el propietario (comisión ${config.comision}%, vigencia ${config.vigencia} días)` }];
     if (!previo) registrar(db, autor, `Creó el link del propietario para ${campo.nombre}`, { col: 'campos', id: campo.id });
     return campo;
   });
   if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
   if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
+
+// Si se cambian las hectáreas o el precio en la ficha y el mandato aún no está firmado, el mandato se actualiza solo
+// (cuando tiene un solo predio y un solo precio; con varios, se corrige en "Modificar datos del mandato")
+function sincronizarMandatoConFicha(campo, prev, autor) {
+  const cap = campo.captacion;
+  if (!cap || cap.firma || !cap.datos) return;
+  const d = cap.datos, cambios = [];
+  if (campo.hectareas != null && campo.hectareas !== prev.hectareas && d.predios.length === 1 && d.predios[0].hectareas !== campo.hectareas) {
+    d.predios[0].hectareas = campo.hectareas; cambios.push(`superficie ${String(campo.hectareas).replace('.', ',')} ha`);
+  }
+  const [mon, val] = campo.precioUF ? ['UF', campo.precioUF] : campo.precioCLP ? ['CLP', campo.precioCLP] : [null, null];
+  if (val && (campo.precioUF !== prev.precioUF || campo.precioCLP !== prev.precioCLP) && d.predios.length === 1 && (d.precios || []).length <= 1) {
+    const actual = (d.precios || [])[0];
+    if (!actual || actual.precio !== val || actual.moneda !== mon) {
+      d.precios = [{ concepto: (actual && actual.concepto) || 'Precio de venta', moneda: mon, precio: val }];
+      d.predios[0].precio = val; d.predios[0].moneda = mon;
+      cambios.push(`precio ${monto(val, mon)}`);
+    }
+  }
+  if (!cambios.length) return;
+  cap.actualizado = ahora();
+  campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `El mandato (aún sin firmar) se actualizó con la ficha: ${cambios.join(' y ')}` }];
+}
+
+// ── Equipo: volver a abrir un mandato firmado para corregirlo (el cliente tendrá que firmarlo de nuevo)
+router.post('/campos/:id/mandato/reabrir', async (req, res) => {
+  const autor = usuarioDe(req), motivo = txt((req.body || {}).motivo, 300);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id);
+    if (!campo || !campo.captacion) return null;
+    const cap = campo.captacion;
+    if (!cap.firma) return campo; // ya se puede modificar
+    const codigo = cap.firma.hash.slice(0, 12).toUpperCase();
+    cap.anulados = [...(cap.anulados || []), { firma: cap.firma, firmaCorredor: cap.firmaCorredor, anulado: ahora(), autor, motivo }].slice(-10);
+    cap.firma = null; cap.firmaCorredor = null; cap.estado = 'completado'; cap.actualizado = ahora();
+    campo.checklist = { ...(campo.checklist || {}), mandato: false };
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Reabrió el mandato firmado (código ${codigo}) para corregirlo${motivo ? `: ${motivo}` : ''}. El cliente debe firmarlo de nuevo. La versión firmada queda guardada.` }];
+    registrar(db, autor, `Reabrió el mandato de ${campo.nombre} para corregirlo`, { col: 'campos', id: campo.id });
+    return campo;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el mandato.' });
   res.json(r);
 });
 
@@ -1510,7 +1554,7 @@ router.post('/campos/:id/mandato-equipo', async (req, res) => {
     const datos = limpiarDatosPropietario({ ...(b.datos || {}), pasoActual: 4, sinPrecio: false });
     const pendientes = faltantesMandato(datos);
     campo.captacion = { token: (previo && previo.token) || crypto.randomBytes(16).toString('hex'), creado: (previo && previo.creado) || ahora(), creadoPor: (previo && previo.creadoPor) || autor,
-      modo: 'equipo', config, estado: 'completado', datos, actualizado: ahora(), firma: null, firmaCorredor: null };
+      modo: 'equipo', config, estado: 'completado', datos, actualizado: ahora(), firma: null, firmaCorredor: null, ...(previo && previo.anulados ? { anulados: previo.anulados } : {}) };
     volcarAlCampo(campo, datos);
     campo.actualizado = ahora();
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `${previo ? 'Actualizó' : 'Preparó'} el mandato de venta para ${nombreVendedor(datos) || 'el propietario'} (comisión ${config.comision}%${config.iva ? ' + IVA' : ''}, vigencia ${config.vigencia} días)` }];
