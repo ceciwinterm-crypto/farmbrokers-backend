@@ -624,7 +624,15 @@ function evaluar(campo, cli, hoy = new Date()) {
     const meses = (hoy.getFullYear() - Number(cli.fechaRequerimiento.slice(0, 4))) * 12 + (hoy.getMonth() + 1 - Number(cli.fechaRequerimiento.slice(5, 7)));
     if (meses > 24) alertas.push(`Requerimiento de ${cli.fechaRequerimiento.slice(0, 4)}, reconfirmar`);
   }
-  const ORDEN = ['Operación', 'Ubicación', 'Cultivo', 'Plantado', 'Superficie', 'Tipo', 'Perfil', 'Presupuesto'];
+  // Con palabras clave en la búsqueda, son excluyentes: el campo que no las menciona no puede ser calce fuerte
+  const palCli = cli.palabras || [];
+  if (palCli.length) {
+    parcial = true;
+    const lista = palCli.map((x) => `“${x}”`).join(palCli.length > 1 ? ' ni ' : '');
+    alertas.unshift(`No menciona ${lista}`);
+    det('Palabra clave', 'no', `El campo no menciona ${lista} en ninguna parte (web, ficha ni tasación). Por eso no es calce fuerte, aunque calza por lo demás.`);
+  }
+  const ORDEN = ['Palabra clave', 'Operación', 'Ubicación', 'Cultivo', 'Plantado', 'Superficie', 'Tipo', 'Perfil', 'Presupuesto'];
   detalle.sort((a, b) => ORDEN.indexOf(a.criterio) - ORDEN.indexOf(b.criterio));
   return { clienteId: cli.id, score, nivel: score >= 70 && !parcial ? 'fuerte' : 'parcial', razones, alertas, detalle };
 }
