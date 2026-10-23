@@ -98,6 +98,35 @@ const raizCultivo = (nombre) => norm(nombre).replace(/[^a-z ]/g, '').trim().repl
 const patronCultivo = (k) => CULTIVOS[k] || (cultivosExtra[k] ? new RegExp(`\\b${raizCultivo(cultivosExtra[k].nombre).replace(/\s+/g, '\\s+')}`) : null);
 const esCultivo = (k) => !!(CULTIVOS[k] || cultivosExtra[k] || k === 'frutales');
 const esFrutal = (k) => FRUTALES.includes(k) || !!(cultivosExtra[k] && cultivosExtra[k].frutal);
+// Zonas agrícolas (valles) para las búsquedas: cada una con su región y sus comunas. El equipo puede agregar más.
+const ZONAS_AGRICOLAS = {
+  elqui: { nombre: 'Valle de Elqui', r: 'IV', comunas: ['La Serena', 'Vicuña', 'Paihuano', 'Coquimbo', 'Andacollo'] },
+  limari: { nombre: 'Valle del Limarí', r: 'IV', comunas: ['Ovalle', 'Monte Patria', 'Punitaqui', 'Río Hurtado', 'Combarbalá'] },
+  choapa: { nombre: 'Valle del Choapa', r: 'IV', comunas: ['Illapel', 'Salamanca', 'Los Vilos', 'Canela'] },
+  petorca: { nombre: 'Valle de Petorca / La Ligua', r: 'V', comunas: ['Petorca', 'La Ligua', 'Cabildo', 'Zapallar', 'Papudo'] },
+  aconcagua: { nombre: 'Valle de Aconcagua', r: 'V', comunas: ['Los Andes', 'San Felipe', 'San Esteban', 'Calle Larga', 'Rinconada', 'Santa María', 'Putaendo', 'Panquehue', 'Catemu', 'Llaillay'] },
+  quillota: { nombre: 'Valle de Quillota', r: 'V', comunas: ['Quillota', 'La Cruz', 'La Calera', 'Nogales', 'Hijuelas', 'Limache', 'Olmué'] },
+  casablanca: { nombre: 'Valle de Casablanca', r: 'V', comunas: ['Casablanca'] },
+  leyda: { nombre: 'Valle de San Antonio / Leyda', r: 'V', comunas: ['San Antonio', 'Santo Domingo', 'Cartagena'] },
+  maipo: { nombre: 'Valle del Maipo', r: 'RM', comunas: ['Buin', 'Paine', 'Pirque', 'Isla de Maipo', 'Talagante', 'Calera de Tango', 'San Bernardo', 'Puente Alto', 'El Monte', 'Padre Hurtado', 'Peñaflor'] },
+  melipilla: { nombre: 'Melipilla / Mallarauco', r: 'RM', comunas: ['Melipilla', 'María Pinto', 'San Pedro', 'Alhué', 'Curacaví'] },
+  chacabuco: { nombre: 'Chacabuco (Colina, Lampa, Tiltil)', r: 'RM', comunas: ['Colina', 'Lampa', 'Tiltil'] },
+  cachapoal: { nombre: 'Valle del Cachapoal', r: 'VI', comunas: ['Rancagua', 'Requínoa', 'Rengo', 'Machalí', 'Olivar', 'Coltauco', 'Doñihue', 'Coinco', 'Peumo', 'Malloa', 'Quinta de Tilcoco', 'San Vicente', 'Pichidegua', 'Graneros', 'Codegua', 'Mostazal'] },
+  rapel: { nombre: 'Zona de Rapel', r: 'VI', comunas: ['Las Cabras', 'Litueche', 'Navidad', 'La Estrella', 'Pichidegua'] },
+  colchagua: { nombre: 'Valle de Colchagua', r: 'VI', comunas: ['San Fernando', 'Chimbarongo', 'Nancagua', 'Placilla', 'Santa Cruz', 'Chépica', 'Palmilla', 'Peralillo', 'Lolol', 'Pumanque', 'Marchigüe'] },
+  costa_ohiggins: { nombre: "Secano costero de O'Higgins", r: 'VI', comunas: ['Pichilemu', 'Paredones', 'Marchigüe', 'Litueche', 'Navidad', 'La Estrella'] },
+  curico: { nombre: 'Valle de Curicó', r: 'VII', comunas: ['Curicó', 'Teno', 'Romeral', 'Molina', 'Rauco', 'Sagrada Familia', 'Hualañé', 'Licantén'] },
+  maule: { nombre: 'Valle del Maule (Talca)', r: 'VII', comunas: ['Talca', 'San Clemente', 'Pencahue', 'Maule', 'San Rafael', 'Pelarco', 'Río Claro', 'San Javier', 'Villa Alegre', 'Yerbas Buenas'] },
+  linares: { nombre: 'Linares / Longaví / Parral', r: 'VII', comunas: ['Linares', 'Colbún', 'Longaví', 'Retiro', 'Parral'] },
+  itata: { nombre: 'Valle del Itata', r: 'XVI', comunas: ['Quillón', 'Ránquil', 'Portezuelo', 'Coelemu', 'Ninhue', 'Quirihue', 'Treguaco', 'Cobquecura'] },
+  nuble: { nombre: 'Ñuble interior (Chillán, San Carlos)', r: 'XVI', comunas: ['Chillán', 'Chillán Viejo', 'San Carlos', 'Coihueco', 'Pinto', 'El Carmen', 'Pemuco', 'Yungay', 'Bulnes', 'San Ignacio', 'Ñiquén', 'San Fabián', 'San Nicolás'] },
+  biobio: { nombre: 'Valle del Biobío (Los Ángeles)', r: 'VIII', comunas: ['Los Ángeles', 'Mulchén', 'Nacimiento', 'Negrete', 'Santa Bárbara', 'Quilleco', 'Cabrero', 'Yumbel', 'Laja', 'Tucapel', 'Antuco'] },
+  malleco: { nombre: 'Malleco (Angol, Collipulli)', r: 'IX', comunas: ['Angol', 'Collipulli', 'Renaico', 'Ercilla', 'Victoria', 'Traiguén', 'Purén', 'Los Sauces', 'Lumaco'] },
+  cautin: { nombre: 'Cautín (Temuco y alrededores)', r: 'IX', comunas: ['Temuco', 'Padre Las Casas', 'Freire', 'Pitrufquén', 'Gorbea', 'Vilcún', 'Lautaro', 'Perquenco'] },
+  osorno: { nombre: 'Osorno y Llanquihue', r: 'X', comunas: ['Osorno', 'Purranque', 'Río Negro', 'Puerto Octay', 'San Pablo', 'Frutillar', 'Llanquihue', 'Puerto Varas'] },
+};
+let zonasExtra = {};
+const todasLasZonas = () => ({ ...ZONAS_AGRICOLAS, ...zonasExtra });
 const FRUTALES = ['paltos', 'citricos', 'nogales', 'cerezos', 'avellanos', 'almendros', 'manzanos', 'perales', 'carozos', 'uva_mesa', 'olivos'];
 const ZONAS = {
   rapel: ['las cabras', 'litueche', 'navidad', 'la estrella', 'pichidegua', 'el manzano'],
@@ -248,7 +277,7 @@ const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'te
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar', 'clase', 'rut'];
 // Clientes: persona natural o empresa, con varios contactos y varias búsquedas (cada búsqueda hace su propio match)
 const RE_EMPRESA = /\b(spa|s\.?p\.?a\.?|ltda\.?|limitada|s\.\s?a\.?|sociedad|agr[ií]cola|agroindustrial|inversiones|inmobiliaria|holding|vi[ñn]a|vi[ñn]edos?|compa[ñn][ií]a|cia\.?|e\.?i\.?r\.?l\.?|corp(oraci[oó]n)?|grupo|group|fondo|administradora|forestal|exportadora|frut[ií]cola|asesor[ií]as|servicios|comercial|empresas?|family office)\b/i;
-const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles'];
+const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zonas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles'];
 function limpiarBusqueda(b, i) {
   const r = { id: /^[a-z0-9-]{4,40}$/i.test(String((b && b.id) || '')) ? b.id : id() };
   r.nombre = txt(b && b.nombre, 60);
@@ -260,6 +289,9 @@ function limpiarBusqueda(b, i) {
   // Comunas específicas: [{ c: 'Pirque', r: 'RM' }]; su región queda incluida en la búsqueda
   r.comunas = (Array.isArray(b && b.comunas) ? b.comunas : []).map((x) => ({ c: txt(x && x.c, 60), r: regionCodigo(x && x.r) })).filter((x) => x.c && x.r).slice(0, 40);
   for (const x of r.comunas) if (!r.regiones.includes(x.r)) r.regiones.push(x.r);
+  // Zonas agrícolas elegidas (claves de todasLasZonas); su región queda incluida
+  r.zonas = [...new Set((Array.isArray(b && b.zonas) ? b.zonas : []).map((z) => String(z)).filter((z) => /^[a-z0-9_]{2,40}$/.test(z) && todasLasZonas()[z]))].slice(0, 20);
+  for (const z of r.zonas) { const reg = todasLasZonas()[z].r; if (reg && !r.regiones.includes(reg)) r.regiones.push(reg); }
   r.haMin = num(b && b.haMin); r.haMax = num(b && b.haMax);
   r.cultivos = (Array.isArray(b && b.cultivos) ? b.cultivos : []).filter(esCultivo);
   r.plantado = ['plantado', 'sin_plantar'].includes(b && b.plantado) ? b.plantado : '';
@@ -327,7 +359,7 @@ function limpiar(col, b, previo = {}) {
     // Copia en el cliente para listas y filtros: lo de la primera búsqueda activa, y regiones y perfiles de todas
     const b0 = r.busquedas.find((b) => b.activa) || r.busquedas[0];
     for (const k of ['requerimiento', 'tipo', 'operacion', 'zona', 'haMin', 'haMax', 'presupuesto']) r[k] = b0[k];
-    r.cultivos = b0.cultivos; r.comunas = b0.comunas;
+    r.cultivos = b0.cultivos; r.comunas = b0.comunas; r.zonas = b0.zonas;
     r.regiones = [...new Set(r.busquedas.flatMap((b) => b.regiones))];
     r.perfiles = [...new Set(r.busquedas.flatMap((b) => b.perfiles))];
     return r;
@@ -398,12 +430,14 @@ function evaluar(campo, cli, hoy = new Date()) {
   if (tieneRegion) conocidos++;
   // Los campos en Perú solo calzan con clientes que buscan en Perú (o que lo mencionan)
   if (campo.region === 'PE' && !(cli.regiones || []).includes('PE') && !hitZona) return null;
-  // Comunas específicas: en una región donde el cliente eligió comunas, solo calzan los campos de esas comunas
-  const comunasReg = (cli.comunas || []).filter((x) => x.r === campo.region);
+  // Comunas y zonas específicas: en una región donde el cliente eligió comunas o zonas, solo calzan los campos de esas comunas
+  const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[z]).filter((z) => z && z.r === campo.region);
+  const comunasReg = [...(cli.comunas || []).filter((x) => x.r === campo.region).map((x) => ({ c: x.c, etiqueta: x.c })),
+    ...zonasCli.flatMap((z) => z.comunas.map((c) => ({ c, etiqueta: z.nombre })))];
   if (comunasReg.length && norm(campo.sector)) {
     const s = norm(campo.sector), hit = comunasReg.find((x) => { const c = norm(x.c); return s === c || (s.length >= 4 && c.length >= 4 && (s.includes(c) || c.includes(s))); });
     if (!hit) return null;
-    sLugar = 35; razones.push(`Busca en ${hit.c}`);
+    sLugar = 35; razones.push(`Busca en ${hit.etiqueta}${hit.etiqueta !== hit.c ? ` (${campo.sector.trim()})` : ''}`);
   } else if (tieneRegion && campo.region && cli.regiones.includes(campo.region)) { sLugar = 25; razones.push(campo.region === 'PE' ? 'Busca en Perú' : `Busca en región ${campo.region}`); }
   else if (tieneRegion && campo.region && !hitZona) return null;
   else sLugar = hitZona ? 25 : 17;
@@ -601,7 +635,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; zonasExtra = d.zonasExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 // Cada registro guarda quién lo creó y quién lo modificó por última vez (según su historial)
@@ -682,7 +716,7 @@ router.get('/', (req, res) => {
     modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: todosLosCultivos(), cultivosFrutales: Object.keys(cultivosExtra).filter((k) => cultivosExtra[k].frutal), regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    zonas: todasLasZonas(), cultivos: todosLosCultivos(), cultivosFrutales: Object.keys(cultivosExtra).filter((k) => cultivosExtra[k].frutal), regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500).map((o) => (o.firma || o.vence ? o : { ...o, vence: venceDe(o) })), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
@@ -3647,6 +3681,26 @@ router.post('/tipos', async (req, res) => {
     tiposExtra = db.tiposExtra;
     registrar(db, autor, `Agregó el tipo de propiedad "${db.tiposExtra[clave]}"`, null);
     return { clave, tipos: todosLosTipos() };
+  });
+  res.json(r);
+});
+
+// ───────────────────────── Zonas agregadas o corregidas por el equipo ─────────────────────────
+router.post('/zonas', async (req, res) => {
+  const b = req.body || {}, nombre = txt(b.nombre, 60).replace(/\s+/g, ' ');
+  if (nombre.length < 3) return res.status(400).json({ error: 'Escribe el nombre de la zona.' });
+  const r0 = regionCodigo(b.r);
+  if (!r0) return res.status(400).json({ error: 'Elige la región de la zona.' });
+  const comunas = [...new Set((Array.isArray(b.comunas) ? b.comunas : []).map((c) => txt(c, 60)).filter(Boolean))].slice(0, 40);
+  if (!comunas.length) return res.status(400).json({ error: 'Agrega al menos una comuna a la zona.' });
+  const clave = /^[a-z0-9_]{2,40}$/.test(String(b.clave || '')) ? b.clave : norm(nombre).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const nueva = !todasLasZonas()[clave];
+    db.zonasExtra = { ...(db.zonasExtra || {}), [clave]: { nombre, r: r0, comunas } };
+    zonasExtra = db.zonasExtra;
+    registrar(db, autor, `${nueva ? 'Agregó' : 'Corrigió'} la zona "${nombre}" (${comunas.join(', ')})`, null);
+    return { clave, zonas: todasLasZonas() };
   });
   res.json(r);
 });
