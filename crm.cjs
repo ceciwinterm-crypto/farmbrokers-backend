@@ -92,6 +92,12 @@ const CULTIVOS = {
   berries: /arandan|frutilla|berr(y|ies)/, ganaderia: /ganad|engorda|bovino/, forestal: /forestal|eucal|\bpinos?\b/,
   cultivos_anuales: /maiz|esparrag|cultivos? (anuales|tradicionales)|hortaliz/,
 };
+// Cultivos agregados por el equipo (ej. "Ciruelos"): { clave: { nombre, frutal } }; se reconocen en el texto del campo por su raíz
+let cultivosExtra = {};
+const raizCultivo = (nombre) => norm(nombre).replace(/[^a-z ]/g, '').trim().replace(/(es|s)$/, '').replace(/[oa]$/, '');
+const patronCultivo = (k) => CULTIVOS[k] || (cultivosExtra[k] ? new RegExp(`\\b${raizCultivo(cultivosExtra[k].nombre).replace(/\s+/g, '\\s+')}`) : null);
+const esCultivo = (k) => !!(CULTIVOS[k] || cultivosExtra[k] || k === 'frutales');
+const esFrutal = (k) => FRUTALES.includes(k) || !!(cultivosExtra[k] && cultivosExtra[k].frutal);
 const FRUTALES = ['paltos', 'citricos', 'nogales', 'cerezos', 'avellanos', 'almendros', 'manzanos', 'perales', 'carozos', 'uva_mesa', 'olivos'];
 const ZONAS = {
   rapel: ['las cabras', 'litueche', 'navidad', 'la estrella', 'pichidegua', 'el manzano'],
@@ -161,7 +167,7 @@ function regionesEnTexto(texto) {
 
 function cultivosEn(texto) {
   const s = norm(texto);
-  const out = Object.keys(CULTIVOS).filter((k) => CULTIVOS[k].test(s));
+  const out = [...Object.keys(CULTIVOS), ...Object.keys(cultivosExtra)].filter((k) => { const re = patronCultivo(k); return re && re.test(s); });
   if (/frutal/.test(s)) out.push('frutales');
   return [...new Set(out)];
 }
@@ -242,7 +248,7 @@ const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'te
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar', 'clase', 'rut'];
 // Clientes: persona natural o empresa, con varios contactos y varias búsquedas (cada búsqueda hace su propio match)
 const RE_EMPRESA = /\b(spa|s\.?p\.?a\.?|ltda\.?|limitada|s\.\s?a\.?|sociedad|agr[ií]cola|agroindustrial|inversiones|inmobiliaria|holding|vi[ñn]a|vi[ñn]edos?|compa[ñn][ií]a|cia\.?|e\.?i\.?r\.?l\.?|corp(oraci[oó]n)?|grupo|group|fondo|administradora|forestal|exportadora|frut[ií]cola|asesor[ií]as|servicios|comercial|empresas?|family office)\b/i;
-const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zona', 'haMin', 'haMax', 'cultivos', 'presupuesto', 'perfiles'];
+const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles'];
 function limpiarBusqueda(b, i) {
   const r = { id: /^[a-z0-9-]{4,40}$/i.test(String((b && b.id) || '')) ? b.id : id() };
   r.nombre = txt(b && b.nombre, 60);
@@ -255,7 +261,8 @@ function limpiarBusqueda(b, i) {
   r.comunas = (Array.isArray(b && b.comunas) ? b.comunas : []).map((x) => ({ c: txt(x && x.c, 60), r: regionCodigo(x && x.r) })).filter((x) => x.c && x.r).slice(0, 40);
   for (const x of r.comunas) if (!r.regiones.includes(x.r)) r.regiones.push(x.r);
   r.haMin = num(b && b.haMin); r.haMax = num(b && b.haMax);
-  r.cultivos = (Array.isArray(b && b.cultivos) ? b.cultivos : []).filter((c) => CULTIVOS[c] || c === 'frutales');
+  r.cultivos = (Array.isArray(b && b.cultivos) ? b.cultivos : []).filter(esCultivo);
+  r.plantado = ['plantado', 'sin_plantar'].includes(b && b.plantado) ? b.plantado : '';
   r.presupuesto = txt(b && b.presupuesto, 400);
   r.perfiles = limpiarPerfiles(b && b.perfiles);
   r.activa = !(b && (b.activa === false || b.activa === 'false'));
@@ -291,7 +298,7 @@ function limpiar(col, b, previo = {}) {
     for (const k of CAMPOS_CLIENTE) r[k] = txt(o[k], ['requerimiento', 'observaciones'].includes(k) ? 4000 : 400);
     r.tipo = TIPOS.includes(o.tipo) ? o.tipo : tipoNorm(o.tipo);
     r.regiones = (Array.isArray(o.regiones) ? o.regiones : parseRegiones(o.regiones)).map(regionCodigo).filter(Boolean);
-    r.cultivos = (Array.isArray(o.cultivos) ? o.cultivos : []).filter((c) => CULTIVOS[c] || c === 'frutales');
+    r.cultivos = (Array.isArray(o.cultivos) ? o.cultivos : []).filter(esCultivo);
     r.fechaAlta = /^\d{4}-\d{2}(-\d{2})?$/.test(previo.fechaAlta || '') ? previo.fechaAlta : /^\d{4}-\d{2}(-\d{2})?$/.test(o.fechaAlta || '') ? o.fechaAlta : '';
     r.perfiles = limpiarPerfiles(o.perfiles);
     r.haMin = num(o.haMin); r.haMax = num(o.haMax);
@@ -354,6 +361,15 @@ const COMPAT = {
 const NOMBRE_CULTIVO = { paltos: 'paltos', citricos: 'cítricos', nogales: 'nogales', cerezos: 'cerezos', avellanos: 'avellanos', almendros: 'almendros',
   manzanos: 'manzanos', perales: 'perales', carozos: 'carozos', uva_mesa: 'uva de mesa', vinas: 'viñas', olivos: 'olivos', berries: 'berries',
   ganaderia: 'ganadería', forestal: 'forestal', cultivos_anuales: 'cultivos anuales', frutales: 'frutales' };
+const todosLosCultivos = () => ({ ...NOMBRE_CULTIVO, ...Object.fromEntries(Object.entries(cultivosExtra).map(([k, v]) => [k, v.nombre.toLowerCase()])) });
+const nombreCultivo = (k) => todosLosCultivos()[k] || k;
+// ¿El campo está plantado? true / false / null (no se sabe)
+function campoPlantado(c) {
+  const t = norm(`${c.plantaciones || ''}`);
+  if (!t) return cultivosEn(`${c.observaciones || ''} ${c.descripcionFicha || ''}`).some(esFrutal) ? true : null;
+  if (/sin plantac|no tiene|ninguna|sin plantar|suelo desnudo|pradera natural|sin cultivo|eriazo|^no$|^-$/.test(t)) return false;
+  return true;
+}
 
 function evaluar(campo, cli, hoy = new Date()) {
   // operación: quien compra ve campos en venta; quien arrienda, campos en arriendo
@@ -397,9 +413,17 @@ function evaluar(campo, cli, hoy = new Date()) {
   if (ck.length) conocidos++;
   if (ck.length && cc.length && !['loteo', 'urbano'].includes(campo.tipo)) {
     const inter = ck.filter((x) => cc.includes(x));
-    if (inter.length) { sCult = 30; razones.push(`Busca ${inter.map((x) => NOMBRE_CULTIVO[x]).join(', ')}`); }
-    else if (ck.includes('frutales') && cc.some((x) => FRUTALES.includes(x))) { sCult = 22; razones.push('Busca frutales'); }
+    if (inter.length) { sCult = 30; razones.push(`Busca ${inter.map(nombreCultivo).join(', ')}`); }
+    else if (ck.includes('frutales') && cc.some(esFrutal)) { sCult = 22; razones.push('Busca frutales'); }
     else return null;
+  }
+
+  // plantado o sin plantar
+  if (cli.plantado) {
+    const pl = campoPlantado(campo);
+    if (pl === null) alertas.push(cli.plantado === 'plantado' ? 'Busca plantado: confirma si el campo tiene plantaciones' : 'Busca sin plantar: confirma si el campo tiene plantaciones');
+    else if ((cli.plantado === 'plantado') !== pl) return null;
+    else razones.push(pl ? 'Busca plantado' : 'Busca sin plantar');
   }
 
   // superficie (25)
@@ -550,7 +574,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 // Cada registro guarda quién lo creó y quién lo modificó por última vez (según su historial)
@@ -631,7 +655,7 @@ router.get('/', (req, res) => {
     modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    cultivos: NOMBRE_CULTIVO, regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    cultivos: todosLosCultivos(), cultivosFrutales: Object.keys(cultivosExtra).filter((k) => cultivosExtra[k].frutal), regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500).map((o) => (o.firma || o.vence ? o : { ...o, vence: venceDe(o) })), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
@@ -3596,6 +3620,24 @@ router.post('/tipos', async (req, res) => {
     tiposExtra = db.tiposExtra;
     registrar(db, autor, `Agregó el tipo de propiedad "${db.tiposExtra[clave]}"`, null);
     return { clave, tipos: todosLosTipos() };
+  });
+  res.json(r);
+});
+
+// ───────────────────────── Cultivos agregados por el equipo ─────────────────────────
+router.post('/cultivos', async (req, res) => {
+  const nombre = txt((req.body || {}).nombre, 40).replace(/\s+/g, ' ');
+  if (nombre.length < 3) return res.status(400).json({ error: 'Escribe un nombre de al menos 3 letras.' });
+  const clave = norm(nombre).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
+  if (!clave || raizCultivo(nombre).length < 3) return res.status(400).json({ error: 'Nombre no válido.' });
+  const autor = usuarioDe(req), frutal = !!(req.body || {}).frutal;
+  const r = await modificar((db) => {
+    const existente = Object.entries(todosLosCultivos()).find(([k, l]) => k === clave || norm(l) === norm(nombre));
+    if (existente) return { clave: existente[0], cultivos: todosLosCultivos(), existia: true };
+    db.cultivosExtra = { ...(db.cultivosExtra || {}), [clave]: { nombre: nombre.charAt(0).toUpperCase() + nombre.slice(1), frutal } };
+    cultivosExtra = db.cultivosExtra;
+    registrar(db, autor, `Agregó el cultivo "${db.cultivosExtra[clave].nombre}"`, null);
+    return { clave, cultivos: todosLosCultivos() };
   });
   res.json(r);
 });
