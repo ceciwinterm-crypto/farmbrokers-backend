@@ -277,7 +277,7 @@ const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'te
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar', 'clase', 'rut'];
 // Clientes: persona natural o empresa, con varios contactos y varias búsquedas (cada búsqueda hace su propio match)
 const RE_EMPRESA = /\b(spa|s\.?p\.?a\.?|ltda\.?|limitada|s\.\s?a\.?|sociedad|agr[ií]cola|agroindustrial|inversiones|inmobiliaria|holding|vi[ñn]a|vi[ñn]edos?|compa[ñn][ií]a|cia\.?|e\.?i\.?r\.?l\.?|corp(oraci[oó]n)?|grupo|group|fondo|administradora|forestal|exportadora|frut[ií]cola|asesor[ií]as|servicios|comercial|empresas?|family office)\b/i;
-const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zonas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles'];
+const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zonas', 'excluidas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles'];
 function limpiarBusqueda(b, i) {
   const r = { id: /^[a-z0-9-]{4,40}$/i.test(String((b && b.id) || '')) ? b.id : id() };
   r.nombre = txt(b && b.nombre, 60);
@@ -292,6 +292,8 @@ function limpiarBusqueda(b, i) {
   // Zonas agrícolas elegidas (claves de todasLasZonas); su región queda incluida
   r.zonas = [...new Set((Array.isArray(b && b.zonas) ? b.zonas : []).map((z) => String(z)).filter((z) => /^[a-z0-9_]{2,40}$/.test(z) && todasLasZonas()[z]))].slice(0, 20);
   for (const z of r.zonas) { const reg = todasLasZonas()[z].r; if (reg && !r.regiones.includes(reg)) r.regiones.push(reg); }
+  // Comunas que el cliente NO quiere (por ejemplo, una comuna de la zona que no le interesa)
+  r.excluidas = (Array.isArray(b && b.excluidas) ? b.excluidas : []).map((x) => ({ c: txt(x && x.c, 60), r: regionCodigo(x && x.r) })).filter((x) => x.c && x.r).slice(0, 60);
   r.haMin = num(b && b.haMin); r.haMax = num(b && b.haMax);
   r.cultivos = (Array.isArray(b && b.cultivos) ? b.cultivos : []).filter(esCultivo);
   r.plantado = ['plantado', 'sin_plantar'].includes(b && b.plantado) ? b.plantado : '';
@@ -359,7 +361,7 @@ function limpiar(col, b, previo = {}) {
     // Copia en el cliente para listas y filtros: lo de la primera búsqueda activa, y regiones y perfiles de todas
     const b0 = r.busquedas.find((b) => b.activa) || r.busquedas[0];
     for (const k of ['requerimiento', 'tipo', 'operacion', 'zona', 'haMin', 'haMax', 'presupuesto']) r[k] = b0[k];
-    r.cultivos = b0.cultivos; r.comunas = b0.comunas; r.zonas = b0.zonas;
+    r.cultivos = b0.cultivos; r.comunas = b0.comunas; r.zonas = b0.zonas; r.excluidas = b0.excluidas;
     r.regiones = [...new Set(r.busquedas.flatMap((b) => b.regiones))];
     r.perfiles = [...new Set(r.busquedas.flatMap((b) => b.perfiles))];
     return r;
@@ -431,6 +433,8 @@ function evaluar(campo, cli, hoy = new Date()) {
   // Los campos en Perú solo calzan con clientes que buscan en Perú (o que lo mencionan)
   if (campo.region === 'PE' && !(cli.regiones || []).includes('PE') && !hitZona) return null;
   // Comunas y zonas específicas: en una región donde el cliente eligió comunas o zonas, solo calzan los campos de esas comunas
+  const mismaComuna = (a, b) => { const x = norm(a), y = norm(b); return x === y || (x.length >= 4 && y.length >= 4 && (x.includes(y) || y.includes(x))); };
+  if (norm(campo.sector) && (cli.excluidas || []).some((x) => x.r === campo.region && mismaComuna(x.c, campo.sector))) return null; // comuna que no quiere
   const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[z]).filter((z) => z && z.r === campo.region);
   const comunasReg = [...(cli.comunas || []).filter((x) => x.r === campo.region).map((x) => ({ c: x.c, etiqueta: x.c })),
     ...zonasCli.flatMap((z) => z.comunas.map((c) => ({ c, etiqueta: z.nombre })))];
