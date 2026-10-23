@@ -425,6 +425,13 @@ function campoPlantado(c) {
   return null;
 }
 
+// Detalle del calce por criterio, para mostrar en el CRM por qué calza cada campo
+// estado: 'ok' (calza), 'medio' (calza a medias o falta un dato), 'no' (no calza en eso), 'neutro' (no se filtró por eso)
+const nombreTipoCampo = (k) => { const v = todosLosTipos()[k]; return (typeof v === 'string' ? v : v && v.nombre) || k || 'sin tipo'; };
+const lista3 = (l) => (l.length <= 1 ? l.join('') : `${l.slice(0, -1).join(', ')} y ${l[l.length - 1]}`);
+const fmtHa = (n) => Number(n).toLocaleString('es-CL', { maximumFractionDigits: 1 });
+const corto = (t, n = 70) => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
+
 function evaluar(campo, cli, hoy = new Date()) {
   // operación: quien compra ve campos en venta; quien arrienda, campos en arriendo
   const opCampo = campo.operacion || 'venta', opCli = ['arriendo', 'ambas'].includes(cli.operacion) ? cli.operacion : 'compra';
@@ -434,7 +441,8 @@ function evaluar(campo, cli, hoy = new Date()) {
   let sTipo;
   if (!cli.tipo) sTipo = 5;
   else { sTipo = (COMPAT[cli.tipo] || { [cli.tipo]: 10 })[campo.tipo]; if (sTipo == null) return null; }
-  const razones = [], alertas = [];
+  const razones = [], alertas = [], detalle = [];
+  const det = (criterio, estado, texto) => detalle.push({ criterio, estado, texto });
   const textoCli = norm(`${cli.zona} ${cli.requerimiento} ${cli.observaciones}`);
   const lugares = lugaresDe(campo);
   const hitZona = lugares.find((l) => new RegExp(`\\b${l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`).test(textoCli));
@@ -452,24 +460,47 @@ function evaluar(campo, cli, hoy = new Date()) {
   const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter((z) => z && z.r === campo.region);
   const comunasReg = [...(cli.comunas || []).filter((x) => x.r === campo.region).map((x) => ({ c: x.c, etiqueta: x.c })),
     ...zonasCli.flatMap((z) => z.comunas.map((c) => ({ c, etiqueta: z.nombre })))];
+  // Dónde está el campo, en palabras (comuna, zona y región)
+  const sectorTxt = String(campo.sector || '').trim();
+  const regTxt = (r) => (r === 'PE' ? 'Perú' : `región ${r}`);
+  const zonasDelCampo = sectorTxt ? Object.values(todasLasZonas()).filter((z) => z.r === campo.region && z.comunas.some((c) => mismaComuna(c, sectorTxt))).map((z) => z.nombre) : [];
+  const dondeCampo = `${sectorTxt || 'una comuna sin escribir'}${zonasDelCampo.length ? ` (${lista3(zonasDelCampo)})` : ''}${campo.region ? `, ${regTxt(campo.region)}` : ''}`;
+  const eligioCli = [...(cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter(Boolean).map((z) => z.nombre), ...(cli.comunas || []).map((x) => x.c)];
+  let txtLugar, estLugar = 'ok';
   if (comunasReg.length && norm(campo.sector)) {
     const s = norm(campo.sector), hit = comunasReg.find((x) => { const c = norm(x.c); return s === c || (s.length >= 4 && c.length >= 4 && (s.includes(c) || c.includes(s))); });
     if (!hit) return null;
     sLugar = 35; razones.push(`Busca en ${hit.etiqueta}${hit.etiqueta !== hit.c ? ` (${campo.sector.trim()})` : ''}`);
-  } else if (tieneRegion && campo.region && cli.regiones.includes(campo.region)) { sLugar = 25; razones.push(campo.region === 'PE' ? 'Busca en Perú' : `Busca en región ${campo.region}`); }
+    txtLugar = `El campo está en ${dondeCampo}. El cliente busca en ${hit.etiqueta !== hit.c ? `${hit.etiqueta}, que incluye ${sectorTxt}` : `la comuna de ${hit.c}`}.`;
+  } else if (tieneRegion && campo.region && cli.regiones.includes(campo.region)) {
+    sLugar = 25; razones.push(campo.region === 'PE' ? 'Busca en Perú' : `Busca en región ${campo.region}`);
+    if (comunasReg.length) { estLugar = 'medio'; txtLugar = `El campo está en ${dondeCampo}. El cliente busca en ${lista3([...new Set(comunasReg.map((x) => x.etiqueta))])}, pero el campo no tiene comuna escrita: solo se revisó la región.`; }
+    else if (eligioCli.length) txtLugar = `El campo está en ${dondeCampo}. Calza por región: el cliente busca en toda la ${regTxt(campo.region)} (las comunas o zonas que eligió, ${corto(lista3([...new Set(eligioCli)]), 90)}, son de otra región).`;
+    else txtLugar = `El campo está en ${dondeCampo}. Calza por región: el cliente busca en toda la ${regTxt(campo.region)}, sin elegir comunas ni zonas.`;
+  }
   else if (tieneRegion && campo.region && !hitZona) return null;
-  else sLugar = hitZona ? 25 : 17;
+  else {
+    sLugar = hitZona ? 25 : 17;
+    if (!hitZona) { estLugar = 'neutro'; txtLugar = tieneRegion ? `El campo no tiene región escrita (está en ${dondeCampo}), así que no se pudo comparar con la región que busca.` : `El cliente no indicó región, comunas ni zonas: no se filtró por ubicación. El campo está en ${dondeCampo}.`; }
+  }
   if (hitZona) {
     sLugar = Math.min(35, sLugar + 10);
     const etiquetaZona = hitZona === norm(campo.sector) ? campo.sector.trim() : hitZona.replace(/\b\w/g, (x) => x.toUpperCase());
     razones.push(`Menciona ${etiquetaZona}`);
+    const extra = `El requerimiento del cliente menciona “${etiquetaZona}”.`;
+    if (estLugar === 'neutro') { estLugar = 'ok'; txtLugar = `El campo está en ${dondeCampo}. ${extra}`; } else txtLugar = `${txtLugar || `El campo está en ${dondeCampo}.`} ${extra}`;
   }
+  det('Ubicación', estLugar, txtLugar);
 
   let parcial = false; // casos dudosos: se muestran como calce parcial
   // cultivos (30): lo plantado se compara con lo plantado; la aptitud solo cuenta para quien quiere plantar
   let sCult = 15;
   const ck = cli.cultivos || [];
   if (ck.length) conocidos++;
+  const buscaCult = lista3(ck.map(nombreCultivo));
+  const plantTxt = corto(campo.plantaciones);
+  if (!ck.length) det('Cultivo', 'neutro', `El cliente no indicó cultivos: no se filtró por cultivo.${plantTxt ? ` El campo tiene: ${plantTxt}.` : ''}`);
+  else if (['loteo', 'urbano'].includes(campo.tipo)) det('Cultivo', 'neutro', `Busca ${buscaCult}, pero en un ${nombreTipoCampo(campo.tipo).toLowerCase()} no se comparan cultivos.`);
   if (ck.length && !['loteo', 'urbano'].includes(campo.tipo)) {
     const anuales = cultivosEn(`${campo.plantaciones || ''}`).includes('cultivos_anuales');
     const plantados = [...plantadoCon(campo), ...(anuales && ck.includes('cultivos_anuales') ? ['cultivos_anuales'] : [])];
@@ -478,27 +509,28 @@ function evaluar(campo, cli, hoy = new Date()) {
     const conPlantado = calza(plantados), conApto = calza(aptos);
     if (cli.plantado === 'plantado') {
       // Quiere un campo YA plantado con lo que busca
-      if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); }
+      if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult} ya plantado; el campo está plantado con ${conPlantado}.`); }
       else if (plantados.length) return null; // está plantado, pero con otra cosa
       else if (aptos.length) return null;
     } else if (cli.plantado === 'sin_plantar') {
-      if (conApto) { sCult = 30; razones.push(`Apto para ${conApto}`); } else if (aptos.length) return null;
-    } else if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); }
+      if (conApto) { sCult = 30; razones.push(`Apto para ${conApto}`); det('Cultivo', 'ok', `Busca un campo sin plantar para ${buscaCult}; el campo es apto para ${conApto}.`); } else if (aptos.length) return null;
+    } else if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult}; el campo está plantado con ${conPlantado}.`); }
     else if (plantados.length) {
       // Plantado con otra cosa: solo calza parcial si la aptitud coincide
-      if (conApto) { sCult = 10; parcial = true; razones.push(`Apto para ${conApto}`); alertas.push(`Hoy está plantado con ${plantados.map(nombreCultivo).join(', ')}, no con lo que busca`); } else return null;
-    } else if (conApto) { sCult = 26; parcial = true; razones.push(`Apto para ${conApto} (no está plantado con eso)`); if (anuales) alertas.push('Hoy tiene cultivos anuales'); }
+      if (conApto) { sCult = 10; parcial = true; razones.push(`Apto para ${conApto}`); alertas.push(`Hoy está plantado con ${plantados.map(nombreCultivo).join(', ')}, no con lo que busca`); det('Cultivo', 'medio', `Busca ${buscaCult}; el campo hoy está plantado con ${lista3(plantados.map(nombreCultivo))}, pero es apto para ${conApto}.`); } else return null;
+    } else if (conApto) { sCult = 26; parcial = true; razones.push(`Apto para ${conApto} (no está plantado con eso)`); if (anuales) alertas.push('Hoy tiene cultivos anuales'); det('Cultivo', 'medio', `Busca ${buscaCult}; el campo no está plantado con eso, pero es apto para ${conApto}${anuales ? ' (hoy tiene cultivos anuales)' : ''}.`); }
     else if (aptos.length) return null;
-    else { parcial = true; alertas.push('El campo no tiene plantaciones ni aptitud escritas: no se puede saber si calza con lo que busca'); }
+    else { parcial = true; alertas.push('El campo no tiene plantaciones ni aptitud escritas: no se puede saber si calza con lo que busca'); det('Cultivo', 'medio', `Busca ${buscaCult}, pero el campo no tiene plantaciones ni aptitud escritas: no se sabe si calza. Completa la ficha del campo.`); }
   }
 
+  if (ck.length && !detalle.some((d) => d.criterio === 'Cultivo')) det('Cultivo', 'medio', `Busca ${buscaCult}; la ficha del campo no dice si es apto para eso.`);
   // plantado o sin plantar
   if (cli.plantado) {
     const pl = campoPlantado(campo);
     if (pl === null) parcial = true;
-    if (pl === null) alertas.push(cli.plantado === 'plantado' ? 'Busca plantado: confirma si el campo tiene plantaciones' : 'Busca sin plantar: confirma si el campo tiene plantaciones');
+    if (pl === null) { alertas.push(cli.plantado === 'plantado' ? 'Busca plantado: confirma si el campo tiene plantaciones' : 'Busca sin plantar: confirma si el campo tiene plantaciones'); det('Plantado', 'medio', `Busca ${cli.plantado === 'plantado' ? 'un campo plantado' : 'un campo sin plantar'}, pero la ficha no dice si el campo tiene plantaciones.`); }
     else if ((cli.plantado === 'plantado') !== pl) return null;
-    else razones.push(pl ? 'Busca plantado' : 'Busca sin plantar');
+    else { razones.push(pl ? 'Busca plantado' : 'Busca sin plantar'); det('Plantado', 'ok', pl ? 'Busca un campo plantado y este lo está.' : 'Busca un campo sin plantar y este no tiene plantaciones.'); }
   }
 
   // superficie (25)
@@ -509,11 +541,12 @@ function evaluar(campo, cli, hoy = new Date()) {
     if (ha != null) {
       const min = cli.haMin || 0, max = cli.haMax == null ? Infinity : cli.haMax;
       const txtRango = cli.haMax == null ? `${min}+ ha` : `${min}–${max} ha`;
-      if (ha >= min && ha <= max) { sSup = 25; razones.push(`Superficie calza (${txtRango})`); }
-      else if (ha >= min * 0.75 && ha <= max * 1.25) { sSup = 12; alertas.push(`Superficie algo fuera de rango (busca ${txtRango})`); }
-      else { sSup = 0; alertas.push(`Superficie fuera de rango (busca ${txtRango})`); }
-    }
-  }
+      const t = `El campo tiene ${fmtHa(ha)} ha; el cliente busca ${txtRango}`;
+      if (ha >= min && ha <= max) { sSup = 25; razones.push(`Superficie calza (${txtRango})`); det('Superficie', 'ok', `${t}.`); }
+      else if (ha >= min * 0.75 && ha <= max * 1.25) { sSup = 12; alertas.push(`Superficie algo fuera de rango (busca ${txtRango})`); det('Superficie', 'medio', `${t}: está algo fuera del rango.`); }
+      else { sSup = 0; alertas.push(`Superficie fuera de rango (busca ${txtRango})`); det('Superficie', 'no', `${t}: no calza en superficie (calza por lo demás).`); }
+    } else det('Superficie', 'medio', `El campo no tiene hectáreas escritas; el cliente busca ${cli.haMax == null ? `${cli.haMin || 0}+ ha` : `${cli.haMin || 0}–${cli.haMax} ha`}.`);
+  } else det('Superficie', 'neutro', `El cliente no indicó hectáreas: no se filtró por superficie.${ha != null ? ` El campo tiene ${fmtHa(ha)} ha.` : ''}`);
 
   // Perfil de comprador: si ambos lo tienen y no comparten ninguno, el cliente busca otra cosa
   let sPerfil = 0;
@@ -524,17 +557,21 @@ function evaluar(campo, cli, hoy = new Date()) {
     sPerfil = 12;
     const nombres = comunes.map((x) => (perfilesActuales.find((p) => p.id === x) || {}).nombre || x);
     razones.unshift(`Perfil ${nombres.join(', ')}`);
+    det('Perfil', 'ok', `Ambos son perfil ${lista3(nombres)}.`);
   }
+  if (cli.tipo) det('Tipo', sTipo >= 10 ? 'ok' : 'medio', sTipo >= 10 ? `Busca ${nombreTipoCampo(cli.tipo).toLowerCase()} y el campo es ${nombreTipoCampo(campo.tipo).toLowerCase()}.` : `Busca ${nombreTipoCampo(cli.tipo).toLowerCase()}; el campo es ${nombreTipoCampo(campo.tipo).toLowerCase()}, que se parece.`);
   if (!hitZona && conocidos < 2 && !sPerfil) return null;
   const score = Math.min(100, sTipo + sLugar + sCult + sSup + sPerfil);
   if (score < 55) return null;
-  if (opCli !== 'compra' && opCampo !== 'venta') razones.unshift('Busca arriendo y el campo se arrienda');
-  if (cli.presupuesto) razones.push(`Presupuesto: ${cli.presupuesto}`);
+  if (opCli !== 'compra' && opCampo !== 'venta') { razones.unshift('Busca arriendo y el campo se arrienda'); det('Operación', 'ok', 'Busca arriendo y el campo se arrienda.'); }
+  if (cli.presupuesto) { razones.push(`Presupuesto: ${cli.presupuesto}`); det('Presupuesto', 'neutro', `Presupuesto del cliente: ${corto(cli.presupuesto, 60)} (no se compara solo; revísalo con el precio).`); }
   if (cli.fechaRequerimiento) {
     const meses = (hoy.getFullYear() - Number(cli.fechaRequerimiento.slice(0, 4))) * 12 + (hoy.getMonth() + 1 - Number(cli.fechaRequerimiento.slice(5, 7)));
     if (meses > 24) alertas.push(`Requerimiento de ${cli.fechaRequerimiento.slice(0, 4)}, reconfirmar`);
   }
-  return { clienteId: cli.id, score, nivel: score >= 70 && !parcial ? 'fuerte' : 'parcial', razones, alertas };
+  const ORDEN = ['Operación', 'Ubicación', 'Cultivo', 'Plantado', 'Superficie', 'Tipo', 'Perfil', 'Presupuesto'];
+  detalle.sort((a, b) => ORDEN.indexOf(a.criterio) - ORDEN.indexOf(b.criterio));
+  return { clienteId: cli.id, score, nivel: score >= 70 && !parcial ? 'fuerte' : 'parcial', razones, alertas, detalle };
 }
 
 function calcularMatches(db) {
@@ -549,7 +586,7 @@ function calcularMatches(db) {
       const porBusqueda = [];
       for (const b of bs) {
         const r = evaluar(campo, b === cli ? cli : { ...cli, ...b, id: cli.id });
-        if (r && b !== cli && bs.length > 1) porBusqueda.push({ busquedaId: b.id, nombre: b.nombre, score: r.score, nivel: r.nivel, razones: [...r.razones], alertas: [...r.alertas] });
+        if (r && b !== cli && bs.length > 1) porBusqueda.push({ busquedaId: b.id, nombre: b.nombre, score: r.score, nivel: r.nivel, razones: [...r.razones], alertas: [...r.alertas], detalle: r.detalle });
         if (r && (!mejor || r.score > mejor.score)) { mejor = r; if (b !== cli) { r.busquedaId = b.id; if (bs.length > 1) r.razones.unshift(`Búsqueda: ${b.nombre}`); } }
       }
       // Con varias búsquedas: el detalle de cada una, para ver los calces por separado
