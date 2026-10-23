@@ -99,32 +99,46 @@ const patronCultivo = (k) => CULTIVOS[k] || (cultivosExtra[k] ? new RegExp(`\\b$
 const esCultivo = (k) => !!(CULTIVOS[k] || cultivosExtra[k] || k === 'frutales');
 const esFrutal = (k) => FRUTALES.includes(k) || !!(cultivosExtra[k] && cultivosExtra[k].frutal);
 // Zonas agrícolas (valles) para las búsquedas: cada una con su región y sus comunas. El equipo puede agregar más.
+const DO = 'Decreto 464 (SAG)', COM = 'Uso comercial (Farm Brokers)';
+// Valles oficiales: Decreto 464 de 1994 (zonificación vitícola, SAG), con las áreas que nombra el decreto más las comunas vecinas del mismo valle.
+// Zonas comerciales: agrupaciones de uso habitual en el corretaje de campos.
 const ZONAS_AGRICOLAS = {
-  elqui: { nombre: 'Valle de Elqui', r: 'IV', comunas: ['La Serena', 'Vicuña', 'Paihuano', 'Coquimbo', 'Andacollo'] },
-  limari: { nombre: 'Valle del Limarí', r: 'IV', comunas: ['Ovalle', 'Monte Patria', 'Punitaqui', 'Río Hurtado', 'Combarbalá'] },
-  choapa: { nombre: 'Valle del Choapa', r: 'IV', comunas: ['Illapel', 'Salamanca', 'Los Vilos', 'Canela'] },
-  petorca: { nombre: 'Valle de Petorca / La Ligua', r: 'V', comunas: ['Petorca', 'La Ligua', 'Cabildo', 'Zapallar', 'Papudo'] },
-  aconcagua: { nombre: 'Valle de Aconcagua', r: 'V', comunas: ['Los Andes', 'San Felipe', 'San Esteban', 'Calle Larga', 'Rinconada', 'Santa María', 'Putaendo', 'Panquehue', 'Catemu', 'Llaillay'] },
-  quillota: { nombre: 'Valle de Quillota', r: 'V', comunas: ['Quillota', 'La Cruz', 'La Calera', 'Nogales', 'Hijuelas', 'Limache', 'Olmué'] },
-  casablanca: { nombre: 'Valle de Casablanca', r: 'V', comunas: ['Casablanca'] },
-  leyda: { nombre: 'Valle de San Antonio / Leyda', r: 'V', comunas: ['San Antonio', 'Santo Domingo', 'Cartagena'] },
-  maipo: { nombre: 'Valle del Maipo', r: 'RM', comunas: ['Buin', 'Paine', 'Pirque', 'Isla de Maipo', 'Talagante', 'Calera de Tango', 'San Bernardo', 'Puente Alto', 'El Monte', 'Padre Hurtado', 'Peñaflor'] },
-  melipilla: { nombre: 'Melipilla / Mallarauco', r: 'RM', comunas: ['Melipilla', 'María Pinto', 'San Pedro', 'Alhué', 'Curacaví'] },
-  chacabuco: { nombre: 'Chacabuco (Colina, Lampa, Tiltil)', r: 'RM', comunas: ['Colina', 'Lampa', 'Tiltil'] },
-  cachapoal: { nombre: 'Valle del Cachapoal', r: 'VI', comunas: ['Rancagua', 'Requínoa', 'Rengo', 'Machalí', 'Olivar', 'Coltauco', 'Doñihue', 'Coinco', 'Peumo', 'Malloa', 'Quinta de Tilcoco', 'San Vicente', 'Pichidegua', 'Graneros', 'Codegua', 'Mostazal'] },
-  rapel: { nombre: 'Zona de Rapel', r: 'VI', comunas: ['Las Cabras', 'Litueche', 'Navidad', 'La Estrella', 'Pichidegua'] },
-  colchagua: { nombre: 'Valle de Colchagua', r: 'VI', comunas: ['San Fernando', 'Chimbarongo', 'Nancagua', 'Placilla', 'Santa Cruz', 'Chépica', 'Palmilla', 'Peralillo', 'Lolol', 'Pumanque', 'Marchigüe'] },
-  costa_ohiggins: { nombre: "Secano costero de O'Higgins", r: 'VI', comunas: ['Pichilemu', 'Paredones', 'Marchigüe', 'Litueche', 'Navidad', 'La Estrella'] },
-  curico: { nombre: 'Valle de Curicó', r: 'VII', comunas: ['Curicó', 'Teno', 'Romeral', 'Molina', 'Rauco', 'Sagrada Familia', 'Hualañé', 'Licantén'] },
-  maule: { nombre: 'Valle del Maule (Talca)', r: 'VII', comunas: ['Talca', 'San Clemente', 'Pencahue', 'Maule', 'San Rafael', 'Pelarco', 'Río Claro', 'San Javier', 'Villa Alegre', 'Yerbas Buenas'] },
-  linares: { nombre: 'Linares / Longaví / Parral', r: 'VII', comunas: ['Linares', 'Colbún', 'Longaví', 'Retiro', 'Parral'] },
-  itata: { nombre: 'Valle del Itata', r: 'XVI', comunas: ['Quillón', 'Ránquil', 'Portezuelo', 'Coelemu', 'Ninhue', 'Quirihue', 'Treguaco', 'Cobquecura'] },
-  nuble: { nombre: 'Ñuble interior (Chillán, San Carlos)', r: 'XVI', comunas: ['Chillán', 'Chillán Viejo', 'San Carlos', 'Coihueco', 'Pinto', 'El Carmen', 'Pemuco', 'Yungay', 'Bulnes', 'San Ignacio', 'Ñiquén', 'San Fabián', 'San Nicolás'] },
-  biobio: { nombre: 'Valle del Biobío (Los Ángeles)', r: 'VIII', comunas: ['Los Ángeles', 'Mulchén', 'Nacimiento', 'Negrete', 'Santa Bárbara', 'Quilleco', 'Cabrero', 'Yumbel', 'Laja', 'Tucapel', 'Antuco'] },
-  malleco: { nombre: 'Malleco (Angol, Collipulli)', r: 'IX', comunas: ['Angol', 'Collipulli', 'Renaico', 'Ercilla', 'Victoria', 'Traiguén', 'Purén', 'Los Sauces', 'Lumaco'] },
-  cautin: { nombre: 'Cautín (Temuco y alrededores)', r: 'IX', comunas: ['Temuco', 'Padre Las Casas', 'Freire', 'Pitrufquén', 'Gorbea', 'Vilcún', 'Lautaro', 'Perquenco'] },
-  osorno: { nombre: 'Osorno y Llanquihue', r: 'X', comunas: ['Osorno', 'Purranque', 'Río Negro', 'Puerto Octay', 'San Pablo', 'Frutillar', 'Llanquihue', 'Puerto Varas'] },
+  copiapo: { nombre: 'Valle de Copiapó', r: 'III', fuente: DO, comunas: ['Copiapó', 'Tierra Amarilla'] },
+  huasco: { nombre: 'Valle del Huasco', r: 'III', fuente: DO, comunas: ['Vallenar', 'Alto del Carmen', 'Freirina', 'Huasco'] },
+  elqui: { nombre: 'Valle del Elqui', r: 'IV', fuente: DO, comunas: ['La Serena', 'Vicuña', 'Paihuano', 'Coquimbo', 'Andacollo'] },
+  limari: { nombre: 'Valle del Limarí', r: 'IV', fuente: DO, comunas: ['Ovalle', 'Monte Patria', 'Punitaqui', 'Río Hurtado', 'Combarbalá'] },
+  choapa: { nombre: 'Valle del Choapa', r: 'IV', fuente: DO, comunas: ['Salamanca', 'Illapel', 'Los Vilos', 'Canela'] },
+  aconcagua: { nombre: 'Valle del Aconcagua', r: 'V', fuente: DO, comunas: ['Panquehue', 'Quillota', 'Hijuelas', 'Catemu', 'Llaillay', 'San Felipe', 'Santa María', 'Calle Larga', 'San Esteban', 'Los Andes', 'Rinconada', 'Putaendo'] },
+  casablanca: { nombre: 'Valle de Casablanca', r: 'V', fuente: DO, comunas: ['Casablanca'] },
+  leyda: { nombre: 'Valle de San Antonio / Leyda', r: 'V', fuente: DO, comunas: ['San Antonio', 'Santo Domingo', 'Cartagena', 'Algarrobo'] },
+  marga_marga: { nombre: 'Valle del Marga-Marga', r: 'V', fuente: DO, comunas: ['Quilpué', 'Villa Alemana', 'Limache', 'Olmué'] },
+  maipo: { nombre: 'Valle del Maipo', r: 'RM', fuente: DO, comunas: ['Santiago', 'Pirque', 'Puente Alto', 'Buin', 'Paine', 'Isla de Maipo', 'Talagante', 'Melipilla', 'Alhué', 'María Pinto', 'Colina', 'Calera de Tango', 'Tiltil', 'Lampa', 'San Bernardo', 'El Monte', 'Padre Hurtado', 'Peñaflor', 'Curacaví', 'San Pedro'] },
+  rapel_valle: { nombre: 'Valle del Rapel (Cachapoal + Colchagua)', r: 'VI', fuente: DO, comunas: ['Rancagua', 'Requínoa', 'Rengo', 'Peumo', 'Machalí', 'Coltauco', 'Olivar', 'Doñihue', 'Coinco', 'Malloa', 'Quinta de Tilcoco', 'San Vicente', 'Pichidegua', 'Las Cabras', 'Graneros', 'Codegua', 'Mostazal', 'San Fernando', 'Chimbarongo', 'Nancagua', 'Placilla', 'Santa Cruz', 'Chépica', 'Palmilla', 'Peralillo', 'Lolol', 'Marchigüe', 'Litueche', 'La Estrella', 'Paredones', 'Pumanque'] },
+  cachapoal: { nombre: 'Valle del Cachapoal', r: 'VI', fuente: DO, comunas: ['Rancagua', 'Requínoa', 'Rengo', 'Peumo', 'Machalí', 'Coltauco', 'Olivar', 'Doñihue', 'Coinco', 'Malloa', 'Quinta de Tilcoco', 'San Vicente', 'Pichidegua', 'Graneros', 'Codegua', 'Mostazal'] },
+  colchagua: { nombre: 'Valle de Colchagua', r: 'VI', fuente: DO, comunas: ['San Fernando', 'Chimbarongo', 'Nancagua', 'Placilla', 'Santa Cruz', 'Chépica', 'Palmilla', 'Peralillo', 'Lolol', 'Marchigüe', 'Litueche', 'La Estrella', 'Paredones', 'Pumanque'] },
+  curico: { nombre: 'Valle de Curicó', r: 'VII', fuente: DO, comunas: ['Curicó', 'Teno', 'Rauco', 'Romeral', 'Vichuquén', 'Molina', 'Sagrada Familia', 'Hualañé', 'Licantén'] },
+  teno: { nombre: 'Valle del Teno', r: 'VII', fuente: DO, comunas: ['Teno', 'Rauco', 'Romeral', 'Vichuquén'] },
+  lontue: { nombre: 'Valle del Lontué', r: 'VII', fuente: DO, comunas: ['Molina', 'Sagrada Familia'] },
+  maule: { nombre: 'Valle del Maule', r: 'VII', fuente: DO, comunas: ['Talca', 'Pencahue', 'San Clemente', 'San Rafael', 'Empedrado', 'Curepto', 'Maule', 'Pelarco', 'Río Claro', 'San Javier', 'Villa Alegre', 'Yerbas Buenas', 'Linares', 'Colbún', 'Longaví', 'Retiro', 'Parral', 'Cauquenes'] },
+  claro: { nombre: 'Valle del Claro (Talca)', r: 'VII', fuente: DO, comunas: ['Talca', 'Pencahue', 'San Clemente', 'San Rafael', 'Empedrado', 'Curepto', 'Maule', 'Pelarco', 'Río Claro'] },
+  loncomilla: { nombre: 'Valle del Loncomilla (Linares, Parral)', r: 'VII', fuente: DO, comunas: ['San Javier', 'Villa Alegre', 'Yerbas Buenas', 'Linares', 'Colbún', 'Longaví', 'Retiro', 'Parral'] },
+  tutuven: { nombre: 'Valle del Tutuvén (Cauquenes)', r: 'VII', fuente: DO, comunas: ['Cauquenes'] },
+  itata: { nombre: 'Valle del Itata', r: 'XVI', fuente: DO, comunas: ['Chillán', 'Quillón', 'Portezuelo', 'Coelemu', 'Ránquil', 'Ninhue', 'Quirihue', 'Treguaco', 'Cobquecura'] },
+  biobio: { nombre: 'Valle del Biobío', r: 'VIII', fuente: DO, comunas: ['Yumbel', 'Mulchén', 'Los Ángeles', 'Nacimiento', 'Negrete', 'Santa Bárbara', 'Quilleco', 'Cabrero', 'Laja', 'Tucapel', 'Antuco'] },
+  malleco: { nombre: 'Valle del Malleco', r: 'IX', fuente: DO, comunas: ['Traiguén', 'Angol', 'Collipulli', 'Renaico', 'Ercilla', 'Victoria', 'Purén', 'Los Sauces', 'Lumaco'] },
+  cautin: { nombre: 'Valle del Cautín', r: 'IX', fuente: DO, comunas: ['Perquenco', 'Galvarino', 'Temuco', 'Padre Las Casas', 'Freire', 'Pitrufquén', 'Gorbea', 'Vilcún', 'Lautaro'] },
+  osorno: { nombre: 'Valle de Osorno', r: 'X', fuente: DO, comunas: ['Osorno', 'San Pablo', 'Purranque', 'Río Negro', 'Puerto Octay'] },
+  // Zonas comerciales
+  petorca: { nombre: 'Petorca / La Ligua', r: 'V', fuente: COM, comunas: ['Petorca', 'La Ligua', 'Cabildo', 'Zapallar', 'Papudo'] },
+  quillota: { nombre: 'Quillota / La Cruz', r: 'V', fuente: COM, comunas: ['Quillota', 'La Cruz', 'La Calera', 'Nogales', 'Hijuelas', 'Limache', 'Olmué'] },
+  melipilla: { nombre: 'Melipilla / Mallarauco', r: 'RM', fuente: COM, comunas: ['Melipilla', 'María Pinto', 'San Pedro', 'Alhué', 'Curacaví'] },
+  chacabuco: { nombre: 'Chacabuco (Colina, Lampa, Tiltil)', r: 'RM', fuente: COM, comunas: ['Colina', 'Lampa', 'Tiltil'] },
+  rapel: { nombre: 'Lago Rapel (Las Cabras, Litueche…)', r: 'VI', fuente: COM, comunas: ['Las Cabras', 'Litueche', 'Navidad', 'La Estrella', 'Pichidegua'] },
+  costa_ohiggins: { nombre: "Secano costero de O'Higgins", r: 'VI', fuente: COM, comunas: ['Pichilemu', 'Paredones', 'Marchigüe', 'Litueche', 'Navidad', 'La Estrella'] },
+  nuble: { nombre: 'Ñuble interior (Chillán, San Carlos)', r: 'XVI', fuente: COM, comunas: ['Chillán', 'Chillán Viejo', 'San Carlos', 'Coihueco', 'Pinto', 'El Carmen', 'Pemuco', 'Yungay', 'Bulnes', 'San Ignacio', 'Ñiquén', 'San Fabián', 'San Nicolás'] },
+  llanquihue: { nombre: 'Llanquihue (Frutillar, Puerto Varas)', r: 'X', fuente: COM, comunas: ['Frutillar', 'Llanquihue', 'Puerto Varas', 'Los Muermos', 'Fresia'] },
 };
+const ZONA_ALIAS = { linares: 'loncomilla' }; // claves antiguas
 let zonasExtra = {};
 const todasLasZonas = () => ({ ...ZONAS_AGRICOLAS, ...zonasExtra });
 const FRUTALES = ['paltos', 'citricos', 'nogales', 'cerezos', 'avellanos', 'almendros', 'manzanos', 'perales', 'carozos', 'uva_mesa', 'olivos'];
@@ -290,7 +304,7 @@ function limpiarBusqueda(b, i) {
   r.comunas = (Array.isArray(b && b.comunas) ? b.comunas : []).map((x) => ({ c: txt(x && x.c, 60), r: regionCodigo(x && x.r) })).filter((x) => x.c && x.r).slice(0, 40);
   for (const x of r.comunas) if (!r.regiones.includes(x.r)) r.regiones.push(x.r);
   // Zonas agrícolas elegidas (claves de todasLasZonas); su región queda incluida
-  r.zonas = [...new Set((Array.isArray(b && b.zonas) ? b.zonas : []).map((z) => String(z)).filter((z) => /^[a-z0-9_]{2,40}$/.test(z) && todasLasZonas()[z]))].slice(0, 20);
+  r.zonas = [...new Set((Array.isArray(b && b.zonas) ? b.zonas : []).map((z) => ZONA_ALIAS[z] || String(z)).filter((z) => /^[a-z0-9_]{2,40}$/.test(z) && todasLasZonas()[z]))].slice(0, 20);
   for (const z of r.zonas) { const reg = todasLasZonas()[z].r; if (reg && !r.regiones.includes(reg)) r.regiones.push(reg); }
   // Comunas que el cliente NO quiere (por ejemplo, una comuna de la zona que no le interesa)
   r.excluidas = (Array.isArray(b && b.excluidas) ? b.excluidas : []).map((x) => ({ c: txt(x && x.c, 60), r: regionCodigo(x && x.r) })).filter((x) => x.c && x.r).slice(0, 60);
@@ -435,7 +449,7 @@ function evaluar(campo, cli, hoy = new Date()) {
   // Comunas y zonas específicas: en una región donde el cliente eligió comunas o zonas, solo calzan los campos de esas comunas
   const mismaComuna = (a, b) => { const x = norm(a), y = norm(b); return x === y || (x.length >= 4 && y.length >= 4 && (x.includes(y) || y.includes(x))); };
   if (norm(campo.sector) && (cli.excluidas || []).some((x) => x.r === campo.region && mismaComuna(x.c, campo.sector))) return null; // comuna que no quiere
-  const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[z]).filter((z) => z && z.r === campo.region);
+  const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter((z) => z && z.r === campo.region);
   const comunasReg = [...(cli.comunas || []).filter((x) => x.r === campo.region).map((x) => ({ c: x.c, etiqueta: x.c })),
     ...zonasCli.flatMap((z) => z.comunas.map((c) => ({ c, etiqueta: z.nombre })))];
   if (comunasReg.length && norm(campo.sector)) {
@@ -3701,7 +3715,8 @@ router.post('/zonas', async (req, res) => {
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
     const nueva = !todasLasZonas()[clave];
-    db.zonasExtra = { ...(db.zonasExtra || {}), [clave]: { nombre, r: r0, comunas } };
+    const previa = todasLasZonas()[clave];
+    db.zonasExtra = { ...(db.zonasExtra || {}), [clave]: { nombre, r: r0, comunas, fuente: previa && previa.fuente ? `${previa.fuente}, corregida por el equipo` : 'Agregada por el equipo' } };
     zonasExtra = db.zonasExtra;
     registrar(db, autor, `${nueva ? 'Agregó' : 'Corrigió'} la zona "${nombre}" (${comunas.join(', ')})`, null);
     return { clave, zonas: todasLasZonas() };
