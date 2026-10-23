@@ -437,6 +437,7 @@ function evaluar(campo, cli, hoy = new Date()) {
       if (conApto) { sCult = 10; parcial = true; razones.push(`Apto para ${conApto}`); alertas.push(`Hoy está plantado con ${plantados.map(nombreCultivo).join(', ')}, no con lo que busca`); } else return null;
     } else if (conApto) { sCult = 26; parcial = true; razones.push(`Apto para ${conApto} (no está plantado con eso)`); if (anuales) alertas.push('Hoy tiene cultivos anuales'); }
     else if (aptos.length) return null;
+    else { parcial = true; alertas.push('El campo no tiene plantaciones ni aptitud escritas: no se puede saber si calza con lo que busca'); }
   }
 
   // plantado o sin plantar
