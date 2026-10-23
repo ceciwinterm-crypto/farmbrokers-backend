@@ -291,7 +291,7 @@ const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'te
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar', 'clase', 'rut'];
 // Clientes: persona natural o empresa, con varios contactos y varias búsquedas (cada búsqueda hace su propio match)
 const RE_EMPRESA = /\b(spa|s\.?p\.?a\.?|ltda\.?|limitada|s\.\s?a\.?|sociedad|agr[ií]cola|agroindustrial|inversiones|inmobiliaria|holding|vi[ñn]a|vi[ñn]edos?|compa[ñn][ií]a|cia\.?|e\.?i\.?r\.?l\.?|corp(oraci[oó]n)?|grupo|group|fondo|administradora|forestal|exportadora|frut[ií]cola|asesor[ií]as|servicios|comercial|empresas?|family office)\b/i;
-const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zonas', 'excluidas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles'];
+const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zonas', 'excluidas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles', 'palabras'];
 function limpiarBusqueda(b, i) {
   const r = { id: /^[a-z0-9-]{4,40}$/i.test(String((b && b.id) || '')) ? b.id : id() };
   r.nombre = txt(b && b.nombre, 60);
@@ -313,6 +313,9 @@ function limpiarBusqueda(b, i) {
   r.plantado = ['plantado', 'sin_plantar'].includes(b && b.plantado) ? b.plantado : '';
   r.presupuesto = txt(b && b.presupuesto, 400);
   r.perfiles = limpiarPerfiles(b && b.perfiles);
+  // Palabras clave ("palabras mágicas"): calzan con cualquier campo que las tenga escritas, sin importar región ni comuna
+  const pal = Array.isArray(b && b.palabras) ? b.palabras : String((b && b.palabras) || '').split(/[,;\n]/);
+  r.palabras = [...new Set(pal.map((x) => txt(x, 60).replace(/\s+/g, ' ').trim()).filter((x) => x.length >= 3))].slice(0, 20);
   r.activa = !(b && (b.activa === false || b.activa === 'false'));
   if (!r.nombre) r.nombre = i === 0 ? 'Búsqueda principal' : `Búsqueda ${i + 1}`;
   return r;
@@ -375,7 +378,7 @@ function limpiar(col, b, previo = {}) {
     // Copia en el cliente para listas y filtros: lo de la primera búsqueda activa, y regiones y perfiles de todas
     const b0 = r.busquedas.find((b) => b.activa) || r.busquedas[0];
     for (const k of ['requerimiento', 'tipo', 'operacion', 'zona', 'haMin', 'haMax', 'presupuesto']) r[k] = b0[k];
-    r.cultivos = b0.cultivos; r.comunas = b0.comunas; r.zonas = b0.zonas; r.excluidas = b0.excluidas;
+    r.cultivos = b0.cultivos; r.comunas = b0.comunas; r.zonas = b0.zonas; r.excluidas = b0.excluidas; r.palabras = b0.palabras;
     r.regiones = [...new Set(r.busquedas.flatMap((b) => b.regiones))];
     r.perfiles = [...new Set(r.busquedas.flatMap((b) => b.perfiles))];
     return r;
@@ -432,7 +435,59 @@ const lista3 = (l) => (l.length <= 1 ? l.join('') : `${l.slice(0, -1).join(', ')
 const fmtHa = (n) => Number(n).toLocaleString('es-CL', { maximumFractionDigits: 1 });
 const corto = (t, n = 70) => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
 
+// ── Palabras clave: se buscan en todo lo escrito del campo (CRM, web, tasación)
+// Sin tildes ni mayúsculas, y tolerante a plurales y masculino/femenino (ciruela = ciruelos, lechería = lecherías)
+const PAL_VACIAS = new Set(['de', 'del', 'la', 'el', 'los', 'las', 'con', 'y', 'en', 'un', 'una', 'para', 'por', 'al', 'a', 'o', 'e', 'd']);
+const simple = (t) => String(t == null ? '' : t).split('').map((ch) => (ch.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()[0] || ' ')).join(''); // mismo largo que el original
+const palabrasTexto = (t) => simple(t).split(/[^a-z0-9ñ]+/).filter(Boolean);
+const raizPalabra = (w) => { let x = w; if (x.length > 4) x = x.replace(/(es|s)$/, ''); if (x.length > 4) x = x.replace(/[aeo]$/, ''); return x; };
+const raicesClave = (clave) => palabrasTexto(clave).filter((w) => !PAL_VACIAS.has(w)).map(raizPalabra);
+function textosDelCampo(c) {
+  const w = c.web || {}, ti = c.tasacionInfo || {};
+  const val = (o) => Object.values(o || {}).map((v) => (typeof v === 'string' || typeof v === 'number' ? String(v) : Array.isArray(v) ? v.filter((x) => typeof x === 'string').join(' ') : '')).join(' \n ');
+  return [
+    ['el nombre', [c.nombre, w.titulo].filter(Boolean).join(' · ')],
+    ['la descripción de la web', [(w.descripcion || []).join(' \n '), val(w.detalle)].join(' \n ')],
+    ['la descripción de la ficha', c.descripcionFicha],
+    ['las plantaciones', [c.plantaciones, c.aptitud].filter(Boolean).join(' · ')],
+    ['el agua', [c.agua, c.fuenteAgua].filter(Boolean).join(' · ')],
+    ['la infraestructura', [c.infraestructura, c.acceso].filter(Boolean).join(' · ')],
+    ['la ubicación', c.sector],
+    ['las observaciones', c.observaciones],
+    ['la tasación', val(ti)],
+  ].filter(([, t]) => t && String(t).trim());
+}
+const cacheTextos = new WeakMap();
+function buscarPalabraClave(clave, campo) {
+  const raices = raicesClave(clave);
+  if (!raices.length) return null;
+  let fuentes = cacheTextos.get(campo);
+  if (!fuentes) { fuentes = textosDelCampo(campo).map(([f, t]) => ({ f, t: String(t), s: simple(t), w: palabrasTexto(t) })); cacheTextos.set(campo, fuentes); }
+  for (const x of fuentes) {
+    if (!raices.every((r) => x.w.some((w) => w.startsWith(r)))) continue;
+    const m = new RegExp(`(^|[^a-z0-9ñ])${raices[0]}`).exec(x.s);
+    const i = m ? m.index + m[1].length : 0;
+    const ini = Math.max(0, i - 50), fin = Math.min(x.t.length, i + 90);
+    const extracto = `${ini > 0 ? '…' : ''}${x.t.slice(ini, fin).replace(/\s+/g, ' ').trim()}${fin < x.t.length ? '…' : ''}`;
+    return { fuente: x.f, extracto };
+  }
+  return null;
+}
+
 function evaluar(campo, cli, hoy = new Date()) {
+  // Palabras clave: calzan siempre, sin importar región, comuna ni los demás datos de la búsqueda
+  const hitsPal = (cli.palabras || []).map((p) => ({ p, h: buscarPalabraClave(p, campo) })).filter((x) => x.h);
+  if (hitsPal.length) {
+    const alertas = [];
+    const opC = campo.operacion || 'venta', opK = cli.operacion || 'compra';
+    if (opK === 'compra' && opC === 'arriendo') alertas.push('El campo es solo en arriendo y el cliente busca comprar');
+    if (opK === 'arriendo' && opC === 'venta') alertas.push('El campo es en venta y el cliente busca arrendar');
+    const donde = `${String(campo.sector || '').trim() || 'comuna sin escribir'}${campo.region ? `, ${campo.region === 'PE' ? 'Perú' : `región ${campo.region}`}` : ''}${campo.hectareas != null ? `, ${fmtHa(campo.hectareas)} ha` : ''}`;
+    return { clienteId: cli.id, score: 95, nivel: 'fuerte', palabraClave: true,
+      razones: hitsPal.map((x) => `Palabra clave: ${x.p}`), alertas,
+      detalle: [...hitsPal.map((x) => ({ criterio: 'Palabra clave', estado: 'ok', texto: `“${x.p}” aparece en ${x.h.fuente}: ${x.h.extracto}` })),
+        { criterio: 'Ubicación', estado: 'neutro', texto: `Por palabra clave no se filtra por región, comuna, hectáreas ni cultivo. El campo está en ${donde}.` }] };
+  }
   // operación: quien compra ve campos en venta; quien arrienda, campos en arriendo
   const opCampo = campo.operacion || 'venta', opCli = ['arriendo', 'ambas'].includes(cli.operacion) ? cli.operacion : 'compra';
   if (opCli === 'compra' && opCampo === 'arriendo') return null;
