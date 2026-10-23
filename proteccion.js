@@ -80,6 +80,7 @@ function instalar(app) {
   // General: cualquier ruta (el CRM se actualiza solo cada minuto y carga fotos: el límite es holgado)
   app.use(limitar('general', { ventanaMin: 5, max: N(process.env.LIMITE_GENERAL, 2000) }));
   app.use('/auth/login', limitar('login', { ventanaMin: 15, max: 30, clave: ipDe, mensaje: 'Demasiados intentos de ingreso. Espera 15 minutos.' }));
+  app.use(['/auth/olvide', '/auth/restablecer', '/auth/recuperar-admin'], limitar('recuperar', { ventanaMin: 15, max: 20, clave: ipDe, mensaje: 'Demasiados intentos. Espera 15 minutos.' }));
   app.use('/auth/primer-admin', limitar('primer-admin', { ventanaMin: 60, max: 10, clave: ipDe }));
   app.use(RUTAS_EXTERNAS, limitar('fuentes', { ventanaMin: 10, max: N(process.env.LIMITE_FUENTES, 200), mensaje: 'Se hicieron demasiadas consultas a fuentes externas (SII, CIREN, DGA…) en poco rato. Espera unos minutos y vuelve a intentar.' }));
   app.use(RUTAS_IA, limitar('ia', { ventanaMin: 10, max: N(process.env.LIMITE_IA, 30), mensaje: 'Se generaron demasiados informes seguidos. Espera unos minutos y vuelve a intentar.' }));

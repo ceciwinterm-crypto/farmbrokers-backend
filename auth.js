@@ -30,8 +30,8 @@ const limpiarNombre = (n) => String(n || '').replace(/\s+/g, ' ').trim().slice(0
 
 // ── Archivo de usuarios (en el disco persistente de Railway) ────────────────
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(ARCHIVO, 'utf8')); return { usuarios: d.usuarios || [], sesiones: d.sesiones || {}, intentos: d.intentos || {} }; }
-  catch (e) { return { usuarios: [], sesiones: {}, intentos: {} }; }
+  try { const d = JSON.parse(fs.readFileSync(ARCHIVO, 'utf8')); return { usuarios: d.usuarios || [], sesiones: d.sesiones || {}, intentos: d.intentos || {}, restablecer: d.restablecer || {} }; }
+  catch (e) { return { usuarios: [], sesiones: {}, intentos: {}, restablecer: {} }; }
 }
 function guardar(db) {
   fs.mkdirSync(RAIZ, { recursive: true });
@@ -39,6 +39,7 @@ function guardar(db) {
   const t = Date.now();
   for (const [k, s] of Object.entries(db.sesiones)) if (new Date(s.expira).getTime() < t) delete db.sesiones[k];
   for (const [k, i] of Object.entries(db.intentos)) if (t - new Date(i.ultimo).getTime() > 24 * 3600e3) delete db.intentos[k];
+  for (const [k, r] of Object.entries(db.restablecer || {})) if (new Date(r.expira).getTime() < t) delete db.restablecer[k];
   const tmp = ARCHIVO + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(db, null, 1));
   fs.renameSync(tmp, ARCHIVO);
@@ -181,6 +182,71 @@ router.put('/usuarios/:id', requiereUsuario, requiereAdmin, async (req, res) => 
     return { usuario: publico(u), claveTemporal: temporal };
   });
   if (r.error) return res.status(400).json(r);
+  res.json(r);
+});
+
+// ── Olvidé mi contraseña ───────────────────────────────────────────────────
+// 1) Link por correo: vale 30 minutos y una sola vez.
+// 2) Con la clave de administradora de Railway (CRM_ADMIN_KEY): para cuando no llega el correo.
+const FRONT = String(process.env.CRM_URL || 'https://farmbrokers-frontend.vercel.app/#crm').replace(/[#?].*$/, '').replace(/\/$/, '');
+const nuevaClaveDe = (db, u, nueva) => { u.hash = bcrypt.hashSync(String(nueva), COSTO_BCRYPT); u.debeCambiarClave = false; u.claveCambiada = ahora(); for (const [k, ses] of Object.entries(db.sesiones)) if (ses.uid === u.id) delete db.sesiones[k]; };
+router.post('/olvide', async (req, res) => {
+  const email = limpiarCorreo((req.body || {}).email);
+  const r = await modificar((db) => {
+    const kI = `o:${ipDe(req)}`, kE = `oe:${email}`;
+    if (bloqueado(db, kI, 10) || bloqueado(db, kE, 3)) return { error: 'Ya enviamos varios links. Revisa tu correo (también en spam) o espera 15 minutos.', status: 429 };
+    fallo(db, kI); fallo(db, kE);
+    const u = db.usuarios.find((x) => x.email === email && x.activo !== false);
+    if (!u) return { ok: true };
+    const token = crypto.randomBytes(32).toString('hex');
+    db.restablecer = db.restablecer || {};
+    db.restablecer[huella(token)] = { uid: u.id, expira: new Date(Date.now() + 30 * 60e3).toISOString(), ip: ipDe(req) };
+    return { ok: true, enviar: { u: publico(u), token } };
+  });
+  if (r.error) return res.status(r.status || 400).json({ error: r.error });
+  if (r.enviar) {
+    const link = `${FRONT}/?restablecer=${r.enviar.token}#crm`;
+    try {
+      const crm = require('./crm.cjs')._interno;
+      if (!crm.correoConfigurado()) return res.status(503).json({ error: 'El envío de correos no está configurado en el servidor. Usa la opción con la clave de administradora.' });
+      await crm.enviarCorreo({ para: r.enviar.u.email, asunto: 'Crea una nueva contraseña - Farm Brokers',
+        html: crm.plantillaCorreo('Crea una nueva contraseña', `<p style="margin:0 0 12px;font-size:15px;line-height:1.5">Hola ${String(r.enviar.u.nombre).replace(/</g, '&lt;')}, pediste crear una nueva contraseña para entrar al CRM de Farm Brokers.</p><p style="margin:0 0 12px"><a href="${link}" style="display:inline-block;background:#2D6A45;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:9px;font-weight:bold">Crear nueva contraseña</a></p><p style="margin:0;font-size:13px;color:#5E6E64">El link vale 30 minutos y sirve una sola vez. Si no lo pediste tú, ignora este correo.</p>`, 'Correo automático del CRM de Farm Brokers.'),
+        texto: `Crea una nueva contraseña para el CRM de Farm Brokers (vale 30 minutos): ${link}` });
+    } catch (e) { return res.status(502).json({ error: `No se pudo enviar el correo: ${e.message}. Usa la opción con la clave de administradora.` }); }
+  }
+  res.json({ ok: true, mensaje: 'Si el correo corresponde a una cuenta, te llegó un link para crear una nueva contraseña. Revisa también spam.' });
+});
+router.post('/restablecer', async (req, res) => {
+  const b = req.body || {};
+  const err = validarClave(b.nueva); if (err) return res.status(400).json({ error: err });
+  const r = await modificar((db) => {
+    const k = huella(String(b.token || '')), t = (db.restablecer || {})[k];
+    if (!t || new Date(t.expira).getTime() < Date.now()) return { error: 'El link venció o ya se usó. Pide uno nuevo en “¿Olvidaste tu contraseña?”.' };
+    const u = db.usuarios.find((x) => x.id === t.uid && x.activo !== false); if (!u) return { error: 'La cuenta no está activa.' };
+    delete db.restablecer[k];
+    nuevaClaveDe(db, u, b.nueva);
+    return abrirSesion(db, u, req);
+  });
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json(r);
+});
+router.post('/recuperar-admin', async (req, res) => {
+  const b = req.body || {}, clave = String(process.env.CRM_ADMIN_KEY || '');
+  if (!clave) return res.status(503).json({ error: 'Falta la variable CRM_ADMIN_KEY en Railway.' });
+  const err = validarClave(b.nueva); if (err) return res.status(400).json({ error: err });
+  const email = limpiarCorreo(b.email);
+  const r = await modificar((db) => {
+    const kI = `ra:${ipDe(req)}`;
+    if (bloqueado(db, kI, 5)) return { error: 'Demasiados intentos. Espera 15 minutos.', status: 429 };
+    const dada = Buffer.from(String(b.claveAdmin || '')), real = Buffer.from(clave);
+    if (dada.length !== real.length || !crypto.timingSafeEqual(dada, real)) { fallo(db, kI); return { error: 'La clave de administradora no es correcta (es la variable CRM_ADMIN_KEY de Railway).', status: 401 }; }
+    const u = db.usuarios.find((x) => x.email === email && x.activo !== false);
+    if (!u) { fallo(db, kI); return { error: 'No hay una cuenta activa con ese correo.', status: 404 }; }
+    delete db.intentos[kI]; delete db.intentos[`e:${email}`];
+    nuevaClaveDe(db, u, b.nueva);
+    return abrirSesion(db, u, req);
+  });
+  if (r.error) return res.status(r.status || 400).json({ error: r.error });
   res.json(r);
 });
 
