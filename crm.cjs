@@ -364,11 +364,17 @@ const NOMBRE_CULTIVO = { paltos: 'paltos', citricos: 'cítricos', nogales: 'noga
 const todosLosCultivos = () => ({ ...NOMBRE_CULTIVO, ...Object.fromEntries(Object.entries(cultivosExtra).map(([k, v]) => [k, v.nombre.toLowerCase()])) });
 const nombreCultivo = (k) => todosLosCultivos()[k] || k;
 // ¿El campo está plantado? true / false / null (no se sabe)
+// Plantaciones permanentes (frutales, viñas, berries, forestal…): los cultivos anuales y la ganadería no cuentan como "plantado"
+const NO_PERMANENTES = ['cultivos_anuales', 'ganaderia', 'frutales'];
+const plantadoCon = (c) => cultivosEn(`${c.plantaciones || ''}`).filter((x) => !NO_PERMANENTES.includes(x));
 function campoPlantado(c) {
   const t = norm(`${c.plantaciones || ''}`);
   if (!t) return cultivosEn(`${c.observaciones || ''} ${c.descripcionFicha || ''}`).some(esFrutal) ? true : null;
   if (/sin plantac|no tiene|ninguna|sin plantar|suelo desnudo|pradera natural|sin cultivo|eriazo|^no$|^-$/.test(t)) return false;
-  return true;
+  if (plantadoCon(c).length) return true;
+  if (/frutal|huerto|parron|plantac/.test(t) && !/anual/.test(t)) return true;
+  if (cultivosEn(t).some((x) => ['cultivos_anuales', 'ganaderia'].includes(x)) || /pradera|anual|chacra|trigo|maiz|hortaliz|potrero/.test(t)) return false; // solo cultivos anuales o praderas
+  return null;
 }
 
 function evaluar(campo, cli, hoy = new Date()) {
@@ -407,20 +413,36 @@ function evaluar(campo, cli, hoy = new Date()) {
     razones.push(`Menciona ${etiquetaZona}`);
   }
 
-  // cultivos (30)
+  let parcial = false; // casos dudosos: se muestran como calce parcial
+  // cultivos (30): lo plantado se compara con lo plantado; la aptitud solo cuenta para quien quiere plantar
   let sCult = 15;
-  const cc = cultivosCampo(campo), ck = cli.cultivos || [];
+  const ck = cli.cultivos || [];
   if (ck.length) conocidos++;
-  if (ck.length && cc.length && !['loteo', 'urbano'].includes(campo.tipo)) {
-    const inter = ck.filter((x) => cc.includes(x));
-    if (inter.length) { sCult = 30; razones.push(`Busca ${inter.map(nombreCultivo).join(', ')}`); }
-    else if (ck.includes('frutales') && cc.some(esFrutal)) { sCult = 22; razones.push('Busca frutales'); }
-    else return null;
+  if (ck.length && !['loteo', 'urbano'].includes(campo.tipo)) {
+    const anuales = cultivosEn(`${campo.plantaciones || ''}`).includes('cultivos_anuales');
+    const plantados = [...plantadoCon(campo), ...(anuales && ck.includes('cultivos_anuales') ? ['cultivos_anuales'] : [])];
+    const aptos = cultivosCampo(campo);
+    const calza = (lista) => { const inter = ck.filter((x) => lista.includes(x)); if (inter.length) return inter.map(nombreCultivo).join(', '); return ck.includes('frutales') && lista.some(esFrutal) ? 'frutales' : ''; };
+    const conPlantado = calza(plantados), conApto = calza(aptos);
+    if (cli.plantado === 'plantado') {
+      // Quiere un campo YA plantado con lo que busca
+      if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); }
+      else if (plantados.length) return null; // está plantado, pero con otra cosa
+      else if (aptos.length) return null;
+    } else if (cli.plantado === 'sin_plantar') {
+      if (conApto) { sCult = 30; razones.push(`Apto para ${conApto}`); } else if (aptos.length) return null;
+    } else if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); }
+    else if (plantados.length) {
+      // Plantado con otra cosa: solo calza parcial si la aptitud coincide
+      if (conApto) { sCult = 10; parcial = true; razones.push(`Apto para ${conApto}`); alertas.push(`Hoy está plantado con ${plantados.map(nombreCultivo).join(', ')}, no con lo que busca`); } else return null;
+    } else if (conApto) { sCult = 26; parcial = true; razones.push(`Apto para ${conApto} (no está plantado con eso)`); if (anuales) alertas.push('Hoy tiene cultivos anuales'); }
+    else if (aptos.length) return null;
   }
 
   // plantado o sin plantar
   if (cli.plantado) {
     const pl = campoPlantado(campo);
+    if (pl === null) parcial = true;
     if (pl === null) alertas.push(cli.plantado === 'plantado' ? 'Busca plantado: confirma si el campo tiene plantaciones' : 'Busca sin plantar: confirma si el campo tiene plantaciones');
     else if ((cli.plantado === 'plantado') !== pl) return null;
     else razones.push(pl ? 'Busca plantado' : 'Busca sin plantar');
@@ -459,7 +481,7 @@ function evaluar(campo, cli, hoy = new Date()) {
     const meses = (hoy.getFullYear() - Number(cli.fechaRequerimiento.slice(0, 4))) * 12 + (hoy.getMonth() + 1 - Number(cli.fechaRequerimiento.slice(5, 7)));
     if (meses > 24) alertas.push(`Requerimiento de ${cli.fechaRequerimiento.slice(0, 4)}, reconfirmar`);
   }
-  return { clienteId: cli.id, score, nivel: score >= 70 ? 'fuerte' : 'parcial', razones, alertas };
+  return { clienteId: cli.id, score, nivel: score >= 70 && !parcial ? 'fuerte' : 'parcial', razones, alertas };
 }
 
 function calcularMatches(db) {
