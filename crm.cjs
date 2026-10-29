@@ -340,6 +340,7 @@ function limpiar(col, b, previo = {}) {
     r.region = regionCodigo(o.region);
     r.hectareas = num(o.hectareas); r.precioCLP = num(o.precioCLP); r.precioUF = num(o.precioUF);
     r.proximaFecha = fecha(o.proximaFecha);
+    r.fechaIngreso = /^\d{4}-\d{2}(-\d{2})?$/.test(o.fechaIngreso || '') ? o.fechaIngreso : ''; // fecha en que el campo entró al CRM (editable)
     r.checklist = {}; for (const [k] of CHECKLIST) r.checklist[k] = !!(o.checklist || {})[k];
     r.perfiles = limpiarPerfiles(o.perfiles);
     return r;
@@ -848,7 +849,7 @@ for (const col of ['campos', 'clientes', 'tasaciones']) {
     const autor = usuarioDe(req);
     const d = limpiar(col, req.body || {});
     if (!etiqueta(col, d) || etiqueta(col, d) === 'sin nombre') return res.status(400).json({ error: `El ${singular} necesita un nombre.` });
-    const nuevo = { id: id(), ...d, ...(col === 'clientes' && !d.fechaAlta ? { fechaAlta: new Date().toLocaleDateString('en-CA') } : {}), creadoPor: autor, modificadoPor: autor, historial: [{ fecha: ahora(), autor, texto: `Creado en etapa ${d.etapa}` }], envios: [], creado: ahora(), actualizado: ahora() };
+    const nuevo = { id: id(), ...d, ...(col === 'clientes' && !d.fechaAlta ? { fechaAlta: new Date().toLocaleDateString('en-CA') } : {}), ...(col === 'campos' && !d.fechaIngreso ? { fechaIngreso: new Date().toLocaleDateString('en-CA', { timeZone: 'America/Santiago' }) } : {}), creadoPor: autor, modificadoPor: autor, historial: [{ fecha: ahora(), autor, texto: `Creado en etapa ${d.etapa}` }], envios: [], creado: ahora(), actualizado: ahora() };
     await modificar((db) => { db[col].push(nuevo); registrar(db, autor, `Creó ${singular} ${etiqueta(col, d)}`, { col, id: nuevo.id }); });
     res.json(nuevo);
   });
