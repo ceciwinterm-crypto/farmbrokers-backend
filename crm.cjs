@@ -294,7 +294,7 @@ function fonoNorm(t) {
 // ───────────────────────── Esquemas ─────────────────────────
 const CAMPOS_CAMPO = ['codigo', 'nombre', 'tipo', 'etapa', 'region', 'sector', 'hectareas', 'agua', 'fuenteAgua', 'plantaciones', 'aptitud',
   'precioTexto', 'precioCLP', 'precioUF', 'observaciones', 'corredor', 'asociado', 'propietario', 'telefono', 'email', 'rol', 'linkWeb', 'linkPortal',
-  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles', 'visibilidad', 'operacion'];
+  'responsable', 'proximaAccion', 'proximaFecha', 'fechaIngreso', 'estadoPlanilla', 'coordenadas', 'descripcionFicha', 'infraestructura', 'acceso', 'perfiles', 'visibilidad', 'operacion', 'plantado'];
 const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'telefono', 'email', 'requerimiento', 'tipo', 'regiones', 'zona', 'haMin', 'haMax', 'cultivos',
   'presupuesto', 'operacion', 'observaciones', 'corredor', 'mailing', 'fechaRequerimiento', 'etapa', 'responsable', 'proximaAccion', 'proximaFecha', 'revisar', 'clase', 'rut'];
 // Clientes: persona natural o empresa, con varios contactos y varias búsquedas (cada búsqueda hace su propio match)
@@ -347,6 +347,7 @@ function limpiar(col, b, previo = {}) {
     r.tipo = TIPOS.includes(o.tipo) ? o.tipo : tipoNorm(o.tipo) || 'agricola';
     r.etapa = ['Publicado', 'Activo'].includes(o.etapa) ? etapaOferta(o.operacion) : ETAPAS.campos.includes(o.etapa) ? o.etapa : 'Captación';
     r.visibilidad = VISIBILIDADES.includes(o.visibilidad) ? o.visibilidad : '';
+    r.plantado = ['si', 'no'].includes(o.plantado) ? o.plantado : ''; // botón "Plantado" de la ficha
     r.operacion = r.etapa === 'En arriendo' ? 'arriendo' : r.etapa === 'En venta' ? (o.operacion === 'ambas' ? 'ambas' : 'venta') : ['venta', 'arriendo', 'ambas'].includes(o.operacion) ? o.operacion : 'venta';
     r.region = regionCodigo(o.region);
     r.hectareas = num(o.hectareas); r.precioCLP = num(o.precioCLP); r.precioUF = num(o.precioUF);
@@ -475,6 +476,8 @@ function dondePlantado(c, claves) {
   return hit ? hit[0] : '';
 }
 function campoPlantado(c) {
+  if (c.plantado === 'si') return true; // marcado en la ficha con el botón "Plantado"
+  if (c.plantado === 'no') return false;
   const t = norm(`${c.plantaciones || ''}`);
   if (!t) return plantadoCon(c).length ? true : null;
   if (/sin plantac|no tiene|ninguna|sin plantar|suelo desnudo|pradera natural|sin cultivo|eriazo|^no$|^-$/.test(t)) return false;
@@ -550,19 +553,7 @@ function zonasDeCampoCache(campo, sectorTxt, mismaComuna) {
   return v;
 }
 function evaluar(campo, cli, hoy = new Date()) {
-  // Palabras clave: calzan siempre, sin importar región, comuna ni los demás datos de la búsqueda
   const hitsPal = (cli.palabras || []).map((p) => ({ p, h: buscarPalabraClave(p, campo) })).filter((x) => x.h);
-  if (hitsPal.length) {
-    const alertas = [];
-    const opC = campo.operacion || 'venta', opK = cli.operacion || 'compra';
-    if (opK === 'compra' && opC === 'arriendo') alertas.push('El campo es solo en arriendo y el cliente busca comprar');
-    if (opK === 'arriendo' && opC === 'venta') alertas.push('El campo es en venta y el cliente busca arrendar');
-    const donde = `${String(campo.sector || '').trim() || 'comuna sin escribir'}${campo.region ? `, ${campo.region === 'PE' ? 'Perú' : `región ${campo.region}`}` : ''}${campo.hectareas != null ? `, ${fmtHa(campo.hectareas)} ha` : ''}`;
-    return { clienteId: cli.id, score: 95, nivel: 'fuerte', palabraClave: true,
-      razones: hitsPal.map((x) => `Palabra clave: ${x.p}`), alertas,
-      detalle: [...hitsPal.map((x) => ({ criterio: 'Palabra clave', estado: 'ok', texto: `“${x.p}” aparece en ${x.h.fuente}: ${x.h.extracto}` })),
-        { criterio: 'Ubicación', estado: 'neutro', texto: `Por palabra clave no se filtra por región, comuna, hectáreas ni cultivo. El campo está en ${donde}.` }] };
-  }
   // operación: quien compra ve campos en venta; quien arrienda, campos en arriendo
   const opCampo = campo.operacion || 'venta', opCli = ['arriendo', 'ambas'].includes(cli.operacion) ? cli.operacion : 'compra';
   if (opCli === 'compra' && opCampo === 'arriendo') return null;
@@ -622,6 +613,21 @@ function evaluar(campo, cli, hoy = new Date()) {
   }
   det('Ubicación', estLugar, txtLugar);
 
+  // Orden de filtros: 1) región, comunas y zonas (arriba, excluyentes); 2) plantado o no (excluyente si el cliente lo pidió);
+  // 3) palabra clave: si el campo la tiene, dentro de esa ubicación es calce fuerte sin mirar hectáreas ni cultivo
+  if (hitsPal.length) {
+    let dudoso = false;
+    if (cli.plantado) {
+      const pl = campoPlantado(campo);
+      if (pl !== null && (cli.plantado === 'plantado') !== pl) return null;
+      if (pl === null) { dudoso = true; alertas.push(cli.plantado === 'plantado' ? 'Busca plantado: confirma si el campo tiene plantaciones' : 'Busca sin plantar: confirma si el campo tiene plantaciones'); det('Plantado', 'medio', 'La ficha no dice si el campo está plantado: márcalo con el botón “Plantado” en la ficha del campo.'); }
+      else det('Plantado', 'ok', pl ? 'Busca un campo plantado y este lo está.' : 'Busca un campo sin plantar y este no tiene plantaciones.');
+    }
+    razones.push(...hitsPal.map((x) => `Palabra clave: ${x.p}`));
+    detalle.unshift(...hitsPal.map((x) => ({ criterio: 'Palabra clave', estado: 'ok', texto: `“${x.p}” aparece en ${x.h.fuente}: ${x.h.extracto}` })));
+    return { clienteId: cli.id, score: 95, nivel: dudoso ? 'parcial' : 'fuerte', palabraClave: true, razones, alertas, detalle };
+  }
+
   let parcial = false; // casos dudosos: se muestran como calce parcial
   // cultivos (30): lo plantado se compara con lo plantado; la aptitud solo cuenta para quien quiere plantar
   let sCult = 15;
@@ -640,10 +646,12 @@ function evaluar(campo, cli, hoy = new Date()) {
     if (cli.plantado === 'plantado') {
       // Quiere un campo YA plantado con lo que busca
       // Solo campos que de verdad están plantados con eso (en "plantaciones" o descrito como plantado). Ser apto no basta.
-      if (!conPlantado) return null;
-      const donde = dondePlantado(campo, ck);
-      sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult} ya plantado; el campo está plantado con ${conPlantado}${donde ? ` (según ${donde})` : ''}.`);
+      if (campo.plantado === 'no') return null;
+      if (!conPlantado && !(campo.plantado === 'si' && conApto)) return null;
+      const donde = conPlantado ? dondePlantado(campo, ck) : dondeCultivo(campo, ck);
+      sCult = 30; razones.push(`Plantado con ${conPlantado || conApto}`); det('Cultivo', 'ok', conPlantado ? `Busca ${buscaCult} ya plantado; el campo está plantado con ${conPlantado}${donde ? ` (según ${donde})` : ''}.` : `Busca ${buscaCult} ya plantado; el campo está marcado como plantado y menciona ${conApto}${donde ? ` en ${donde}` : ''}.`);
     } else if (cli.plantado === 'sin_plantar') {
+      if (campo.plantado === 'si') return null;
       if (conApto) { const donde = dondeCultivo(campo, ck); sCult = 30; razones.push(`Apto para ${conApto}`); det('Cultivo', 'ok', `Busca un campo sin plantar para ${buscaCult}; el campo es apto para ${conApto}${donde ? ` según ${donde}` : ''}.`); } else if (aptos.length) return null;
     } else if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult}; el campo está plantado con ${conPlantado}.`); }
     else if (plantados.length) {
