@@ -2546,6 +2546,7 @@ router.post('/ofertas/:id/campo', async (req, res) => {
 // ───────────────────────── Brochure de varios campos para un cliente ─────────────────────────
 // Resumen corto de cada campo y su zona (con IA), que se guarda en el campo y se puede corregir a mano
 const CAMPOS_BROCHURE = ['titular', 'campo', 'zona'];
+const VERSION_BROCHURE = 2; // subir para volver a redactar los textos automáticos guardados
 function textoBrochure(t) {
   const sacar = (k) => { const m = t.match(new RegExp(`${k}\\s*:\\s*([\\s\\S]*?)(?=\\n\\s*(?:TITULAR|CAMPO|ZONA)\\s*:|$)`, 'i')); return m ? m[1].replace(/\*\*/g, '').replace(/\s+/g, ' ').trim() : ''; };
   return { titular: sacar('TITULAR').replace(/^["“]|["”]$/g, '').slice(0, 110), campo: sacar('CAMPO').slice(0, 700), zona: sacar('ZONA').slice(0, 600) };
@@ -2554,18 +2555,23 @@ router.post('/campos/:id/brochure', async (req, res) => {
   const db = leer(), campo = db.campos.find((x) => x.id === req.params.id);
   if (!campo) return res.status(404).json({ error: 'No se encontró el campo.' });
   const prev = campo.brochure, b = req.body || {};
-  if (prev && !b.forzar && (prev.editado || new Date(prev.fecha) >= new Date(campo.actualizado || 0))) return res.json(prev);
+  // Textos guardados: se reutilizan si los editó el equipo o si son de la versión nueva de la redacción
+  if (prev && !b.forzar && (prev.editado || (prev.version === VERSION_BROCHURE && new Date(prev.fecha) >= new Date(campo.actualizado || 0)))) return res.json(prev);
   const { filas, web } = antecedentesCampo(campo);
   if (filas.length < 3 && !web) return res.status(400).json({ error: `${campo.nombre} tiene muy pocos datos para el resumen. Escríbelo a mano o completa el campo.` });
   const busca = txt(b.busca, 400);
-  const prompt = `Eres el redactor de Farm Brokers Chile, corredora de campos agrícolas. Prepara el texto de UNA página de un brochure elegante que reúne varios campos para un cliente comprador.
+  const estilo = estiloDe(db);
+  const prompt = `Eres el redactor comercial de Farm Brokers Chile, corredora de campos agrícolas. Escribe el texto de la tarjeta de UN campo en un brochure que se envía a un cliente comprador. El texto tiene que VENDER: concreto, con los datos reales del campo, nada genérico.
 
 Devuelve exactamente tres bloques, en este formato y sin nada más:
-TITULAR: una frase corta y atractiva (máximo 10 palabras) con lo más valioso del campo. Sin el nombre del campo, sin signos de exclamación.
-CAMPO: entre 45 y 75 palabras con lo importante del campo: superficie, agua, plantaciones o aptitud, infraestructura y acceso, solo lo que esté en los antecedentes. Convierte los datos en beneficios, en un párrafo corrido.
-ZONA: entre 35 y 60 palabras sobre la zona donde está (comuna y región): su carácter agrícola, clima general, paisaje y cercanía general a ciudades. Usa conocimiento general y conocido de esa comuna; no inventes cifras, distancias ni servicios específicos que no estén en los antecedentes.
+TITULAR: una frase corta (máximo 9 palabras) con el atributo más valioso y concreto del campo (por ejemplo "40 ha de cerezos en plena producción con riego tecnificado"). Sin el nombre del campo, sin signos de exclamación, sin frases vacías como "una gran oportunidad".
+CAMPO: entre 40 y 60 palabras, un solo párrafo corrido. Abre con la oportunidad y sigue con los datos que la respaldan: superficie, plantaciones (especie, variedad, hectáreas, edad o producción si están), agua (derechos, acciones, pozos, tipo de riego), suelos, casa o construcciones e infraestructura. Usa las cifras de los antecedentes tal cual. Si un dato no está, no lo menciones ni lo supongas.
+ZONA: entre 30 y 45 palabras sobre la comuna y su valle: carácter agrícola, clima general y paisaje. Solo conocimiento general y conocido; sin cifras, distancias ni servicios inventados.
 
-Reglas: español de Chile, tono cálido y profesional, sin exagerar. No incluyas precio, comisión, propietarios, RUT, rol ni contactos. ${REGLA_ACCESO} Sin listas ni títulos dentro de los bloques.
+Reglas: español de Chile, tono profesional y cercano, sin exagerar ni repetir adjetivos ("excelente", "privilegiado", "único" como máximo una vez). Nada de clichés como "no te lo pierdas" o "ideal para quienes buscan". No incluyas precio, comisión, propietarios, RUT, rol ni contactos. ${REGLA_ACCESO} Sin listas ni títulos dentro de los bloques.
+
+Este es el estilo de redacción que le gusta a Farm Brokers (tómalo solo como referencia de tono, no copies sus datos):
+${String(estilo.descripcion || '').slice(0, 1200)}
 ${busca ? `\nEl cliente busca: ${busca}. Si el campo tiene algo que calce con eso, destácalo.\n` : ''}
 Antecedentes del campo:
 ${filas.map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 900)}`).join('\n')}
@@ -2573,7 +2579,7 @@ ${web ? `\nDescripción publicada:\n${web.slice(0, 3000)}` : ''}`;
   try {
     const r = textoBrochure(await llamarClaude(prompt));
     if (!r.campo) throw new Error('la respuesta llegó incompleta.');
-    const out = await modificar((d2) => { const c = d2.campos.find((x) => x.id === campo.id); if (!c) return null; c.brochure = { ...r, fecha: ahora(), editado: false }; return c.brochure; });
+    const out = await modificar((d2) => { const c = d2.campos.find((x) => x.id === campo.id); if (!c) return null; c.brochure = { ...r, fecha: ahora(), editado: false, version: VERSION_BROCHURE }; return c.brochure; });
     res.json(out);
   } catch (e) { res.status(502).json({ error: `No se pudo redactar el resumen de ${campo.nombre}: ${e.message}` }); }
 });
