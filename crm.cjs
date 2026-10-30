@@ -159,8 +159,16 @@ const ZONAS = {
 const id = () => crypto.randomUUID();
 const ahora = () => new Date().toISOString();
 const txt = (v, max = 2000) => (v == null ? '' : String(v).slice(0, max).trim());
-const norm = (s) => String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+const normSinCache = (s) => String(s == null ? '' : s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
   .replace(/\bsanta\b/g, 'sta').replace(/\bsanto\b/g, 'sto').replace(/\s+/g, ' ').trim();
+// Los mismos textos se normalizan miles de veces al calcular los calces: se guardan los resultados
+const cacheNorm = new Map();
+const norm = (s) => {
+  const k = String(s == null ? '' : s);
+  let v = cacheNorm.get(k);
+  if (v === undefined) { v = normSinCache(k); if (cacheNorm.size > 30000) cacheNorm.clear(); cacheNorm.set(k, v); }
+  return v;
+};
 const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v));
 let aliasNombres = {}; // nombres corregidos: lo que una persona escribió al entrar → su nombre definitivo
 const usuarioDe = (req) => { if (req.usuario) return req.usuario.nombre; let u = req.get('x-crm-user') || ''; try { u = decodeURIComponent(u); } catch (e) {} u = txt(u, 80) || 'Equipo'; return aliasNombres[u] || u; };
@@ -402,8 +410,17 @@ function lugaresDe(campo) {
   return out;
 }
 
+// Aptitud del campo: lo plantado, la aptitud marcada y todo lo escrito (descripción de la ficha, de la web, observaciones y tasación)
+const cacheAptos = new WeakMap();
 function cultivosCampo(c) {
-  const out = cultivosEn(`${c.plantaciones} ${c.aptitud} ${c.observaciones}`);
+  const llave = Object.keys(cultivosExtra).join(','), prev = cacheAptos.get(c);
+  if (prev && prev.llave === llave) return prev.v;
+  const v = cultivosCampoSinCache(c);
+  cacheAptos.set(c, { llave, v });
+  return v;
+}
+function cultivosCampoSinCache(c) {
+  const out = cultivosEn(`${c.plantaciones} ${c.aptitud} ${c.observaciones} ${textosDelCampo(c).filter(([f]) => f !== 'el nombre').map(([, t]) => t).join(' ')}`);
   if (/ganad/.test(norm(c.tipo + ' ' + c.aptitud))) out.push('ganaderia');
   return [...new Set(out.filter((x) => x !== 'frutales'))];
 }
@@ -436,7 +453,8 @@ function campoPlantado(c) {
 // estado: 'ok' (calza), 'medio' (calza a medias o falta un dato), 'no' (no calza en eso), 'neutro' (no se filtró por eso)
 const nombreTipoCampo = (k) => { const v = todosLosTipos()[k]; return (typeof v === 'string' ? v : v && v.nombre) || k || 'sin tipo'; };
 const lista3 = (l) => (l.length <= 1 ? l.join('') : `${l.slice(0, -1).join(', ')} y ${l[l.length - 1]}`);
-const fmtHa = (n) => Number(n).toLocaleString('es-CL', { maximumFractionDigits: 1 });
+const FMT_HA = new Intl.NumberFormat('es-CL', { maximumFractionDigits: 1 });
+const fmtHa = (n) => FMT_HA.format(Number(n));
 const corto = (t, n = 70) => { const x = String(t || '').replace(/\s+/g, ' ').trim(); return x.length > n ? `${x.slice(0, n - 1)}…` : x; };
 
 // ── Palabras clave: se buscan en todo lo escrito del campo (CRM, web, tasación)
@@ -478,6 +496,24 @@ function buscarPalabraClave(clave, campo) {
   return null;
 }
 
+// Dónde aparece un cultivo en el campo (para explicar el calce)
+function dondeCultivo(c, claves) {
+  const pats = claves.map(patronCultivo).filter(Boolean);
+  if (!pats.length) return '';
+  const fuentes = [['la aptitud marcada', `${c.aptitud || ''}`], ...textosDelCampo(c).filter(([f]) => !['el nombre', 'las plantaciones'].includes(f))];
+  const hit = fuentes.find(([, t]) => pats.some((re) => re.test(norm(t))));
+  return hit ? hit[0] : '';
+}
+// Zonas a las que pertenece la comuna del campo (se calcula una vez por campo)
+const cacheZonasCampo = new WeakMap();
+function zonasDeCampoCache(campo, sectorTxt, mismaComuna) {
+  if (!sectorTxt) return [];
+  const llave = `${sectorTxt}|${campo.region}|${Object.keys(zonasExtra).length}`, prev = cacheZonasCampo.get(campo);
+  if (prev && prev.llave === llave) return prev.v;
+  const v = Object.values(todasLasZonas()).filter((z) => crZona(z).some((x) => x.r === campo.region && mismaComuna(x.c, sectorTxt))).map((z) => z.nombre);
+  cacheZonasCampo.set(campo, { llave, v });
+  return v;
+}
 function evaluar(campo, cli, hoy = new Date()) {
   // Palabras clave: calzan siempre, sin importar región, comuna ni los demás datos de la búsqueda
   const hitsPal = (cli.palabras || []).map((p) => ({ p, h: buscarPalabraClave(p, campo) })).filter((x) => x.h);
@@ -522,7 +558,7 @@ function evaluar(campo, cli, hoy = new Date()) {
   // Dónde está el campo, en palabras (comuna, zona y región)
   const sectorTxt = String(campo.sector || '').trim();
   const regTxt = (r) => (r === 'PE' ? 'Perú' : `región ${r}`);
-  const zonasDelCampo = sectorTxt ? Object.values(todasLasZonas()).filter((z) => crZona(z).some((x) => x.r === campo.region && mismaComuna(x.c, sectorTxt))).map((z) => z.nombre) : [];
+  const zonasDelCampo = zonasDeCampoCache(campo, sectorTxt, mismaComuna);
   const dondeCampo = `${sectorTxt || 'una comuna sin escribir'}${zonasDelCampo.length ? ` (${lista3(zonasDelCampo)})` : ''}${campo.region ? `, ${regTxt(campo.region)}` : ''}`;
   const eligioCli = [...(cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter(Boolean).map((z) => z.nombre), ...(cli.comunas || []).map((x) => x.c)];
   let txtLugar, estLugar = 'ok';
@@ -572,12 +608,16 @@ function evaluar(campo, cli, hoy = new Date()) {
       else if (plantados.length) return null; // está plantado, pero con otra cosa
       else if (aptos.length) return null;
     } else if (cli.plantado === 'sin_plantar') {
-      if (conApto) { sCult = 30; razones.push(`Apto para ${conApto}`); det('Cultivo', 'ok', `Busca un campo sin plantar para ${buscaCult}; el campo es apto para ${conApto}.`); } else if (aptos.length) return null;
+      if (conApto) { const donde = dondeCultivo(campo, ck); sCult = 30; razones.push(`Apto para ${conApto}`); det('Cultivo', 'ok', `Busca un campo sin plantar para ${buscaCult}; el campo es apto para ${conApto}${donde ? ` según ${donde}` : ''}.`); } else if (aptos.length) return null;
     } else if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult}; el campo está plantado con ${conPlantado}.`); }
     else if (plantados.length) {
       // Plantado con otra cosa: solo calza parcial si la aptitud coincide
       if (conApto) { sCult = 10; parcial = true; razones.push(`Apto para ${conApto}`); alertas.push(`Hoy está plantado con ${plantados.map(nombreCultivo).join(', ')}, no con lo que busca`); det('Cultivo', 'medio', `Busca ${buscaCult}; el campo hoy está plantado con ${lista3(plantados.map(nombreCultivo))}, pero es apto para ${conApto}.`); } else return null;
-    } else if (conApto) { sCult = 26; parcial = true; razones.push(`Apto para ${conApto} (no está plantado con eso)`); if (anuales) alertas.push('Hoy tiene cultivos anuales'); det('Cultivo', 'medio', `Busca ${buscaCult}; el campo no está plantado con eso, pero es apto para ${conApto}${anuales ? ' (hoy tiene cultivos anuales)' : ''}.`); }
+    } else if (conApto) {
+      const donde = dondeCultivo(campo, ck);
+      sCult = 28; razones.push(`Apto para ${conApto}${donde ? ` (según ${donde})` : ''}`); if (anuales) alertas.push('Hoy tiene cultivos anuales');
+      det('Cultivo', 'ok', `Busca ${buscaCult}; el campo no está plantado con eso, pero es apto para ${conApto}${donde ? ` según ${donde}` : ''}${anuales ? ' (hoy tiene cultivos anuales)' : ''}.`);
+    }
     else if (aptos.length) return null;
     else { parcial = true; alertas.push('El campo no tiene plantaciones ni aptitud escritas: no se puede saber si calza con lo que busca'); det('Cultivo', 'medio', `Busca ${buscaCult}, pero el campo no tiene plantaciones ni aptitud escritas: no se sabe si calza. Completa la ficha del campo.`); }
   }
