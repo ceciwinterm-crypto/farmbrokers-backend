@@ -292,6 +292,9 @@ const CAMPOS_CLIENTE = ['fechaAlta', 'perfiles', 'nombre', 'contactoNombre', 'te
 // Clientes: persona natural o empresa, con varios contactos y varias búsquedas (cada búsqueda hace su propio match)
 const RE_EMPRESA = /\b(spa|s\.?p\.?a\.?|ltda\.?|limitada|s\.\s?a\.?|sociedad|agr[ií]cola|agroindustrial|inversiones|inmobiliaria|holding|vi[ñn]a|vi[ñn]edos?|compa[ñn][ií]a|cia\.?|e\.?i\.?r\.?l\.?|corp(oraci[oó]n)?|grupo|group|fondo|administradora|forestal|exportadora|frut[ií]cola|asesor[ií]as|servicios|comercial|empresas?|family office)\b/i;
 const CAMPOS_BUSQUEDA = ['nombre', 'requerimiento', 'tipo', 'operacion', 'regiones', 'comunas', 'zonas', 'excluidas', 'zona', 'haMin', 'haMax', 'cultivos', 'plantado', 'presupuesto', 'perfiles', 'palabras'];
+// Comunas de una zona con su región (una zona comercial puede abarcar comunas de varias regiones)
+const crZona = (z) => (z && Array.isArray(z.cr) && z.cr.length ? z.cr : ((z && z.comunas) || []).map((c) => ({ c, r: z.r })));
+const regionesZona = (z) => [...new Set(crZona(z).map((x) => x.r).filter(Boolean))];
 function limpiarBusqueda(b, i) {
   const r = { id: /^[a-z0-9-]{4,40}$/i.test(String((b && b.id) || '')) ? b.id : id() };
   r.nombre = txt(b && b.nombre, 60);
@@ -305,7 +308,7 @@ function limpiarBusqueda(b, i) {
   for (const x of r.comunas) if (!r.regiones.includes(x.r)) r.regiones.push(x.r);
   // Zonas agrícolas elegidas (claves de todasLasZonas); su región queda incluida
   r.zonas = [...new Set((Array.isArray(b && b.zonas) ? b.zonas : []).map((z) => ZONA_ALIAS[z] || String(z)).filter((z) => /^[a-z0-9_]{2,40}$/.test(z) && todasLasZonas()[z]))].slice(0, 20);
-  for (const z of r.zonas) { const reg = todasLasZonas()[z].r; if (reg && !r.regiones.includes(reg)) r.regiones.push(reg); }
+  for (const z of r.zonas) for (const reg of regionesZona(todasLasZonas()[z])) if (reg && !r.regiones.includes(reg)) r.regiones.push(reg);
   // Comunas que el cliente NO quiere (por ejemplo, una comuna de la zona que no le interesa)
   r.excluidas = (Array.isArray(b && b.excluidas) ? b.excluidas : []).map((x) => ({ c: txt(x && x.c, 60), r: regionCodigo(x && x.r) })).filter((x) => x.c && x.r).slice(0, 60);
   r.haMin = num(b && b.haMin); r.haMax = num(b && b.haMax);
@@ -513,13 +516,13 @@ function evaluar(campo, cli, hoy = new Date()) {
   // Comunas y zonas específicas: en una región donde el cliente eligió comunas o zonas, solo calzan los campos de esas comunas
   const mismaComuna = (a, b) => { const x = norm(a), y = norm(b); return x === y || (x.length >= 4 && y.length >= 4 && (x.includes(y) || y.includes(x))); };
   if (norm(campo.sector) && (cli.excluidas || []).some((x) => x.r === campo.region && mismaComuna(x.c, campo.sector))) return null; // comuna que no quiere
-  const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter((z) => z && z.r === campo.region);
+  const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter((z) => z && regionesZona(z).includes(campo.region));
   const comunasReg = [...(cli.comunas || []).filter((x) => x.r === campo.region).map((x) => ({ c: x.c, etiqueta: x.c })),
-    ...zonasCli.flatMap((z) => z.comunas.map((c) => ({ c, etiqueta: z.nombre })))];
+    ...zonasCli.flatMap((z) => crZona(z).filter((x) => x.r === campo.region).map((x) => ({ c: x.c, etiqueta: z.nombre })))];
   // Dónde está el campo, en palabras (comuna, zona y región)
   const sectorTxt = String(campo.sector || '').trim();
   const regTxt = (r) => (r === 'PE' ? 'Perú' : `región ${r}`);
-  const zonasDelCampo = sectorTxt ? Object.values(todasLasZonas()).filter((z) => z.r === campo.region && z.comunas.some((c) => mismaComuna(c, sectorTxt))).map((z) => z.nombre) : [];
+  const zonasDelCampo = sectorTxt ? Object.values(todasLasZonas()).filter((z) => crZona(z).some((x) => x.r === campo.region && mismaComuna(x.c, sectorTxt))).map((z) => z.nombre) : [];
   const dondeCampo = `${sectorTxt || 'una comuna sin escribir'}${zonasDelCampo.length ? ` (${lista3(zonasDelCampo)})` : ''}${campo.region ? `, ${regTxt(campo.region)}` : ''}`;
   const eligioCli = [...(cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter(Boolean).map((z) => z.nombre), ...(cli.comunas || []).map((x) => x.c)];
   let txtLugar, estLugar = 'ok';
@@ -3923,18 +3926,21 @@ router.post('/tipos', async (req, res) => {
 router.post('/zonas', async (req, res) => {
   const b = req.body || {}, nombre = txt(b.nombre, 60).replace(/\s+/g, ' ');
   if (nombre.length < 3) return res.status(400).json({ error: 'Escribe el nombre de la zona.' });
-  const r0 = regionCodigo(b.r);
-  if (!r0) return res.status(400).json({ error: 'Elige la región de la zona.' });
-  const comunas = [...new Set((Array.isArray(b.comunas) ? b.comunas : []).map((c) => txt(c, 60)).filter(Boolean))].slice(0, 40);
-  if (!comunas.length) return res.status(400).json({ error: 'Agrega al menos una comuna a la zona.' });
+  // Comunas con su región: [{ c, r }] (también acepta solo nombres + b.r, como antes). Pueden ser de varias regiones.
+  const rBase = regionCodigo(b.r);
+  const vistos = new Set();
+  const cr = (Array.isArray(b.comunas) ? b.comunas : []).map((x) => (typeof x === 'string' ? { c: txt(x, 60), r: rBase } : { c: txt(x && x.c, 60), r: regionCodigo(x && x.r) || rBase }))
+    .filter((x) => x.c && x.r && !vistos.has(`${x.r}|${norm(x.c)}`) && vistos.add(`${x.r}|${norm(x.c)}`)).slice(0, 80);
+  if (!cr.length) return res.status(400).json({ error: 'Agrega al menos una comuna a la zona (escribe la comuna y elígela de la lista).' });
+  const r0 = cr[0].r, comunas = cr.map((x) => x.c);
   const clave = /^[a-z0-9_]{2,40}$/.test(String(b.clave || '')) ? b.clave : norm(nombre).replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
     const nueva = !todasLasZonas()[clave];
     const previa = todasLasZonas()[clave];
-    db.zonasExtra = { ...(db.zonasExtra || {}), [clave]: { nombre, r: r0, comunas, fuente: previa && previa.fuente ? `${previa.fuente}, corregida por el equipo` : 'Agregada por el equipo' } };
+    db.zonasExtra = { ...(db.zonasExtra || {}), [clave]: { nombre, r: r0, comunas, cr, fuente: previa && previa.fuente ? `${previa.fuente}, corregida por el equipo` : 'Agregada por el equipo' } };
     zonasExtra = db.zonasExtra;
-    registrar(db, autor, `${nueva ? 'Agregó' : 'Corrigió'} la zona "${nombre}" (${comunas.join(', ')})`, null);
+    registrar(db, autor, `${nueva ? 'Agregó' : 'Corrigió'} la zona "${nombre}" (${cr.map((x) => `${x.c} ${x.r}`).join(', ')})`, null);
     return { clave, zonas: todasLasZonas() };
   });
   res.json(r);
