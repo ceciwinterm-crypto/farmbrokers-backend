@@ -1391,7 +1391,44 @@ const tratB = (t) => (t ? `${t} ` : '');
 const montoB = (v, moneda) => (v ? monto(v, moneda) : `${moneda === 'UF' ? 'UF ' : '$'}__________`);
 function fechaLarga(d) { return `${d.getDate()} de ${MESES[d.getMonth()]} de ${d.getFullYear()}`; }
 
+// ── Texto del mandato editable a mano: el equipo puede reescribir todo el documento
+// Formato simple: párrafos separados por una línea en blanco; la primera línea es el título;
+// "1. PRECIO" (número y mayúsculas) es un subtítulo; líneas que parten con "- " son una lista; **así** va en negrita.
+// [FECHA] se reemplaza por la fecha del día en que se firma o se descarga.
+const MARCA_FECHA = '[FECHA]';
+function bloquesATexto(bloques) {
+  const runs = (r) => r.map((x) => (x.b && x.t.trim() ? `**${x.t}**` : x.t)).join('');
+  return bloques.filter((b) => b.k !== 'firmas').map((b) => (b.k === 'lista' ? b.items.map((t) => `- ${t}`).join('\n') : runs(b.runs))).join('\n\n');
+}
+function textoABloques(texto, fecha) {
+  const runs = (t) => {
+    const out = []; const re = /\*\*([\s\S]+?)\*\*/g; let i = 0, m;
+    while ((m = re.exec(t))) { if (m.index > i) out.push({ t: t.slice(i, m.index) }); out.push({ t: m[1], b: true }); i = m.index + m[0].length; }
+    if (i < t.length) out.push({ t: t.slice(i) });
+    return out.length ? out : [{ t: '' }];
+  };
+  const parrafos = String(texto || '').replace(/\r/g, '').split(/\n\s*\n/).map((x) => x.trim()).filter(Boolean);
+  return parrafos.map((par, i) => {
+    const t = par.split(MARCA_FECHA).join(fechaLarga(fecha));
+    const lineas = t.split('\n').map((x) => x.trim()).filter(Boolean);
+    if (i === 0) return { k: 'titulo', runs: runs(lineas.join(' ').replace(/\*\*/g, '')) };
+    if (lineas.every((l) => /^[-•]\s+/.test(l))) return { k: 'lista', items: lineas.map((l) => l.replace(/^[-•]\s+/, '').replace(/\*\*/g, '')) };
+    if (lineas.length === 1 && /^\d+[.)]\s+[^a-záéíóúñ]{2,60}$/.test(lineas[0])) return { k: 'sub', runs: runs(lineas[0].replace(/\*\*/g, '')) };
+    return { k: 'p', runs: runs(lineas.join(' ')) };
+  });
+}
+function firmasMandato(cap) {
+  const d = cap.datos;
+  const vendedor = d.vendedor.tipo === 'empresa'
+    ? [d.vendedor.empresa.razon ? `${d.vendedor.empresa.razon}${d.vendedor.empresa.repNombre ? `, representada por ${d.vendedor.empresa.repNombre}` : ''}` : '']
+    : d.vendedor.personas.map((p) => p.nombre || '');
+  return { k: 'firmas', vendedor, corredor: 'Farm Brokers Chile SPA' };
+}
 function bloquesMandato(campo, fecha = new Date()) {
+  if (campo.captacion && campo.captacion.textoEditado) return [...textoABloques(campo.captacion.textoEditado, fecha), firmasMandato(campo.captacion)];
+  return bloquesAutomaticos(campo, fecha);
+}
+function bloquesAutomaticos(campo, fecha = new Date()) {
   const cap = campo.captacion, d = cap.datos, cfg = cap.config;
   const eq = cap.modo === 'equipo'; // preparado por el equipo: sigue el modelo "Mandato de Venta El Maitén"
   const B = (t) => ({ t, b: true }), N = (t) => ({ t });
@@ -1530,7 +1567,7 @@ router.post('/campos/:id/captacion', async (req, res) => {
         hectareas: campo.hectareas, moneda: campo.precioUF ? 'UF' : 'CLP', precio: campo.precioUF || campo.precioCLP || null }],
     });
     campo.captacion = { token: (previo && previo.token) || crypto.randomBytes(16).toString('hex'), creado: (previo && previo.creado) || ahora(), creadoPor: (previo && previo.creadoPor) || autor,
-      config, estado: (previo && previo.estado) || 'enviado', datos: datosIniciales, actualizado: ahora(), firma: null, firmaCorredor: null, ...(previo && previo.anulados ? { anulados: previo.anulados } : {}) };
+      config, estado: (previo && previo.estado) || 'enviado', datos: datosIniciales, actualizado: ahora(), firma: null, firmaCorredor: null, ...(previo && previo.anulados ? { anulados: previo.anulados } : {}), ...(previo && previo.textoEditado ? { textoEditado: previo.textoEditado } : {}) };
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: previo ? `Actualizó el link del propietario (comisión ${config.comision}%, vigencia ${config.vigencia} días)` : `Creó el link para el propietario (comisión ${config.comision}%, vigencia ${config.vigencia} días)` }];
     if (!previo) registrar(db, autor, `Creó el link del propietario para ${campo.nombre}`, { col: 'campos', id: campo.id });
     return campo;
@@ -1562,6 +1599,33 @@ function sincronizarMandatoConFicha(campo, prev, autor) {
   cap.actualizado = ahora();
   campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `El mandato (aún sin firmar) se actualizó con la ficha: ${cambios.join(' y ')}` }];
 }
+
+// ── Equipo: texto completo del mandato, para reescribirlo a mano
+router.get('/campos/:id/mandato-texto', (req, res) => {
+  const campo = leer().campos.find((x) => x.id === req.params.id);
+  if (!campo || !campo.captacion) return res.status(404).json({ error: 'Primero prepara el mandato.' });
+  const cap = campo.captacion;
+  const auto = bloquesATexto(bloquesAutomaticos(campo, new Date(2000, 0, 1))).split(fechaLarga(new Date(2000, 0, 1))).join(MARCA_FECHA);
+  res.json({ texto: cap.textoEditado || auto, automatico: auto, editado: !!cap.textoEditado, firmado: !!cap.firma });
+});
+router.post('/campos/:id/mandato-texto', async (req, res) => {
+  const autor = usuarioDe(req), b = req.body || {};
+  const texto = b.texto == null ? '' : String(b.texto).replace(/\r/g, '').slice(0, 60000).trim();
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id);
+    if (!campo || !campo.captacion) return null;
+    const cap = campo.captacion;
+    if (cap.firma) return { error: 'El mandato ya está firmado. Usa “Corregir el mandato firmado” para reabrirlo y luego edita el texto.' };
+    if (texto && textoABloques(texto, new Date()).length < 2) return { error: 'El texto quedó casi vacío. Revisa que tenga el título y al menos un párrafo.' };
+    cap.textoEditado = texto || '';
+    cap.actualizado = ahora();
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: texto ? 'Editó a mano el texto del mandato' : 'Volvió al texto automático del mandato' }];
+    return campo;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el mandato.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
 
 // ── Equipo: volver a abrir un mandato firmado para corregirlo (el cliente tendrá que firmarlo de nuevo)
 router.post('/campos/:id/mandato/reabrir', async (req, res) => {
@@ -1618,7 +1682,7 @@ router.post('/campos/:id/mandato-equipo', async (req, res) => {
     const datos = limpiarDatosPropietario({ ...(b.datos || {}), pasoActual: 4, sinPrecio: false });
     const pendientes = faltantesMandato(datos);
     campo.captacion = { token: (previo && previo.token) || crypto.randomBytes(16).toString('hex'), creado: (previo && previo.creado) || ahora(), creadoPor: (previo && previo.creadoPor) || autor,
-      modo: 'equipo', config, estado: 'completado', datos, actualizado: ahora(), firma: null, firmaCorredor: null, ...(previo && previo.anulados ? { anulados: previo.anulados } : {}) };
+      modo: 'equipo', config, estado: 'completado', datos, actualizado: ahora(), firma: null, firmaCorredor: null, ...(previo && previo.anulados ? { anulados: previo.anulados } : {}), ...(previo && previo.textoEditado ? { textoEditado: previo.textoEditado } : {}) };
     volcarAlCampo(campo, datos);
     campo.actualizado = ahora();
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `${previo ? 'Actualizó' : 'Preparó'} el mandato de venta para ${nombreVendedor(datos) || 'el propietario'} (comisión ${config.comision}%${config.iva ? ' + IVA' : ''}, vigencia ${config.vigencia} días)` }];
