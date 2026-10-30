@@ -3171,7 +3171,8 @@ router.post('/campos/:id/publicar-web', async (req, res) => {
   // Copia el formato de una publicación existente del sitio (campo del agua, plantaciones, formato del precio)
   let muestra = null;
   try { muestra = await muestraWeb(); } catch (e) { /* sin muestra se usan los valores estándar de Houzez */ }
-  const detalles = {}, metaExtra = {};
+  // Houzez ordena los listados y la búsqueda por "destacada": sin este dato la propiedad no aparece en la web (solo con el link)
+  const detalles = {}, metaExtra = { fave_featured: '0', fave_prop_homeslider: 'no', fave_loggedintoview: '0', houzez_featured_listing_date: '' };
   if (t('agua')) { if (muestra && muestra.claveAgua) metaExtra[muestra.claveAgua] = t('agua'); else detalles.Agua = t('agua'); }
   if (t('plantaciones')) { if (muestra && muestra.clavePlantaciones) metaExtra[muestra.clavePlantaciones] = t('plantaciones'); else detalles.Plantaciones = t('plantaciones'); }
   let precio = t('precio', 40), prefijo = t('precioPrefijo', 10);
