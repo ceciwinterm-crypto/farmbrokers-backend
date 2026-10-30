@@ -438,10 +438,45 @@ const nombreCultivo = (k) => todosLosCultivos()[k] || k;
 // ¿El campo está plantado? true / false / null (no se sabe)
 // Plantaciones permanentes (frutales, viñas, berries, forestal…): los cultivos anuales y la ganadería no cuentan como "plantado"
 const NO_PERMANENTES = ['cultivos_anuales', 'ganaderia', 'frutales'];
-const plantadoCon = (c) => cultivosEn(`${c.plantaciones || ''}`).filter((x) => !NO_PERMANENTES.includes(x));
+// Palabras que indican aptitud (no plantación): "apto para cerezos", "ideal para nogales", "potencial para…"
+const NO_PLANTADO = /\bapt[oa]s?\b|aptitud|ideal(es)? para|potencial|permit|podria|se puede|para plantar|para (el )?cultivo de|recomendad|sin plantar|sin plantac|futur|proyect/;
+// Indicios de que sí está plantado: hectáreas, huerto, en producción, variedad, año de plantación…
+const PLANTADO_CERCA = /\d+[.,]?\d*\s*(ha|has|hectareas?|plantas|arboles|hileras)\b|plantad|plantacion|huerto|en produccion|productiv|variedad|portainjert|marco de plantacion|anos de edad|\bde \d{4}\b|\bano \d{4}|cosecha|kilos|toneladas|kg\/ha/;
+// Cultivos permanentes nombrados en un texto. Con exigirIndicio, solo los que el texto describe como plantados.
+function cultivosPlantadosEn(texto, exigirIndicio) {
+  const s = norm(texto), out = [];
+  if (!s) return out;
+  for (const k of [...Object.keys(CULTIVOS), ...Object.keys(cultivosExtra)]) {
+    if (NO_PERMANENTES.includes(k)) continue;
+    const re = patronCultivo(k); if (!re) continue;
+    const g = new RegExp(re.source, 'g'); let m;
+    while ((m = g.exec(s))) {
+      const antes = s.slice(Math.max(0, m.index - 45), m.index), despues = s.slice(m.index, m.index + 50);
+      if (NO_PLANTADO.test(antes)) continue;
+      if (!exigirIndicio || PLANTADO_CERCA.test(antes) || PLANTADO_CERCA.test(despues)) { out.push(k); break; }
+    }
+  }
+  return out;
+}
+// Con qué está plantado el campo: lo escrito en "plantaciones" y lo que las descripciones dicen que está plantado
+const cachePlantado = new WeakMap();
+function plantadoCon(c) {
+  const llave = `${c.plantaciones}|${Object.keys(cultivosExtra).length}`, prev = cachePlantado.get(c);
+  if (prev && prev.llave === llave) return prev.v;
+  const otros = textosDelCampo(c).filter(([f]) => ['la descripción de la web', 'la descripción de la ficha', 'las observaciones', 'la tasación'].includes(f)).map(([, t]) => t).join(' \n ');
+  const v = [...new Set([...cultivosPlantadosEn(c.plantaciones || '', false), ...cultivosPlantadosEn(otros, true)])];
+  cachePlantado.set(c, { llave, v });
+  return v;
+}
+// Dónde dice que está plantado con esos cultivos
+function dondePlantado(c, claves) {
+  if (cultivosPlantadosEn(c.plantaciones || '', false).some((k) => claves.includes(k))) return '';
+  const hit = textosDelCampo(c).find(([f, t]) => f !== 'las plantaciones' && cultivosPlantadosEn(t, true).some((k) => claves.includes(k)));
+  return hit ? hit[0] : '';
+}
 function campoPlantado(c) {
   const t = norm(`${c.plantaciones || ''}`);
-  if (!t) return cultivosEn(`${c.observaciones || ''} ${c.descripcionFicha || ''}`).some(esFrutal) ? true : null;
+  if (!t) return plantadoCon(c).length ? true : null;
   if (/sin plantac|no tiene|ninguna|sin plantar|suelo desnudo|pradera natural|sin cultivo|eriazo|^no$|^-$/.test(t)) return false;
   if (plantadoCon(c).length) return true;
   if (/frutal|huerto|parron|plantac/.test(t) && !/anual/.test(t)) return true;
@@ -604,9 +639,10 @@ function evaluar(campo, cli, hoy = new Date()) {
     const conPlantado = calza(plantados), conApto = calza(aptos);
     if (cli.plantado === 'plantado') {
       // Quiere un campo YA plantado con lo que busca
-      if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult} ya plantado; el campo está plantado con ${conPlantado}.`); }
-      else if (plantados.length) return null; // está plantado, pero con otra cosa
-      else if (aptos.length) return null;
+      // Solo campos que de verdad están plantados con eso (en "plantaciones" o descrito como plantado). Ser apto no basta.
+      if (!conPlantado) return null;
+      const donde = dondePlantado(campo, ck);
+      sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult} ya plantado; el campo está plantado con ${conPlantado}${donde ? ` (según ${donde})` : ''}.`);
     } else if (cli.plantado === 'sin_plantar') {
       if (conApto) { const donde = dondeCultivo(campo, ck); sCult = 30; razones.push(`Apto para ${conApto}`); det('Cultivo', 'ok', `Busca un campo sin plantar para ${buscaCult}; el campo es apto para ${conApto}${donde ? ` según ${donde}` : ''}.`); } else if (aptos.length) return null;
     } else if (conPlantado) { sCult = 30; razones.push(`Plantado con ${conPlantado}`); det('Cultivo', 'ok', `Busca ${buscaCult}; el campo está plantado con ${conPlantado}.`); }
