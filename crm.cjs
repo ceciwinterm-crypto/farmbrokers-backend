@@ -558,10 +558,8 @@ function evaluar(campo, cli, hoy = new Date()) {
   const opCampo = campo.operacion || 'venta', opCli = ['arriendo', 'ambas'].includes(cli.operacion) ? cli.operacion : 'compra';
   if (opCli === 'compra' && opCampo === 'arriendo') return null;
   if (opCli === 'arriendo' && opCampo === 'venta') return null;
-  // tipo
-  let sTipo;
-  if (!cli.tipo) sTipo = 5;
-  else { sTipo = (COMPAT[cli.tipo] || { [cli.tipo]: 10 })[campo.tipo]; if (sTipo == null) return null; }
+  // El tipo de propiedad ya no se filtra en los clientes (se duplicaba con región, cultivos y palabras clave)
+  const sTipo = 10;
   const razones = [], alertas = [], detalle = [];
   const det = (criterio, estado, texto) => detalle.push({ criterio, estado, texto });
   const textoCli = norm(`${cli.zona} ${cli.requerimiento} ${cli.observaciones}`);
@@ -702,7 +700,6 @@ function evaluar(campo, cli, hoy = new Date()) {
     razones.unshift(`Perfil ${nombres.join(', ')}`);
     det('Perfil', 'ok', `Ambos son perfil ${lista3(nombres)}.`);
   }
-  if (cli.tipo) det('Tipo', sTipo >= 10 ? 'ok' : 'medio', sTipo >= 10 ? `Busca ${nombreTipoCampo(cli.tipo).toLowerCase()} y el campo es ${nombreTipoCampo(campo.tipo).toLowerCase()}.` : `Busca ${nombreTipoCampo(cli.tipo).toLowerCase()}; el campo es ${nombreTipoCampo(campo.tipo).toLowerCase()}, que se parece.`);
   if (!hitZona && conocidos < 2 && !sPerfil) return null;
   const score = Math.min(100, sTipo + sLugar + sCult + sSup + sPerfil);
   if (score < 55) return null;
