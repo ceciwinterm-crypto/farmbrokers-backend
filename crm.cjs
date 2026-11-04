@@ -594,6 +594,8 @@ function evaluar(campo, cli, hoy = new Date()) {
     sLugar = 35; razones.push(`Busca en ${hit.etiqueta}${hit.etiqueta !== hit.c ? ` (${campo.sector.trim()})` : ''}`);
     txtLugar = `El campo está en ${dondeCampo}. El cliente busca en ${hit.etiqueta !== hit.c ? `${hit.etiqueta}, que incluye ${sectorTxt}` : `la comuna de ${hit.c}`}.`;
   } else if (tieneRegion && campo.region && cli.regiones.includes(campo.region)) {
+    // Si el cliente eligió valles, zonas o comunas, solo calzan esos: la región sola no amplía la búsqueda
+    if (comunasReg.length || (cli.comunas || []).length || (cli.zonas || []).length) return null;
     sLugar = 25; razones.push(campo.region === 'PE' ? 'Busca en Perú' : `Busca en región ${campo.region}`);
     if (comunasReg.length) { estLugar = 'medio'; txtLugar = `El campo está en ${dondeCampo}. El cliente busca en ${lista3([...new Set(comunasReg.map((x) => x.etiqueta))])}, pero el campo no tiene comuna escrita: solo se revisó la región.`; }
     else if (eligioCli.length) txtLugar = `El campo está en ${dondeCampo}. Calza por región: el cliente busca en toda la ${regTxt(campo.region)} (las comunas o zonas que eligió, ${corto(lista3([...new Set(eligioCli)]), 90)}, son de otra región).`;
@@ -613,6 +615,25 @@ function evaluar(campo, cli, hoy = new Date()) {
   }
   det('Ubicación', estLugar, txtLugar);
 
+  // Perfil (excluyente): si el cliente tiene perfil, el campo tiene que tener ese perfil
+  let sPerfil = 0, sinPerfil = false;
+  const pc = campo.perfiles || [], pk = cli.perfiles || [];
+  if (pk.length) {
+    const nombreP = (x) => (perfilesActuales.find((p) => p.id === x) || {}).nombre || x;
+    if (pc.length) {
+      const comunes = pk.filter((x) => pc.includes(x));
+      if (!comunes.length) return null;
+      sPerfil = 12;
+      const nombres = comunes.map(nombreP);
+      razones.unshift(`Perfil ${nombres.join(', ')}`);
+      det('Perfil', 'ok', `Ambos son perfil ${lista3(nombres)}.`);
+    } else {
+      sinPerfil = true;
+      alertas.push('El campo no tiene perfil asignado: asígnale uno en su ficha');
+      det('Perfil', 'medio', `El cliente busca perfil ${lista3(pk.map(nombreP))}, pero el campo no tiene perfil asignado. Asígnaselo en la ficha del campo.`);
+    }
+  }
+
   // Orden de filtros: 1) región, comunas y zonas (arriba, excluyentes); 2) plantado o no (excluyente si el cliente lo pidió);
   // 3) palabra clave: si el campo la tiene, dentro de esa ubicación es calce fuerte sin mirar hectáreas ni cultivo
   if (hitsPal.length) {
@@ -625,10 +646,10 @@ function evaluar(campo, cli, hoy = new Date()) {
     }
     razones.push(...hitsPal.map((x) => `Palabra clave: ${x.p}`));
     detalle.unshift(...hitsPal.map((x) => ({ criterio: 'Palabra clave', estado: 'ok', texto: `“${x.p}” aparece en ${x.h.fuente}: ${x.h.extracto}` })));
-    return { clienteId: cli.id, score: 95, nivel: dudoso ? 'parcial' : 'fuerte', palabraClave: true, razones, alertas, detalle };
+    return { clienteId: cli.id, score: 95, nivel: dudoso || sinPerfil ? 'parcial' : 'fuerte', palabraClave: true, razones, alertas, detalle };
   }
 
-  let parcial = false; // casos dudosos: se muestran como calce parcial
+  let parcial = sinPerfil; // casos dudosos: se muestran como calce parcial
   // cultivos (30): lo plantado se compara con lo plantado; la aptitud solo cuenta para quien quiere plantar
   let sCult = 15;
   const ck = cli.cultivos || [];
@@ -692,16 +713,6 @@ function evaluar(campo, cli, hoy = new Date()) {
   } else det('Superficie', 'neutro', `El cliente no indicó hectáreas: no se filtró por superficie.${ha != null ? ` El campo tiene ${fmtHa(ha)} ha.` : ''}`);
 
   // Perfil de comprador: si ambos lo tienen y no comparten ninguno, el cliente busca otra cosa
-  let sPerfil = 0;
-  const pc = campo.perfiles || [], pk = cli.perfiles || [];
-  if (pc.length && pk.length) {
-    const comunes = pk.filter((x) => pc.includes(x));
-    if (!comunes.length) return null;
-    sPerfil = 12;
-    const nombres = comunes.map((x) => (perfilesActuales.find((p) => p.id === x) || {}).nombre || x);
-    razones.unshift(`Perfil ${nombres.join(', ')}`);
-    det('Perfil', 'ok', `Ambos son perfil ${lista3(nombres)}.`);
-  }
   if (!hitZona && conocidos < 2 && !sPerfil) return null;
   const score = Math.min(100, sTipo + sLugar + sCult + sSup + sPerfil);
   if (score < 55) return null;
