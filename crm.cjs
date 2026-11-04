@@ -648,6 +648,15 @@ function evaluar(campo, cli, hoy = new Date()) {
       if (pl === null) { dudoso = true; alertas.push(cli.plantado === 'plantado' ? 'Busca plantado: confirma si el campo tiene plantaciones' : 'Busca sin plantar: confirma si el campo tiene plantaciones'); det('Plantado', 'medio', 'La ficha no dice si el campo está plantado: márcalo con el botón “Plantado” en la ficha del campo.'); }
       else det('Plantado', 'ok', pl ? 'Busca un campo plantado y este lo está.' : 'Busca un campo sin plantar y este no tiene plantaciones.');
     }
+    // Hectáreas: también se respetan con palabra clave (muy fuera de rango no calza; algo fuera o sin dato, parcial)
+    if (cli.haMin != null || cli.haMax != null) {
+      const ha = campo.hectareas, min = cli.haMin || 0, max = cli.haMax == null ? Infinity : cli.haMax;
+      const txtR = cli.haMax == null ? `${min}+ ha` : `${min}–${cli.haMax} ha`;
+      if (ha == null) { dudoso = true; det('Superficie', 'medio', `El campo no tiene hectáreas escritas; el cliente busca ${txtR}.`); }
+      else if (ha >= min && ha <= max) { razones.push(`Superficie calza (${txtR})`); det('Superficie', 'ok', `El campo tiene ${fmtHa(ha)} ha; el cliente busca ${txtR}.`); }
+      else if (ha >= min * 0.75 && ha <= max * 1.25) { dudoso = true; alertas.push(`Superficie algo fuera de rango (busca ${txtR})`); det('Superficie', 'medio', `El campo tiene ${fmtHa(ha)} ha; el cliente busca ${txtR}: algo fuera del rango.`); }
+      else return null;
+    }
     razones.push(...hitsPal.map((x) => `Palabra clave: ${x.p}`));
     detalle.unshift(...hitsPal.map((x) => ({ criterio: 'Palabra clave', estado: 'ok', texto: `“${x.p}” aparece en ${x.h.fuente}: ${x.h.extracto}` })));
     return { clienteId: cli.id, score: 95, nivel: dudoso || sinPerfil ? 'parcial' : 'fuerte', palabraClave: true, razones, alertas, detalle, perfiles: perfilesCalce };
