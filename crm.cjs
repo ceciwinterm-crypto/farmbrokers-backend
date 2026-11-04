@@ -544,6 +544,9 @@ function dondeCultivo(c, claves) {
   const hit = fuentes.find(([, t]) => pats.some((re) => re.test(norm(t))));
   return hit ? hit[0] : '';
 }
+// Comunas que se escriben de varias formas (Marchihue / Marchigüe, Llay-Llay / Llaillay…)
+const VARIANTES_COMUNA = { marchihue: 'marchigue', 'llay-llay': 'llaillay', 'llay llay': 'llaillay', paihuano: 'paiguano', trehuaco: 'treguaco', conchalin: 'conchali', penaflor: 'penaflor', 'padre las casas': 'padre las casas' };
+const normComuna = (t) => { const x = norm(t).replace(/ñ/g, 'n'); return VARIANTES_COMUNA[x] || x.replace(/\bmarchihue\b/g, 'marchigue').replace(/\bllay-?\s?llay\b/g, 'llaillay'); };
 // Zonas a las que pertenece la comuna del campo (se calcula una vez por campo)
 const cacheZonasCampo = new WeakMap();
 function zonasDeCampoCache(campo, sectorTxt, mismaComuna) {
@@ -576,7 +579,7 @@ function evaluar(campo, cli, hoy = new Date()) {
   // Los campos en Perú solo calzan con clientes que buscan en Perú (o que lo mencionan)
   if (campo.region === 'PE' && !(cli.regiones || []).includes('PE') && !hitZona) return null;
   // Comunas y zonas específicas: en una región donde el cliente eligió comunas o zonas, solo calzan los campos de esas comunas
-  const mismaComuna = (a, b) => { const x = norm(a), y = norm(b); return x === y || (x.length >= 4 && y.length >= 4 && (x.includes(y) || y.includes(x))); };
+  const mismaComuna = (a, b) => { const x = normComuna(a), y = normComuna(b); return x === y || (x.length >= 4 && y.length >= 4 && (x.includes(y) || y.includes(x))); };
   if (norm(campo.sector) && (cli.excluidas || []).some((x) => x.r === campo.region && mismaComuna(x.c, campo.sector))) return null; // comuna que no quiere
   const zonasCli = (cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter((z) => z && regionesZona(z).includes(campo.region));
   const comunasReg = [...(cli.comunas || []).filter((x) => x.r === campo.region).map((x) => ({ c: x.c, etiqueta: x.c })),
@@ -589,7 +592,7 @@ function evaluar(campo, cli, hoy = new Date()) {
   const eligioCli = [...(cli.zonas || []).map((z) => todasLasZonas()[ZONA_ALIAS[z] || z]).filter(Boolean).map((z) => z.nombre), ...(cli.comunas || []).map((x) => x.c)];
   let txtLugar, estLugar = 'ok';
   if (comunasReg.length && norm(campo.sector)) {
-    const s = norm(campo.sector), hit = comunasReg.find((x) => { const c = norm(x.c); return s === c || (s.length >= 4 && c.length >= 4 && (s.includes(c) || c.includes(s))); });
+    const s = normComuna(campo.sector), hit = comunasReg.find((x) => { const c = normComuna(x.c); return s === c || (s.length >= 4 && c.length >= 4 && (s.includes(c) || c.includes(s))); });
     if (!hit) return null;
     sLugar = 35; razones.push(`Busca en ${hit.etiqueta}${hit.etiqueta !== hit.c ? ` (${campo.sector.trim()})` : ''}`);
     txtLugar = `El campo está en ${dondeCampo}. El cliente busca en ${hit.etiqueta !== hit.c ? `${hit.etiqueta}, que incluye ${sectorTxt}` : `la comuna de ${hit.c}`}.`;
