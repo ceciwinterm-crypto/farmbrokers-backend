@@ -602,6 +602,7 @@ function evaluar(campo, cli, hoy = new Date()) {
     else txtLugar = `El campo está en ${dondeCampo}. Calza por región: el cliente busca en toda la ${regTxt(campo.region)}, sin elegir comunas ni zonas.`;
   }
   else if (tieneRegion && campo.region && !hitZona) return null;
+  else if (tieneRegion && !campo.region) return null; // el cliente eligió región o valle y el campo no tiene región escrita: no se puede asegurar que esté ahí
   else {
     sLugar = hitZona ? 25 : 17;
     if (!hitZona) { estLugar = 'neutro'; txtLugar = tieneRegion ? `El campo no tiene región escrita (está en ${dondeCampo}), así que no se pudo comparar con la región que busca.` : `El cliente no indicó región, comunas ni zonas: no se filtró por ubicación. El campo está en ${dondeCampo}.`; }
@@ -707,9 +708,9 @@ function evaluar(campo, cli, hoy = new Date()) {
       const txtRango = cli.haMax == null ? `${min}+ ha` : `${min}–${max} ha`;
       const t = `El campo tiene ${fmtHa(ha)} ha; el cliente busca ${txtRango}`;
       if (ha >= min && ha <= max) { sSup = 25; razones.push(`Superficie calza (${txtRango})`); det('Superficie', 'ok', `${t}.`); }
-      else if (ha >= min * 0.75 && ha <= max * 1.25) { sSup = 12; alertas.push(`Superficie algo fuera de rango (busca ${txtRango})`); det('Superficie', 'medio', `${t}: está algo fuera del rango.`); }
-      else { sSup = 0; alertas.push(`Superficie fuera de rango (busca ${txtRango})`); det('Superficie', 'no', `${t}: no calza en superficie (calza por lo demás).`); }
-    } else det('Superficie', 'medio', `El campo no tiene hectáreas escritas; el cliente busca ${cli.haMax == null ? `${cli.haMin || 0}+ ha` : `${cli.haMin || 0}–${cli.haMax} ha`}.`);
+      else if (ha >= min * 0.75 && ha <= max * 1.25) { sSup = 12; parcial = true; alertas.push(`Superficie algo fuera de rango (busca ${txtRango})`); det('Superficie', 'medio', `${t}: está algo fuera del rango (hasta 25% de diferencia), por eso es calce parcial.`); }
+      else return null; // muy fuera del rango de hectáreas que busca
+    } else { parcial = true; } if (ha == null) det('Superficie', 'medio', `El campo no tiene hectáreas escritas; el cliente busca ${cli.haMax == null ? `${cli.haMin || 0}+ ha` : `${cli.haMin || 0}–${cli.haMax} ha`}.`);
   } else det('Superficie', 'neutro', `El cliente no indicó hectáreas: no se filtró por superficie.${ha != null ? ` El campo tiene ${fmtHa(ha)} ha.` : ''}`);
 
   // Perfil de comprador: si ambos lo tienen y no comparten ninguno, el cliente busca otra cosa
