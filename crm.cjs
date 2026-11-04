@@ -476,8 +476,10 @@ function dondePlantado(c, claves) {
   return hit ? hit[0] : '';
 }
 function campoPlantado(c) {
-  if (c.plantado === 'si') return true; // marcado en la ficha con el botón "Plantado"
-  if (c.plantado === 'no') return false;
+  // Lo manda el botón "Plantado" de la ficha: si no está marcado, el campo cuenta como sin plantar
+  return c.plantado === 'si';
+}
+function campoPlantadoDeducido(c) { // (antes se deducía del texto; se deja por si se necesita de nuevo)
   const t = norm(`${c.plantaciones || ''}`);
   if (!t) return plantadoCon(c).length ? true : null;
   if (/sin plantac|no tiene|ninguna|sin plantar|suelo desnudo|pradera natural|sin cultivo|eriazo|^no$|^-$/.test(t)) return false;
@@ -644,8 +646,8 @@ function evaluar(campo, cli, hoy = new Date()) {
     if (cli.plantado === 'plantado') {
       // Quiere un campo YA plantado con lo que busca
       // Solo campos que de verdad están plantados con eso (en "plantaciones" o descrito como plantado). Ser apto no basta.
-      if (campo.plantado === 'no') return null;
-      if (!conPlantado && !(campo.plantado === 'si' && conApto)) return null;
+      if (campo.plantado !== 'si') return null; // solo los campos marcados como plantados
+      if (!conPlantado && !conApto) return null;
       const donde = conPlantado ? dondePlantado(campo, ck) : dondeCultivo(campo, ck);
       sCult = 30; razones.push(`Plantado con ${conPlantado || conApto}`); det('Cultivo', 'ok', conPlantado ? `Busca ${buscaCult} ya plantado; el campo está plantado con ${conPlantado}${donde ? ` (según ${donde})` : ''}.` : `Busca ${buscaCult} ya plantado; el campo está marcado como plantado y menciona ${conApto}${donde ? ` en ${donde}` : ''}.`);
     } else if (cli.plantado === 'sin_plantar') {
