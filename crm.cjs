@@ -616,14 +616,14 @@ function evaluar(campo, cli, hoy = new Date()) {
   det('Ubicación', estLugar, txtLugar);
 
   // Perfil (excluyente): si el cliente tiene perfil, el campo tiene que tener ese perfil
-  let sPerfil = 0, sinPerfil = false;
+  let sPerfil = 0, sinPerfil = false, perfilesCalce = [];
   const pc = campo.perfiles || [], pk = cli.perfiles || [];
   if (pk.length) {
     const nombreP = (x) => (perfilesActuales.find((p) => p.id === x) || {}).nombre || x;
     if (pc.length) {
       const comunes = pk.filter((x) => pc.includes(x));
       if (!comunes.length) return null;
-      sPerfil = 12;
+      sPerfil = 12; perfilesCalce = comunes;
       const nombres = comunes.map(nombreP);
       razones.unshift(`Perfil ${nombres.join(', ')}`);
       det('Perfil', 'ok', `Ambos son perfil ${lista3(nombres)}.`);
@@ -646,7 +646,7 @@ function evaluar(campo, cli, hoy = new Date()) {
     }
     razones.push(...hitsPal.map((x) => `Palabra clave: ${x.p}`));
     detalle.unshift(...hitsPal.map((x) => ({ criterio: 'Palabra clave', estado: 'ok', texto: `“${x.p}” aparece en ${x.h.fuente}: ${x.h.extracto}` })));
-    return { clienteId: cli.id, score: 95, nivel: dudoso || sinPerfil ? 'parcial' : 'fuerte', palabraClave: true, razones, alertas, detalle };
+    return { clienteId: cli.id, score: 95, nivel: dudoso || sinPerfil ? 'parcial' : 'fuerte', palabraClave: true, razones, alertas, detalle, perfiles: perfilesCalce };
   }
 
   let parcial = sinPerfil; // casos dudosos: se muestran como calce parcial
@@ -732,7 +732,7 @@ function evaluar(campo, cli, hoy = new Date()) {
   }
   const ORDEN = ['Palabra clave', 'Operación', 'Ubicación', 'Cultivo', 'Plantado', 'Superficie', 'Tipo', 'Perfil', 'Presupuesto'];
   detalle.sort((a, b) => ORDEN.indexOf(a.criterio) - ORDEN.indexOf(b.criterio));
-  return { clienteId: cli.id, score, nivel: score >= 70 && !parcial ? 'fuerte' : 'parcial', razones, alertas, detalle };
+  return { clienteId: cli.id, score, nivel: score >= 70 && !parcial ? 'fuerte' : 'parcial', razones, alertas, detalle, perfiles: perfilesCalce };
 }
 
 function calcularMatches(db) {
@@ -747,11 +747,11 @@ function calcularMatches(db) {
       const porBusqueda = [];
       for (const b of bs) {
         const r = evaluar(campo, b === cli ? cli : { ...cli, ...b, id: cli.id });
-        if (r && b !== cli && bs.length > 1) porBusqueda.push({ busquedaId: b.id, nombre: b.nombre, score: r.score, nivel: r.nivel, razones: [...r.razones], alertas: [...r.alertas], detalle: r.detalle });
+        if (r && b !== cli && bs.length > 1) porBusqueda.push({ busquedaId: b.id, nombre: b.nombre, score: r.score, nivel: r.nivel, razones: [...r.razones], alertas: [...r.alertas], detalle: r.detalle, perfiles: r.perfiles });
         if (r && (!mejor || r.score > mejor.score)) { mejor = r; if (b !== cli) { r.busquedaId = b.id; if (bs.length > 1) r.razones.unshift(`Búsqueda: ${b.nombre}`); } }
       }
       // Con varias búsquedas: el detalle de cada una, para ver los calces por separado
-      if (mejor && porBusqueda.length) mejor.porBusqueda = porBusqueda;
+      if (mejor && porBusqueda.length) { mejor.porBusqueda = porBusqueda; mejor.perfiles = [...new Set(porBusqueda.flatMap((p) => p.perfiles || []))]; }
       if (mejor) lista.push(mejor);
     }
     if (lista.length) out[campo.id] = lista.sort((a, b) => b.score - a.score);
