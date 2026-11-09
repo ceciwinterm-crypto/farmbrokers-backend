@@ -14,7 +14,7 @@ router.use(express.json({ limit: '15mb' }));
 
 const DIR = path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'data'), 'crm');
 const FILE = path.join(DIR, 'crm.json');
-const VERSION = 'crm-v9.2';
+const VERSION = 'crm-v9.4';
 // Dirección pública para las fichas (por ejemplo https://fichas.farmbrokers.cl). Se activa con la variable FICHAS_URL en Railway.
 const FICHAS_URL = String(process.env.FICHAS_URL || '').trim().replace(/\/$/, '');
 // Perfiles de comprador: lo que busca de verdad el cliente (se editan desde el CRM)
@@ -864,7 +864,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; zonasExtra = d.zonasExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; zonasExtra = d.zonasExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; empresaCfg = (d.config && d.config.empresa) || null; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 // Cada registro guarda quién lo creó y quién lo modificó por última vez (según su historial)
@@ -945,7 +945,7 @@ router.get('/', (req, res) => {
     modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
-    zonas: todasLasZonas(), cultivos: todosLosCultivos(), cultivosFrutales: Object.keys(cultivosExtra).filter((k) => cultivosExtra[k].frutal), regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
+    zonas: todasLasZonas(), cultivos: todosLosCultivos(), cultivosFrutales: Object.keys(cultivosExtra).filter((k) => cultivosExtra[k].frutal), regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), empresa: empresaDe(), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
     actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500).map((o) => (o.firma || o.vence ? o : { ...o, vence: venceDe(o) })), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
@@ -1402,13 +1402,37 @@ router.post('/importar', async (req, res) => {
 
 // ───────────────────────── Captación: link del propietario y mandato ─────────────────────────
 // Texto del mandato basado en el modelo "Mandato de Venta Campos Ñiquen" de Farm Brokers Chile SpA.
-const CORREDOR = {
+const CORREDOR_BASE = {
   razon: 'FARM BROKERS CHILE SPA', rut: '77.089.307-0',
-  representante: 'don Daniel Haeussler Bobillier, Rut 13.660.318-3',
-  firmante: 'Daniel Haeussler Bobillier',
+  representantes: [
+    { trat: 'doña', nombre: 'María Cecilia Winter Montes', rut: '16.020.078-2' },
+    { trat: 'don', nombre: 'Max Winter Garces', rut: '7.388.042-4' },
+  ],
+  forma: 'conjunta', // 'conjunta' (y) o 'indistinta' (o)
+  firmante: 'María Cecilia Winter Montes',
   domicilio: 'Estoril N° 120 of. 615, Comuna de Las Condes',
   pie: 'www.farmbrokers.cl · Phone +569 7193 90 40 · Email: contacto@farmbrokers.cl',
 };
+// Representantes de Farm Brokers editables desde el CRM (Datos de la empresa); si no hay, se usan los de arriba.
+let empresaCfg = null;
+function empresaDe() {
+  const c = empresaCfg || {};
+  const reps = Array.isArray(c.representantes) && c.representantes.length ? c.representantes : CORREDOR_BASE.representantes;
+  const forma = c.forma === 'indistinta' ? 'indistinta' : c.forma === 'conjunta' ? 'conjunta' : CORREDOR_BASE.forma;
+  const firmante = c.firmante && reps.some((r) => r.nombre === c.firmante) ? c.firmante : reps[0].nombre;
+  return { representantes: reps, forma, firmante };
+}
+function corredorActual() {
+  const e = empresaDe();
+  const una = (r) => `${r.trat} ${r.nombre}, Rut ${r.rut}`;
+  let representante = una(e.representantes[0]);
+  if (e.representantes.length > 1) {
+    const resto = e.representantes.slice(1).map(una);
+    const ult = resto.pop();
+    representante = [representante, ...resto].join(', ') + (e.forma === 'indistinta' ? `, o por ${ult}, actuando indistintamente` : `, y por ${ult}`);
+  }
+  return { ...CORREDOR_BASE, representante, firmante: e.firmante };
+}
 const REGION_TEXTO = { XV: 'Región de Arica y Parinacota', I: 'Región de Tarapacá', II: 'Región de Antofagasta', III: 'Región de Atacama',
   IV: 'Región de Coquimbo', V: 'Región de Valparaíso', RM: 'Región Metropolitana', VI: "Región del Libertador General Bernardo O'Higgins",
   VII: 'Región del Maule', XVI: 'Región de Ñuble', VIII: 'Región del Biobío', IX: 'Región de La Araucanía', XIV: 'Región de Los Ríos',
@@ -1555,8 +1579,8 @@ function bloquesAutomaticos(campo, fecha = new Date()) {
   const bloques = [
     { k: 'titulo', runs: [N(`MANDATO DE VENTA ${String(cfg.titulo || campo.nombre).toUpperCase()}`)] },
     { k: 'p', runs: [N(`En ${cfg.ciudad || 'Santiago'}, a ${fechaLarga(fecha)}, `), ...vend,
-      N(eq ? ', en adelante “El Vendedor”, ha convenido otorgar un mandato de venta a ' : ', en adelante “El Vendedor”, mediante el presente documento, otorga mandato de venta a '), B(CORREDOR.razon),
-      N(`, rol único tributario Nº ${CORREDOR.rut}, representada por ${CORREDOR.representante}, con domicilio en ${CORREDOR.domicilio}, en adelante “El Corredor”, para gestionar y mediar la venta de lo(s) siguiente(s) inmueble(s):`)] },
+      N(eq ? ', en adelante “El Vendedor”, ha convenido otorgar un mandato de venta a ' : ', en adelante “El Vendedor”, mediante el presente documento, otorga mandato de venta a '), B(corredorActual().razon),
+      N(`, rol único tributario Nº ${corredorActual().rut}, representada por ${corredorActual().representante}, con domicilio en ${corredorActual().domicilio}, en adelante “El Corredor”, para gestionar y mediar la venta de lo(s) siguiente(s) inmueble(s):`)] },
   ];
   const items = d.predios.map((p) => {
     if (p.nombre) { // forma del modelo "Predio El Maitén, Chancón, Comuna de Rancagua. Rol Propiedad: … con una superficie aproximada de …"
@@ -2214,6 +2238,28 @@ const acuerdoPara = (db, campo) => {
   return t.replace(/\{CAMPO\}/g, tituloCampo(campo));
 };
 const acuerdoFirmado = (t, nombre, rut) => String(t).replace(/\{NOMBRE\}/g, nombre).replace(/\{RUT\}/g, rut);
+
+router.put('/config/empresa', async (req, res) => {
+  if (!esAdmin(req) && (ADMIN_KEY || auth.hayUsuarios())) return res.status(403).json({ error: 'Solo una administradora puede cambiar los representantes de la empresa.' });
+  const b = req.body || {};
+  const reps = (Array.isArray(b.representantes) ? b.representantes : []).slice(0, 4).map((r) => ({
+    trat: r && r.trat === 'don' ? 'don' : 'doña', nombre: txt(r && r.nombre, 120), rut: rutFormato(txt(r && r.rut, 20)) }));
+  if (!reps.length) return res.status(400).json({ error: 'Debe haber al menos un representante.' });
+  for (const r of reps) {
+    if (r.nombre.length < 5) return res.status(400).json({ error: 'Escribe el nombre completo de cada representante.' });
+    if (!rutValido(r.rut)) return res.status(400).json({ error: `El RUT de ${r.nombre} no es válido.` });
+  }
+  const forma = b.forma === 'indistinta' ? 'indistinta' : 'conjunta';
+  const firmante = reps.some((r) => r.nombre === b.firmante) ? b.firmante : reps[0].nombre;
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    db.config = { ...(db.config || {}), empresa: { representantes: reps, forma, firmante } };
+    empresaCfg = db.config.empresa;
+    registrar(db, autor, `Actualizó los representantes de Farm Brokers en los mandatos: ${reps.map((x) => x.nombre).join(', ')}`, null);
+    return { empresa: empresaDe() };
+  });
+  res.json(r);
+});
 
 router.put('/config/acuerdo', async (req, res) => {
   const t = txt((req.body || {}).texto, 20000);
@@ -3113,7 +3159,7 @@ function wpLlamar(metodo, ruta, cuerpo, base = '/wp-json/farmbrokers/v1') {
         const codigo = j && j.code;
         let msg = (j && j.message) || `WordPress respondió ${res.statusCode}.`;
         if (res.statusCode === 401 || codigo === 'rest_forbidden' || codigo === 'incorrect_password' || codigo === 'invalid_username')
-          msg = 'WordPress no aceptó la clave. Revisa en Railway que WP_USER sea el nombre de usuario (por ejemplo Daniel) y que WP_APP_PASSWORD sea la contraseña de aplicación de ese mismo usuario.';
+          msg = 'WordPress no aceptó la clave. Revisa en Railway que WP_USER sea el nombre de usuario (el usuario con que se entra a WordPress) y que WP_APP_PASSWORD sea la contraseña de aplicación de ese mismo usuario.';
         if (codigo === 'rest_no_route') msg = 'El código del CRM no está activo en WordPress. Revisa el snippet "Farm Brokers CRM" en Fragmentos de código.';
         const e = new Error(msg); e.estado = res.statusCode; mal(e);
       });
@@ -3457,7 +3503,7 @@ router.post('/publico/:token/firmar', async (req, res) => {
     cap.firma = { nombre, rut: rutFormato(rut), fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash, bloques };
     cap.estado = 'firmado';
     // Firma de Farm Brokers automática: queda firmado por ambas partes en el mismo momento
-    if (!cap.firmaCorredor) cap.firmaCorredor = { nombre: `${CORREDOR.firmante}, por Farm Brokers Chile SpA`, fecha: cap.firma.fecha, automatica: true, preparadoPor: cap.creadoPor || '' };
+    if (!cap.firmaCorredor) cap.firmaCorredor = { nombre: `${corredorActual().firmante}, por Farm Brokers Chile SpA`, fecha: cap.firma.fecha, automatica: true, preparadoPor: cap.creadoPor || '' };
     campo.checklist = { ...(campo.checklist || {}), mandato: true };
     const quien = `${nombre} (propietario)`;
     const previa = campo.etapa;
