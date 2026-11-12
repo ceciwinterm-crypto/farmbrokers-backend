@@ -1427,7 +1427,7 @@ const CORREDOR_BASE = {
   forma: 'conjunta', // 'conjunta' (y) o 'indistinta' (o)
   firmante: 'María Cecilia Winter Montes',
   domicilio: 'Estoril N° 120 of. 615, Comuna de Las Condes',
-  pie: 'www.farmbrokers.cl · Phone +569 7193 90 40 · Email: contacto@farmbrokers.cl',
+  pie: 'www.farmbrokers.cl · Phone +569 9549 5431 · Email: contacto@farmbrokers.cl',
 };
 // Representantes de Farm Brokers editables desde el CRM (Datos de la empresa); si no hay, se usan los de arriba.
 let empresaCfg = null;
