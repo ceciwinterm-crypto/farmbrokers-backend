@@ -176,6 +176,8 @@ const usuarioDe = (req) => { if (req.usuario) return req.usuario.nombre; let u =
 // "max", "Max ", "MAX W" → "Max Winter": el mismo nombre escrito distinto no crea otra persona
 const normNombre = (n) => String(n || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 function nombreCanonico(n, grupos) {
+  // Un correo escrito como nombre ("mwinterg@gmail.com") es la persona dueña de esa cuenta
+  if (/@/.test(String(n || ''))) { try { const e = String(n).trim().toLowerCase(); const u = auth._interno.leer().usuarios.find((x) => x.email === e); if (u) return u.nombre; } catch (err) { /* sin cuentas */ } }
   const k = normNombre(n); if (!k) return n;
   for (const lista of grupos || [nombresCuentas(), nombresCfg]) {
     const todos = [...new Set(lista.filter(Boolean))];
