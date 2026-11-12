@@ -171,7 +171,21 @@ const norm = (s) => {
 };
 const num = (v) => (v === '' || v == null || isNaN(Number(v)) ? null : Number(v));
 let aliasNombres = {}; // nombres corregidos: lo que una persona escribió al entrar → su nombre definitivo
-const usuarioDe = (req) => { if (req.usuario) return req.usuario.nombre; let u = req.get('x-crm-user') || ''; try { u = decodeURIComponent(u); } catch (e) {} u = txt(u, 80) || 'Equipo'; return aliasNombres[u] || u; };
+let nombresCfg = []; // miembros, administradoras y nombres definitivos del equipo (se actualiza al leer)
+const usuarioDe = (req) => { if (req.usuario) return req.usuario.nombre; let u = req.get('x-crm-user') || ''; try { u = decodeURIComponent(u); } catch (e) {} u = txt(u, 80) || 'Equipo'; u = aliasNombres[u] || u; return u === 'Equipo' ? u : nombreCanonico(u); };
+// "max", "Max ", "MAX W" → "Max Winter": el mismo nombre escrito distinto no crea otra persona
+const normNombre = (n) => String(n || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+function nombreCanonico(n, grupos) {
+  const k = normNombre(n); if (!k) return n;
+  for (const lista of grupos || [nombresCuentas(), nombresCfg]) {
+    const todos = [...new Set(lista.filter(Boolean))];
+    const igual = todos.find((x) => normNombre(x) === k); if (igual) return igual;
+    const unico = (f) => { const m = todos.filter(f); return m.length === 1 ? m[0] : ''; };
+    const pila = !k.includes(' ') && k.length >= 3 && unico((x) => normNombre(x).split(' ')[0] === k); if (pila) return pila;
+    const inicio = k.includes(' ') && unico((x) => normNombre(x).startsWith(k)); if (inicio) return inicio;
+  }
+  return n;
+}
 
 function regionCodigo(t) {
   const s = norm(t).toUpperCase().replace(/[.°º]/g, '').replace(/^(\d{1,2})A$/, '$1');
@@ -864,7 +878,7 @@ function importarHojas(hojas) {
 // ───────────────────────── Almacenamiento ─────────────────────────
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
-  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; zonasExtra = d.zonasExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; empresaCfg = (d.config && d.config.empresa) || null; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
+  try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; zonasExtra = d.zonasExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; nombresCfg = [...((d.config && d.config.miembros) || []), ...((d.config && d.config.admins) || []), ...Object.values(aliasNombres)]; empresaCfg = (d.config && d.config.empresa) || null; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
   catch (e) { return vacio(); }
 }
 // Cada registro guarda quién lo creó y quién lo modificó por última vez (según su historial)
@@ -940,7 +954,7 @@ router.get('/', (req, res) => {
   const db = leer();
   const yo = usuarioDe(req);
   const visto = ((db.config || {}).vistos || {})[yo];
-  if (yo !== 'Equipo' && (!visto || Date.now() - new Date(visto).getTime() > 10 * 60 * 1000)) {
+  if (yo !== 'Equipo' && (!auth.hayUsuarios() || [...nombresCuentas(), ...nombresCfg].includes(yo)) && (!visto || Date.now() - new Date(visto).getTime() > 10 * 60 * 1000)) {
     db.config = { ...(db.config || {}), vistos: { ...((db.config || {}).vistos || {}), [yo]: ahora() } };
     modificar((d) => { d.config = { ...(d.config || {}), vistos: { ...((d.config || {}).vistos || {}), [yo]: ahora() } }; }).catch(() => {});
   }
@@ -2500,7 +2514,7 @@ router.get('/publico-img', async (req, res) => {
 // ───────────────────────── Nombres del equipo ─────────────────────────
 // Quienes tienen cuenta personal activa también son parte del equipo
 const nombresCuentas = () => { try { return auth._interno.leer().usuarios.filter((u) => u.activo !== false).map((u) => u.nombre); } catch (e) { return []; } };
-function personasEquipo(db) {
+function personasCrudas(db) {
   const cuenta = {};
   const ignorar = (n) => !n || /\([^)]*\)$/.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo', 'CRM'].includes(n);
   const sumar = (n, k = 1) => { if (!ignorar(n)) cuenta[n] = (cuenta[n] || 0) + k; };
@@ -2511,14 +2525,60 @@ function personasEquipo(db) {
   const extra = [...nombresCuentas(), ...(cfg.miembros || []), ...Object.keys(cfg.contactos || {}), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || []),
     ...(db.tareas || []).flatMap((t) => [t.asignadoA, t.creadoPor])];
   extra.forEach((n) => sumar(n, 0));
-  return Object.entries(cuenta).map(([nombre, registros]) => ({ nombre, registros, ultimoIngreso: (cfg.vistos || {})[nombre] || '' }))
+  return cuenta;
+}
+// Grupos para reconocer a la misma persona: primero las cuentas personales, después los agregados a mano
+const gruposNombres = (db) => { const cfg = db.config || {}; return [nombresCuentas(), [...(cfg.miembros || []), ...(cfg.admins || [])]]; };
+// Nombres escritos distinto que corresponden a otra persona del equipo: { "Max": "Max Winter", "max w": "Max Winter" }
+function nombresRepetidos(db) {
+  const grupos = gruposNombres(db), r = {};
+  for (const n of Object.keys(personasCrudas(db))) { const c = nombreCanonico(n, grupos); if (c !== n) r[n] = c; }
+  return r;
+}
+function personasEquipo(db) {
+  const cfg = db.config || {}, grupos = gruposNombres(db), junto = {}, visto = {};
+  for (const [n, k] of Object.entries(personasCrudas(db))) {
+    const c = nombreCanonico(n, grupos);
+    junto[c] = (junto[c] || 0) + k;
+    const v = (cfg.vistos || {})[n]; if (v && (!visto[c] || v > visto[c])) visto[c] = v;
+  }
+  return Object.entries(junto).map(([nombre, registros]) => ({ nombre, registros, ultimoIngreso: visto[nombre] || '' }))
     .sort((a, b) => b.registros - a.registros || a.nombre.localeCompare(b.nombre, 'es'));
 }
 // El equipo real (a quién se le pueden asignar tareas): quienes entran al CRM, los agregados a mano y las administradoras
 function miembrosEquipo(db) {
-  const cfg = db.config || {};
+  const cfg = db.config || {}, grupos = gruposNombres(db);
   const fuera = (n) => !n || /\(|formulario|cliente|propietario/i.test(n) || ['Importación', 'Sistema', 'Sincronización web', 'Equipo', 'CRM'].includes(n);
-  return [...new Set([...nombresCuentas(), ...(cfg.miembros || []), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || [])].filter((n) => !fuera(n)))].sort((a, b) => a.localeCompare(b, 'es'));
+  return [...new Set([...nombresCuentas(), ...(cfg.miembros || []), ...Object.keys(cfg.vistos || {}), ...(cfg.admins || [])].filter((n) => !fuera(n)).map((n) => nombreCanonico(n, grupos)))].sort((a, b) => a.localeCompare(b, 'es'));
+}
+// Cambia un nombre por otro en todo el CRM (historial, responsables, tareas, avisos y la lista del equipo)
+function renombrarEnDb(db, de, a) {
+  let n = 0;
+  const cambia = (obj, k) => { if (obj && obj[k] === de) { obj[k] = a; n++; } };
+  for (const col of ['campos', 'clientes', 'tasaciones']) for (const x of db[col]) {
+    (x.historial || []).forEach((h) => cambia(h, 'autor'));
+    cambia(x, 'responsable'); cambia(x, 'corredor'); cambia(x, 'proximaPara');
+    (x.envios || []).forEach((e) => cambia(e, 'autor'));
+    (x.archivos || []).forEach((f) => cambia(f, 'autor'));
+    (x.compartidos || []).forEach((c) => cambia(c, 'creadoPor'));
+    if (x.captacion) cambia(x.captacion, 'creadoPor');
+    cambia(x, 'creadoPor'); cambia(x, 'modificadoPor');
+    // Las firmas de mandatos y las aceptaciones de confidencialidad son constancias: no se modifican
+  }
+  (db.actividad || []).forEach((h) => cambia(h, 'autor'));
+  (db.tareas || []).forEach((t) => { cambia(t, 'asignadoA'); cambia(t, 'creadoPor'); cambia(t, 'hechaPor'); });
+  (db.notificaciones || []).forEach((x) => { cambia(x, 'para'); cambia(x, 'de'); });
+  (db.solicitudes || []).forEach((x) => { cambia(x, 'solicitadoPor'); cambia(x, 'resueltaPor'); });
+  const cfg = db.config = { ...(db.config || {}), alias: { ...((db.config || {}).alias || {}) } };
+  if (cfg.miembros) cfg.miembros = [...new Set(cfg.miembros.map((x) => (x === de ? a : x)))];
+  if (cfg.admins) cfg.admins = [...new Set(cfg.admins.map((x) => (x === de ? a : x)))];
+  if (cfg.vistos && cfg.vistos[de]) { const v = cfg.vistos[de]; cfg.vistos = { ...cfg.vistos }; delete cfg.vistos[de]; if (!cfg.vistos[a] || v > cfg.vistos[a]) cfg.vistos[a] = v; }
+  if (cfg.contactos && cfg.contactos[de]) { cfg.contactos = { ...cfg.contactos }; const c = cfg.contactos[de]; delete cfg.contactos[de]; const y = cfg.contactos[a] || {}; cfg.contactos[a] = { telefono: y.telefono || c.telefono || '', email: y.email || c.email || '' }; }
+  for (const [k, v] of Object.entries(cfg.alias)) if (v === de) cfg.alias[k] = a; // cadenas de cambios
+  cfg.alias[de] = a; delete cfg.alias[a];
+  aliasNombres = cfg.alias;
+  nombresCfg = [...(cfg.miembros || []), ...(cfg.admins || []), ...Object.values(aliasNombres)];
+  return n;
 }
 router.post('/equipo/renombrar', async (req, res) => {
   const de = txt((req.body || {}).de, 80), a = txt((req.body || {}).a, 80);
@@ -2526,23 +2586,7 @@ router.post('/equipo/renombrar', async (req, res) => {
   if (de === a) return res.status(400).json({ error: 'El nombre nuevo es igual al actual.' });
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
-    let n = 0;
-    const cambia = (obj, k) => { if (obj && obj[k] === de) { obj[k] = a; n++; } };
-    for (const col of ['campos', 'clientes', 'tasaciones']) for (const x of db[col]) {
-      (x.historial || []).forEach((h) => cambia(h, 'autor'));
-      cambia(x, 'responsable');
-      (x.envios || []).forEach((e) => cambia(e, 'autor'));
-      (x.archivos || []).forEach((f) => cambia(f, 'autor'));
-      (x.compartidos || []).forEach((c) => cambia(c, 'creadoPor'));
-      if (x.captacion) cambia(x.captacion, 'creadoPor');
-      cambia(x, 'creadoPor'); cambia(x, 'modificadoPor');
-      // Las firmas de mandatos y las aceptaciones de confidencialidad son constancias: no se modifican
-    }
-    (db.actividad || []).forEach((h) => cambia(h, 'autor'));
-    db.config = { ...(db.config || {}), alias: { ...((db.config || {}).alias || {}) } };
-    for (const [k, v] of Object.entries(db.config.alias)) if (v === de) db.config.alias[k] = a; // cadenas de cambios
-    db.config.alias[de] = a; delete db.config.alias[a];
-    aliasNombres = db.config.alias;
+    const n = renombrarEnDb(db, de, a);
     registrar(db, autor, `Cambió el nombre "${de}" por "${a}" en ${n} registros`, null);
     return { cambiados: n, alias: aliasNombres, equipo: personasEquipo(db) };
   });
@@ -3072,6 +3116,19 @@ router.post('/notificaciones/leidas', async (req, res) => {
 });
 
 // Agregar o quitar personas de la lista del equipo (no borra lo que hicieron)
+// Nombres repetidos (la misma persona escrita de varias formas): ver y unir de una vez
+router.get('/equipo/repetidos', (req, res) => res.json({ repetidos: nombresRepetidos(leer()) }));
+router.post('/equipo/unir-repetidos', async (req, res) => {
+  if (!esAdmin(req)) return res.status(403).json({ error: 'Solo la administradora puede unir nombres.' });
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const rep = nombresRepetidos(db), hechos = [];
+    for (const [de, a] of Object.entries(rep)) { const n = renombrarEnDb(db, de, a); hechos.push({ de, a, cambiados: n }); }
+    if (hechos.length) registrar(db, autor, `Unió nombres repetidos: ${hechos.map((h) => `"${h.de}" → "${h.a}"`).join(', ')}`, null);
+    return { unidos: hechos, equipo: personasEquipo(db) };
+  });
+  res.json(r);
+});
 router.post('/equipo/persona', async (req, res) => {
   const b = req.body || {}, nombre = txt(b.nombre, 80), autor = usuarioDe(req);
   if (nombre.length < 2) return res.status(400).json({ error: 'Escribe el nombre completo.' });

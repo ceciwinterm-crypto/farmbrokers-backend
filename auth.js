@@ -3,7 +3,7 @@
 //
 //  - Cada persona entra con su correo y su contraseña.
 //  - Las contraseñas se guardan con bcrypt (nunca en texto).
-//  - Al entrar se entrega un token de sesión que vence (SESION_DIAS, por defecto 7).
+//  - Al entrar se entrega un token de sesión que vence (SESION_DIAS, por defecto 60).
 //    En el servidor solo se guarda la huella (SHA-256) del token, no el token.
 //  - Dos roles: "admin" (administra usuarios y aprueba eliminaciones) y "corredor".
 //  - Mientras PERMITIR_CLAVE_ANTIGUA no sea "0", la clave del equipo (FB_CLAVE /
@@ -17,7 +17,7 @@ const bcrypt = require('bcryptjs');
 
 const RAIZ = process.env.RAILWAY_VOLUME_MOUNT_PATH || path.join(__dirname, 'datos-locales');
 const ARCHIVO = path.join(RAIZ, 'usuarios.json');
-const SESION_DIAS = Math.max(1, Math.min(90, Number(process.env.SESION_DIAS) || 7));
+const SESION_DIAS = Math.max(1, Math.min(90, Number(process.env.SESION_DIAS) || 60));
 const ROLES = ['admin', 'corredor'];
 const COSTO_BCRYPT = 12;
 
@@ -26,6 +26,7 @@ const ahora = () => new Date().toISOString();
 const huella = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
 const correoOk = (e) => /^[^\s@]{1,64}@[^\s@]{1,190}\.[a-z]{2,}$/i.test(String(e || ''));
 const limpiarCorreo = (e) => String(e || '').trim().toLowerCase().slice(0, 200);
+const normNombre = (n) => String(n || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 const limpiarNombre = (n) => String(n || '').replace(/\s+/g, ' ').trim().slice(0, 80);
 
 // ── Archivo de usuarios (en el disco persistente de Railway) ────────────────
@@ -64,14 +65,16 @@ function crearUsuario(db, { email, nombre, rol, clave, debeCambiarClave }) {
   if (!ROLES.includes(rol)) throw new Error('Rol no válido.');
   const err = validarClave(clave); if (err) throw new Error(err);
   if (db.usuarios.some((u) => u.email === email)) throw new Error('Ya existe un usuario con ese correo.');
+  const igual = db.usuarios.find((u) => u.activo !== false && normNombre(u.nombre) === normNombre(nombre));
+  if (igual) throw new Error(`Ya existe una cuenta para ${igual.nombre} (${igual.email}). No crees otra: en esa cuenta usa “Cambiar contraseña”.`);
   const u = { id: crypto.randomUUID(), email, nombre, rol, hash: bcrypt.hashSync(String(clave), COSTO_BCRYPT), activo: true, creado: ahora(), debeCambiarClave: !!debeCambiarClave };
   db.usuarios.push(u);
   return u;
 }
-function abrirSesion(db, u, req) {
+function abrirSesion(db, u, req, porLink) {
   const token = crypto.randomBytes(32).toString('hex');
   const expira = new Date(Date.now() + SESION_DIAS * 864e5).toISOString();
-  db.sesiones[huella(token)] = { uid: u.id, creado: ahora(), expira, ip: ipDe(req), agente: String(req.get('user-agent') || '').slice(0, 200) };
+  db.sesiones[huella(token)] = { uid: u.id, creado: ahora(), expira, ip: ipDe(req), agente: String(req.get('user-agent') || '').slice(0, 200), ...(porLink ? { porLink: true } : {}) };
   u.ultimoIngreso = ahora();
   return { token, expira, usuario: publico(u) };
 }
@@ -85,7 +88,7 @@ function leerSesion(req, res, next) {
     const db = leer(), s = db.sesiones[huella(t)];
     if (s && new Date(s.expira).getTime() > Date.now()) {
       const u = db.usuarios.find((x) => x.id === s.uid && x.activo !== false);
-      if (u) { req.usuario = publico(u); req.sesionHuella = huella(t); }
+      if (u) { req.usuario = publico(u); req.sesionHuella = huella(t); req.sesionPorLink = !!s.porLink && Date.now() - new Date(s.creado).getTime() < 60 * 60e3; }
     }
     if (!req.usuario) req.sesionInvalida = true;
   }
@@ -102,7 +105,8 @@ const BLOQUEO_MS = 15 * 60 * 1000;
 function bloqueado(db, clave, max) { const i = db.intentos[clave]; return i && i.n >= max && Date.now() - new Date(i.ultimo).getTime() < BLOQUEO_MS; }
 function fallo(db, clave) { const i = db.intentos[clave] || { n: 0 }; if (Date.now() - new Date(i.ultimo || 0).getTime() > BLOQUEO_MS) i.n = 0; i.n += 1; i.ultimo = ahora(); db.intentos[clave] = i; }
 
-router.get('/estado', (req, res) => res.json({ hayUsuarios: hayUsuarios(), claveAntigua: claveAntiguaPermitida(), sesionDias: SESION_DIAS, usuario: req.usuario || null }));
+const correoListo = () => { try { return require('./crm.cjs')._interno.correoConfigurado(); } catch (e) { return false; } };
+router.get('/estado', (req, res) => res.json({ hayUsuarios: hayUsuarios(), claveAntigua: claveAntiguaPermitida(), sesionDias: SESION_DIAS, usuario: req.usuario || null, linkCorreo: correoListo(), sinClaveActual: !!req.sesionPorLink }));
 
 router.post('/login', async (req, res) => {
   const email = limpiarCorreo((req.body || {}).email), clave = String((req.body || {}).clave || '');
@@ -146,7 +150,8 @@ router.post('/cambiar-clave', requiereUsuario, async (req, res) => {
   const err = validarClave(b.nueva); if (err) return res.status(400).json({ error: err });
   const r = await modificar((db) => {
     const u = db.usuarios.find((x) => x.id === req.usuario.id); if (!u) return { error: 'Usuario no encontrado.' };
-    if (!bcrypt.compareSync(String(b.actual || ''), u.hash)) return { error: 'La contraseña actual no es correcta.' };
+    // Quien recién entró con el link de su correo puede elegir contraseña sin escribir la anterior
+    if (!req.sesionPorLink && !bcrypt.compareSync(String(b.actual || ''), u.hash)) return { error: 'La contraseña actual no es correcta.' };
     u.hash = bcrypt.hashSync(String(b.nueva), COSTO_BCRYPT); u.debeCambiarClave = false; u.claveCambiada = ahora();
     // Se cierran las demás sesiones de esa persona
     for (const [k, s] of Object.entries(db.sesiones)) if (s.uid === u.id && k !== req.sesionHuella) delete db.sesiones[k];
@@ -163,7 +168,8 @@ router.post('/usuarios', requiereUsuario, requiereAdmin, async (req, res) => {
   const b = req.body || {};
   const temporal = b.clave ? String(b.clave) : claveTemporal();
   try {
-    const u = await modificar((db) => crearUsuario(db, { email: b.email, nombre: b.nombre, rol: b.rol === 'admin' ? 'admin' : 'corredor', clave: temporal, debeCambiarClave: true }));
+    // Si la administradora elige la contraseña, la persona entra directo con ella (no se le pide cambiarla)
+    const u = await modificar((db) => crearUsuario(db, { email: b.email, nombre: b.nombre, rol: b.rol === 'admin' ? 'admin' : 'corredor', clave: temporal, debeCambiarClave: !b.clave }));
     res.json({ usuario: publico(u), claveTemporal: b.clave ? '' : temporal });
   } catch (e) { res.status(400).json({ error: e.message }); }
 });
@@ -178,6 +184,7 @@ router.put('/usuarios/:id', requiereUsuario, requiereAdmin, async (req, res) => 
     if (b.rol && ROLES.includes(b.rol)) u.rol = b.rol;
     if (typeof b.activo === 'boolean') { u.activo = b.activo; if (!b.activo) for (const [k, s] of Object.entries(db.sesiones)) if (s.uid === u.id) delete db.sesiones[k]; }
     let temporal = '';
+    if (b.clave !== undefined) { const e = validarClave(b.clave); if (e) return { error: e }; nuevaClaveDe(db, u, b.clave); }
     if (b.restablecer) { temporal = claveTemporal(); u.hash = bcrypt.hashSync(temporal, COSTO_BCRYPT); u.debeCambiarClave = true; for (const [k, s] of Object.entries(db.sesiones)) if (s.uid === u.id) delete db.sesiones[k]; }
     return { usuario: publico(u), claveTemporal: temporal };
   });
@@ -226,6 +233,47 @@ router.post('/restablecer', async (req, res) => {
     delete db.restablecer[k];
     nuevaClaveDe(db, u, b.nueva);
     return abrirSesion(db, u, req);
+  });
+  if (r.error) return res.status(400).json({ error: r.error });
+  res.json(r);
+});
+// ── Entrar sin contraseña: link al correo (vale 30 minutos y una sola vez) ──
+router.post('/link-acceso', async (req, res) => {
+  const email = limpiarCorreo((req.body || {}).email);
+  if (!correoOk(email)) return res.status(400).json({ error: 'Escribe tu correo.' });
+  if (!correoListo()) return res.status(503).json({ error: 'El envío de correos no está configurado. Entra con tu contraseña.' });
+  const r = await modificar((db) => {
+    const kI = `l:${ipDe(req)}`, kE = `le:${email}`;
+    if (bloqueado(db, kI, 10) || bloqueado(db, kE, 4)) return { error: 'Ya enviamos varios links. Revisa tu correo (también en spam) o espera 15 minutos.', status: 429 };
+    fallo(db, kI); fallo(db, kE);
+    const u = db.usuarios.find((x) => x.email === email && x.activo !== false);
+    if (!u) return { ok: true };
+    const token = crypto.randomBytes(32).toString('hex');
+    db.accesoLink = db.accesoLink || {};
+    for (const [k, t] of Object.entries(db.accesoLink)) if (new Date(t.expira).getTime() < Date.now()) delete db.accesoLink[k];
+    db.accesoLink[huella(token)] = { uid: u.id, expira: new Date(Date.now() + 30 * 60e3).toISOString(), ip: ipDe(req) };
+    return { ok: true, enviar: { u: publico(u), token } };
+  });
+  if (r.error) return res.status(r.status || 400).json({ error: r.error });
+  if (r.enviar) {
+    const link = `${FRONT}/?entrar=${r.enviar.token}#crm`;
+    try {
+      const crm = require('./crm.cjs')._interno;
+      await crm.enviarCorreo({ para: r.enviar.u.email, asunto: 'Tu link para entrar al CRM - Farm Brokers',
+        html: crm.plantillaCorreo('Entra al CRM', `<p style="margin:0 0 12px;font-size:15px;line-height:1.5">Hola ${String(r.enviar.u.nombre).replace(/</g, '&lt;')}, toca el botón para entrar al CRM de Farm Brokers. No necesitas contraseña.</p><p style="margin:0 0 12px"><a href="${link}" style="display:inline-block;background:#2D6A45;color:#ffffff;text-decoration:none;padding:11px 20px;border-radius:9px;font-weight:bold">Entrar al CRM</a></p><p style="margin:0;font-size:13px;color:#5E6E64">El link vale 30 minutos y sirve una sola vez. Si no lo pediste tú, ignora este correo.</p>`, 'Correo automático del CRM de Farm Brokers.'),
+        texto: `Entra al CRM de Farm Brokers (vale 30 minutos): ${link}` });
+    } catch (e) { return res.status(502).json({ error: `No se pudo enviar el correo: ${e.message}. Entra con tu contraseña.` }); }
+  }
+  res.json({ ok: true, mensaje: 'Si el correo corresponde a una cuenta, te llegó un link para entrar. Ábrelo en este mismo aparato. Revisa también spam.' });
+});
+router.post('/entrar-link', async (req, res) => {
+  const r = await modificar((db) => {
+    const k = huella(String((req.body || {}).token || '')), t = (db.accesoLink || {})[k];
+    if (!t || new Date(t.expira).getTime() < Date.now()) return { error: 'El link venció o ya se usó. Pide uno nuevo.' };
+    delete db.accesoLink[k];
+    const u = db.usuarios.find((x) => x.id === t.uid && x.activo !== false); if (!u) return { error: 'La cuenta no está activa.' };
+    u.debeCambiarClave = false; // demostró que es dueño del correo; puede elegir contraseña después en Mi cuenta
+    return abrirSesion(db, u, req, true);
   });
   if (r.error) return res.status(400).json({ error: r.error });
   res.json(r);
