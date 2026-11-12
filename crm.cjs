@@ -2152,7 +2152,47 @@ router.post('/campos/:id/redactar', async (req, res) => {
   const { filas, web } = antecedentesCampo(campo);
   if (filas.length < 4 && !web) return res.status(400).json({ error: 'Hay muy pocos datos del campo para redactar. Completa superficie, agua, plantaciones o aptitud, o vincula la publicación o la tasación.' });
   const perfiles = (campo.perfiles || []).map((pid) => (perfilesDe(db).find((x) => x.id === pid) || {}).nombre).filter(Boolean);
-  const tono = ['comercial', 'inversion', 'agrado', 'tecnico'].includes((req.body || {}).tono) ? req.body.tono : 'comercial';
+  const tono = ['web', 'comercial', 'inversion', 'agrado', 'tecnico'].includes((req.body || {}).tono) ? req.body.tono : 'web';
+  // Formato web: el mismo de la "Ficha para publicar" de la plataforma de tasaciones (párrafo de apertura + datos en viñetas + precio)
+  if (tono === 'web') {
+    const precio = campo.precioTexto || (campo.precioUF ? `UF ${miles(campo.precioUF)}` : campo.precioCLP ? `$ ${miles(campo.precioCLP)}` : '');
+    const tipoTxt = String((todosLosTipos()[campo.tipo] || campo.tipo || 'agrícola')).toLowerCase();
+    const op = campo.operacion === 'arriendo' ? 'en arriendo' : 'en venta';
+    const promptWeb = `Eres redactor de Farm Brokers Chile. Escribe la descripción de este campo para la página web con EXACTAMENTE este formato (es el formato oficial de la empresa; respétalo línea por línea):
+
+Campo ${tipoTxt} ${op} en la comuna de [comuna], [región][, a N km de Santiago si está el dato]. Predio de topografía [plana/ondulada/etc. si está el dato][, con suelos de clase ... de capacidad de uso si está el dato][, con plantaciones frutales establecidas / con aptitud para ... según los datos].
+
+- Superficie: [hectáreas] hectáreas[, topografía ... si está el dato]
+- Suelos: [clase, textura, drenaje, serie: lo que haya]
+- Clima: [lo que haya]
+- Aguas: [derechos, acciones, l/s, pozos, canal, tranques: lo que haya]
+- Plantaciones: [especies, variedades, hectáreas, años, árboles: lo que haya]
+- Construcciones: [casas, galpones, bodegas con m² si están]
+- Instalaciones y riego: [riego tecnificado, packing, cámaras, etc.]
+
+${precio ? `Precio: ${precio}
+Comisión 2% + IVA` : ''}
+
+Reglas:
+- Usa SOLO los antecedentes de abajo. No inventes cifras, cultivos, distancias ni calidades. Si un dato de una viñeta no está, OMITE esa viñeta completa (no escribas "sin información").
+- La primera frase es un solo párrafo corto, sobrio y concreto. Nada de adjetivos de venta ni exclamaciones.
+- Las viñetas empiezan con "- " y la etiqueta exacta ("Superficie:", "Suelos:", "Clima:", "Aguas:", "Plantaciones:", "Construcciones:", "Instalaciones y riego:"), en ese orden.
+- Español de Chile, cifras con coma decimal (ej. 12,5 ha).
+- No incluyas nombre del predio, propietarios, RUT, rol SII, inscripciones, deslindes, coordenadas ni datos de contacto.
+- ${REGLA_ACCESO}
+- ${precio ? 'Termina con las dos líneas de precio y comisión tal como están arriba.' : 'No hay precio: no escribas líneas de precio ni comisión.'}
+- Devuelve solo el texto, sin títulos ni comentarios.
+
+Antecedentes del campo:
+${filas.map(([k, v]) => `${k}: ${String(v).replace(/\s+/g, ' ').slice(0, 1500)}`).join('\n')}
+${web ? `\nDescripción publicada en farmbrokers.cl (fuente de datos):\n${web.slice(0, 4000)}` : ''}`;
+    try {
+      const texto = (await llamarClaude(promptWeb)).replace(/\*\*/g, '').replace(/^#+\s*/gm, '').replace(/^[•*]\s*/gm, '- ').replace(/\n{3,}/g, '\n\n').trim();
+      const autor = usuarioDe(req);
+      await modificar((d2) => { registrar(d2, autor, `Redactó con IA la descripción de ${campo.nombre} (formato web)`, { col: 'campos', id: campo.id }); });
+      return res.json({ texto });
+    } catch (e) { return res.status(502).json({ error: `No se pudo redactar: ${e.message}` }); }
+  }
   const ENFOQUES = {
     comercial: `Enfoque COMERCIAL: tu objetivo es que el lector quiera visitar el campo. Abre con una frase que enganche y resuma lo más atractivo del predio (su ubicación, su entorno, su producción o su potencial). Convierte cada dato en un beneficio concreto para el comprador: no solo "tiene 31 l/s de agua", sino lo que eso le permite. Muestra por qué es una oportunidad.`,
     inversion: `Enfoque INVERSIÓN Y PRODUCCIÓN: el lector es un agricultor, exportadora o inversionista. Destaca lo que hace rentable y seguro el campo: superficie productiva, plantaciones y su estado, seguridad de riego y derechos de agua, infraestructura para operar, suelos y aptitud. Habla de un activo productivo listo para trabajar o con potencial de crecimiento, siempre con los datos que hay.`,
