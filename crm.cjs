@@ -3096,6 +3096,26 @@ router.post('/tareas/:id/comentario', async (req, res) => {
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tarea.' });
 });
+// Quitar acciones de la agenda (atrasadas, sin acción o ya hechas): se borra la próxima acción del registro y su tarea
+router.post('/acciones/quitar', async (req, res) => {
+  const autor = usuarioDe(req), hecha = !!(req.body || {}).hecha;
+  const lista = (Array.isArray((req.body || {}).items) ? req.body.items : []).filter((x) => x && ['campos', 'clientes', 'tasaciones'].includes(x.col)).slice(0, 500);
+  if (!lista.length) return res.status(400).json({ error: 'No hay acciones para quitar.' });
+  const r = await modificar((db) => {
+    let n = 0;
+    for (const { col, id: rid } of lista) {
+      const x = db[col].find((y) => y.id === rid); if (!x || (!x.proximaFecha && !x.proximaAccion)) continue;
+      const accion = x.proximaAccion || 'acción sin definir';
+      if (x.accionTareaId) db.tareas = (db.tareas || []).filter((t) => t.id !== x.accionTareaId);
+      x.historial = [...(x.historial || []), { fecha: ahora(), autor, texto: hecha ? `Completó la acción: ${accion}` : `Quitó la acción de la agenda: ${accion}` }];
+      x.proximaAccion = ''; x.proximaFecha = ''; x.accionTareaId = ''; x.actualizado = ahora();
+      n++;
+    }
+    if (n) auditar(db, autor, `${hecha ? 'Marcó como hechas' : 'Quitó de la agenda'} ${n} ${n === 1 ? 'acción' : 'acciones'}`, null);
+    return { quitadas: n };
+  });
+  res.json(r);
+});
 router.delete('/tareas/:id', async (req, res) => {
   const autor = usuarioDe(req);
   const r = await modificar((db) => {
