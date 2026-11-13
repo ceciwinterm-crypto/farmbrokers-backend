@@ -901,7 +901,7 @@ function pendientesExternos(db) {
     for (const sh of c.compartidos || []) {
       if (!sh.activo || sh.aceptacion) continue;
       agregar({ clave: `plano:${c.id}:${sh.token}`, tipo: 'plano', campoId: c.id, campo: c.nombre, clienteId: sh.clienteId || '', para: sh.destinatario, desde: sh.creado, por: sh.creadoPor || '',
-        que: new Date(sh.vence).getTime() < hoy ? 'Plano con acuerdo de confidencialidad: no lo aceptó y el link venció' : 'Plano con acuerdo de confidencialidad enviado, no lo ha aceptado' });
+        que: `${sh.conFicha ? 'Ficha' : 'Plano'} con acuerdo de confidencialidad${new Date(sh.vence).getTime() < hoy ? ': no lo aceptó y el link venció' : ' enviado, no lo ha aceptado'}` });
     }
   }
   for (const o of db.ordenes || []) {
@@ -2309,7 +2309,7 @@ router.post('/kmz/analizar', (req, res) => {
 // ───────────────────────── Plano con acuerdo de confidencialidad ─────────────────────────
 const ACUERDO_BASE = `ACUERDO DE CONFIDENCIALIDAD
 
-Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT}, en adelante "el Interesado", declara recibir de FARM BROKERS CHILE SPA, rol único tributario N° 77.089.307-0, en adelante "el Corredor", información sobre la propiedad {CAMPO}, en adelante "la Propiedad", incluyendo su plano, su ubicación exacta y el archivo KMZ, con el solo fin de evaluar su eventual compra.
+Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT}, en adelante "el Interesado", declara recibir de FARM BROKERS CHILE SPA, rol único tributario N° 77.089.307-0, en adelante "el Corredor", información sobre la propiedad {CAMPO}, en adelante "la Propiedad", {INFORMACION}, con el solo fin de evaluar su eventual compra.
 
 1. El Interesado se obliga a mantener la más estricta confidencialidad respecto de la información recibida, y a no divulgarla, copiarla ni entregarla a terceros sin autorización previa, expresa y por escrito del Corredor, salvo a sus asesores directos, quienes quedarán sujetos a la misma obligación.
 
@@ -2322,8 +2322,16 @@ Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT}, en adelante "el Intere
 El Interesado acepta este acuerdo en forma electrónica, con los datos y la fecha que se registran al momento de su aceptación.`;
 const textoAcuerdo = (db) => (db.config && db.config.acuerdo) || ACUERDO_BASE;
 // {NOMBRE} y {RUT} se completan con los datos de quien acepta (si el texto editado no los trae, se agregan tras "Quien suscribe")
-const acuerdoPara = (db, campo) => {
-  let t = textoAcuerdo(db);
+// Qué incluye el link, para el texto del acuerdo: "incluyendo su ficha, su plano, su ubicación exacta y el archivo KMZ"
+function informacionDeLink(campo, c) {
+  const p = [];
+  if (c && c.conFicha) p.push('su ficha');
+  if (!c || (c.planos || []).length || (c.kmz !== false && campo.geo)) p.push('su plano');
+  if (!c || (c.kmz !== false && campo.geo)) p.push('su ubicación exacta y el archivo KMZ');
+  return p.length ? `incluyendo ${p.length > 1 ? `${p.slice(0, -1).join(', ')} y ${p[p.length - 1]}` : p[0]}` : '';
+}
+const acuerdoPara = (db, campo, c) => {
+  let t = textoAcuerdo(db).replace(/\{INFORMACION\}|incluyendo su plano, su ubicación exacta y el archivo KMZ/g, informacionDeLink(campo, c));
   if (!/\{NOMBRE\}/.test(t)) t = /Quien suscribe,?/i.test(t) ? t.replace(/Quien suscribe,?/i, 'Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT},') : `Quien suscribe, {NOMBRE}, cédula de identidad N° {RUT}, acepta lo siguiente:\n\n${t}`;
   return t.replace(/\{CAMPO\}/g, tituloCampo(campo));
 };
@@ -2368,10 +2376,12 @@ router.post('/campos/:id/compartir', async (req, res) => {
   const r = await modificar((db) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
     const pls = planosCampo(campo);
-    if (!campo.geo && !pls.length) return { error: 'Este campo no tiene KMZ ni planos. Súbelos primero en "Archivos y plano".' };
+    const ultFicha = (campo.fichasPdf || []).slice(-1)[0];
+    const conFicha = !!b.conFicha && !!ultFicha;
+    if (!campo.geo && !pls.length && !conFicha) return { error: 'Este campo no tiene ficha PDF, KMZ ni planos. Genera la ficha o sube el KMZ o los planos primero.' };
     const conKmz = !!campo.geo && b.kmz !== false;
     const planosIds = Array.isArray(b.planos) ? pls.filter((a) => b.planos.includes(a.id)).map((a) => a.id) : b.planos === false ? [] : pls.map((a) => a.id);
-    if (!conKmz && !planosIds.length) return { error: 'Elige qué enviar: el KMZ, los planos o ambos.' };
+    if (!conKmz && !planosIds.length && !conFicha) return { error: 'Elige qué enviar: la ficha, el KMZ o los planos.' };
     const cli = b.clienteId ? db.clientes.find((x) => x.id === b.clienteId) : null;
     const dias = Math.max(1, Math.min(365, Math.round(Number(b.dias) || 15)));
     const c = {
@@ -2379,13 +2389,15 @@ router.post('/campos/:id/compartir', async (req, res) => {
       email: txt(b.email, 160) || (cli ? emailsCli(cli)[0] || '' : ''), telefono: txt(b.telefono, 40) || (cli ? cli.telefono : ''),
       creado: ahora(), creadoPor: autor, vence: new Date(Date.now() + dias * 864e5).toISOString(), descarga: b.descarga !== false, activo: true,
       aceptacion: null, descargas: [], vistas: 0, kmz: conKmz, planos: planosIds,
-      ficha: (campo.fichasPdf || []).some((f) => f.token === b.ficha) ? b.ficha : '', // ficha del campo que va junto al plano
+      ficha: conFicha ? ultFicha.token : (campo.fichasPdf || []).some((f) => f.token === b.ficha) ? b.ficha : '', // ficha del campo que va con el link
+      conFicha, // la ficha se entrega en el link, después de aceptar el acuerdo
     };
+    const que = [conFicha && 'ficha', (conKmz || planosIds.length) && 'plano'].filter(Boolean).join(' y ');
     if (!c.destinatario) return { error: 'Indica a quién le envías el plano.' };
     campo.compartidos = [...(campo.compartidos || []), c];
-    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Creó un link de plano con confidencialidad para ${c.destinatario} (vence en ${dias} días)` }];
-    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Se le preparó el plano de ${campo.nombre} con acuerdo de confidencialidad` }];
-    registrar(db, autor, `Preparó el plano de ${campo.nombre} para ${c.destinatario}`, { col: 'campos', id: campo.id });
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Creó un link de ${que} con confidencialidad para ${c.destinatario} (vence en ${dias} días)` }];
+    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor, texto: `Se le preparó la ${que} de ${campo.nombre} con acuerdo de confidencialidad` }];
+    registrar(db, autor, `Preparó ${que === 'ficha' ? 'la ficha' : `el ${que}`} con confidencialidad de ${campo.nombre} para ${c.destinatario}`, { col: 'campos', id: campo.id });
     return campo;
   });
   if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
@@ -2415,6 +2427,12 @@ function buscarCompartido(db, token) {
 const planosCampo = (campo) => (campo.archivos || []).filter((a) => a.tipo === 'plano' && (a.vistas || []).length);
 const planosDeLink = (campo, c) => planosCampo(campo).filter((a) => !Array.isArray(c.planos) || c.planos.includes(a.id)); // links antiguos: todos
 // Ficha que acompaña al link: la que se envió con él; si ya se reemplazó, la última sin plano ni KMZ
+// Archivo de la ficha entregada con confidencialidad (la que se eligió al crear el link)
+function fichaArchivo(campo, c) {
+  if (!c.ficha) return null;
+  const ruta = path.join(ARCHIVOS, campo.id, `ficha-${c.ficha}.pdf`);
+  return fs.existsSync(ruta) ? ruta : null;
+}
 function fichaDeLink(campo, c) {
   const fs_ = campo.fichasPdf || [];
   const f = (c.ficha && fs_.find((x) => x.token === c.ficha)) || [...fs_].reverse().find((x) => x.opciones === 'k0p0');
@@ -2423,16 +2441,18 @@ function fichaDeLink(campo, c) {
 function publicoPlano(db, campo, c) {
   const vencido = Date.now() > new Date(c.vence).getTime();
   const conKmz = c.kmz !== false && !!campo.geo, pls = planosDeLink(campo, c);
-  const disponible = c.activo && !vencido && (conKmz || pls.length > 0);
-  const texto = acuerdoPara(db, campo);
+  const fichaOk = !!c.conFicha && !!fichaArchivo(campo, c);
+  const disponible = c.activo && !vencido && (conKmz || pls.length > 0 || fichaOk);
+  const texto = acuerdoPara(db, campo, c);
   return {
     titulo: tituloCampo(campo), lugar: [campo.sector, REGION_TEXTO[campo.region]].filter(Boolean).join(', '),
-    destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !(conKmz || pls.length) ? 'El plano ya no está disponible.' : '',
+    destinatario: c.destinatario, vence: c.vence, disponible, motivo: !c.activo ? 'Este link fue desactivado por Farm Brokers.' : vencido ? 'Este link venció.' : !(conKmz || pls.length) ? 'La información ya no está disponible.' : '',
     acuerdo: c.aceptacion && c.aceptacion.texto ? c.aceptacion.texto : texto, hash: hashBloques([texto, campo.id]), descarga: c.descarga,
     aceptacion: c.aceptacion ? { nombre: c.aceptacion.nombre, rut: c.aceptacion.rut, email: c.aceptacion.email || '', fecha: c.aceptacion.fecha, codigo: c.aceptacion.hash.slice(0, 12).toUpperCase() } : null,
     plano: c.aceptacion && disponible && conKmz ? { anillos: campo.geo.anillos, bbox: campo.geo.bbox, areaHa: campo.geo.areaHa, centro: campo.geo.centro, partes: (campo.geo.partes || []).map((p) => ({ nombre: p.nombre, desde: p.desde, hasta: p.hasta, areaHa: p.areaHa })) } : null,
     planos: c.aceptacion && disponible ? pls.map((a) => ({ id: a.id, nombre: a.nombre, vistas: a.vistas })) : [],
-    incluye: { kmz: conKmz, planos: pls.length },
+    ficha: c.aceptacion && disponible && fichaOk,
+    incluye: { kmz: conKmz, planos: pls.length, ficha: fichaOk },
   };
 }
 // Hojas y archivo original de los planos, solo para quien aceptó el acuerdo
@@ -2488,10 +2508,10 @@ router.post('/publico-plano/:token/aceptar', async (req, res) => {
     const firmado = acuerdoFirmado(pub.acuerdo, nombre, rutFormato(rut));
     c.aceptacion = { nombre, rut: rutFormato(rut), email, fecha: ahora(), ip: ipDe(req), agente: txt(req.get('user-agent'), 300), hash: hashBloques([firmado, campo.id]), hashPlantilla: pub.hash, texto: firmado };
     const quien = `${nombre} (cliente)`;
-    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó el acuerdo de confidencialidad y accedió al plano (RUT ${c.aceptacion.rut}, código ${c.aceptacion.hash.slice(0, 12).toUpperCase()})` }];
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó el acuerdo de confidencialidad y accedió a ${c.conFicha ? 'la ficha' : 'el plano'} (RUT ${c.aceptacion.rut}, código ${c.aceptacion.hash.slice(0, 12).toUpperCase()})` }];
     const cli = c.clienteId && db.clientes.find((y) => y.id === c.clienteId);
-    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó la confidencialidad y vio el plano de ${campo.nombre}` }];
-    registrar(db, quien, `Aceptó la confidencialidad del plano de ${campo.nombre}`, { col: 'campos', id: campo.id });
+    if (cli) cli.historial = [...(cli.historial || []), { fecha: ahora(), autor: quien, texto: `Aceptó la confidencialidad y vio ${c.conFicha ? 'la ficha' : 'el plano'} de ${campo.nombre}` }];
+    registrar(db, quien, `Aceptó la confidencialidad ${c.conFicha ? 'de la ficha' : 'del plano'} de ${campo.nombre}`, { col: 'campos', id: campo.id });
     notificar(db, c.creadoPor, `${nombre} aceptó la confidencialidad y ya puede ver el plano de ${campo.nombre}`, { col: 'campos', id: campo.id }, quien);
     return publicoPlano(db, campo, c);
   });
@@ -2530,6 +2550,20 @@ function kmlPersonalizado(campo, c) {
     + `<Style id="predio"><LineStyle><color>ff5ad6ff</color><width>3</width></LineStyle><PolyStyle><color>335ad6ff</color></PolyStyle></Style>`
     + `<Placemark><name>${escXml(titulo)}</name><description>${escXml(marca)}</description><styleUrl>#predio</styleUrl><MultiGeometry>${pol}</MultiGeometry></Placemark></Document></kml>`;
 }
+router.get('/publico-plano/:token/ficha', async (req, res) => {
+  const r = await modificar((db) => {
+    const x = buscarCompartido(db, req.params.token); if (!x) return null;
+    const pub = publicoPlano(db, x.campo, x.c); if (!pub.ficha) return null;
+    x.c.descargas = [...(x.c.descargas || []), { fecha: ahora(), archivo: 'ficha', ip: ipDe(req) }].slice(-50);
+    return { campo: x.campo, ruta: fichaArchivo(x.campo, x.c), descarga: x.c.descarga };
+  });
+  if (!r || !r.ruta) return res.status(404).send('La ficha no está disponible.');
+  const nombre = `Ficha ${tituloCampo(r.campo).replace(/[^\wÁÉÍÓÚáéíóúÑñ .,-]/g, '')} - Farm Brokers (confidencial).pdf`;
+  res.set('Content-Type', 'application/pdf');
+  res.set('Content-Disposition', `${req.query.descargar && r.descarga ? 'attachment' : 'inline'}; filename="${encodeURIComponent(nombre)}"; filename*=UTF-8''${encodeURIComponent(nombre)}`);
+  res.set('Cache-Control', 'private, no-store');
+  fs.createReadStream(r.ruta).pipe(res);
+});
 router.get('/publico-plano/:token/kmz', async (req, res) => {
   const r = await modificar((db) => {
     const x = buscarCompartido(db, req.params.token); if (!x) return null;
@@ -2683,7 +2717,8 @@ router.post('/campos/:id/ficha-pdf', async (req, res) => {
     fs.mkdirSync(path.join(ARCHIVOS, campo.id), { recursive: true });
     fs.writeFileSync(path.join(ARCHIVOS, campo.id, `ficha-${token}.pdf`), buf);
     const previas = campo.fichasPdf || [];
-    for (const f of previas.slice(0, -4)) { try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, `ficha-${f.token}.pdf`)); } catch (e) {} } // guarda las 5 últimas
+    const enLinks = new Set((campo.compartidos || []).filter((c) => c.activo && c.ficha).map((c) => c.ficha)); // las fichas enviadas con confidencialidad se conservan
+    for (const f of previas.slice(0, -4)) { if (enLinks.has(f.token)) continue; try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, `ficha-${f.token}.pdf`)); } catch (e) {} } // guarda las 5 últimas
     const opciones = /^k[01]p[01]$/.test(String((req.body || {}).opciones || '')) ? req.body.opciones : 'k1p1';
     campo.fichasPdf = [...previas.slice(-4), { token, fecha: ahora(), autor, tamano: buf.length, vistas: 0, opciones }];
     campo.fichaPdf = campo.fichasPdf[campo.fichasPdf.length - 1];
