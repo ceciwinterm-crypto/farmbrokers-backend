@@ -1934,7 +1934,7 @@ app.post('/poligono-catastral', async (req, res) => {
     const H = { 'X-API-Key': key };
     if (!cacheCatastralComunas.lista || Date.now() - cacheCatastralComunas.desde > 7 * 864e5) {
       const rc = await fetch(CATASTRAL_API + '/comunas', { headers: H });
-      if (!rc.ok) return res.json({ ok:false, mensaje:'Catastral.cl no respondió (' + rc.status + '). Revisa la clave o el cupo diario.' });
+      if (!rc.ok) return res.json({ ok:false, mensaje: (rc.status === 401 || rc.status === 403) ? 'Catastral.cl rechazó la clave (error ' + rc.status + '): no es válida o venció. Crea una nueva en catastral.cl y ponla en Railway, en la variable CATASTRAL_KEY.' : rc.status === 429 ? 'Se acabó el cupo diario de Catastral.cl. Vuelve a intentar mañana o sube al plan API Pro.' : 'Catastral.cl no respondió (' + rc.status + '). Intenta de nuevo en un rato.' });
       cacheCatastralComunas.lista = await rc.json(); cacheCatastralComunas.desde = Date.now();
     }
     const buscada = normU(comuna).replace(/[^A-Z ]/g, '');
@@ -1944,7 +1944,7 @@ app.post('/poligono-catastral', async (req, res) => {
     if (!c) return res.json({ ok:false, mensaje:'Catastral.cl no reconoce la comuna "' + comuna + '".' });
     const rp = await fetch(CATASTRAL_API + '/predio/' + c.codigo + '/' + Number(m[1]) + '/' + Number(m[2]) + '/poligono', { headers: H });
     if (rp.status === 404) return res.json({ ok:false, mensaje:'Catastral.cl tampoco tiene el polígono de este rol.' });
-    if (!rp.ok) return res.json({ ok:false, mensaje:'Catastral.cl respondió con error ' + rp.status + (rp.status === 429 ? ' (se acabó el cupo del día).' : '.') });
+    if (!rp.ok) return res.json({ ok:false, mensaje: (rp.status === 401 || rp.status === 403) ? 'Catastral.cl rechazó la clave (error ' + rp.status + '): no es válida, venció o tu plan no incluye polígonos. Revisa la clave en catastral.cl y en Railway (CATASTRAL_KEY).' : 'Catastral.cl respondió con error ' + rp.status + (rp.status === 429 ? ' (se acabó el cupo del día).' : '.') });
     const j = await rp.json();
     if (!j || !j.geometry) return res.json({ ok:false, mensaje:'Catastral.cl no trae geometría para este rol.' });
     res.json({ ok:true, predioGeo: j.geometry, superficieHa: ((j.geom_area_m2 || 0) / 10000).toFixed(2), comunaCatastral: c.nombre, fuente:'SII vía Catastral.cl (referencial)' });
