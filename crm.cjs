@@ -4488,7 +4488,7 @@ router.post('/campos/:id/geo-sii', async (req, res) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
     if (campo.geo && campo.geo.fuente === 'kmz' && !b.reemplazar) return { error: 'El campo ya tiene un KMZ subido. No lo reemplacé.' };
     aplicarGeo(campo, g);
-    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Trajo el plano del rol ${txt(b.rol, 40)} desde el SII (${g.areaHa} ha, referencial)` }];
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Trajo el plano del rol ${txt(b.rol, 40)} (${txt(b.fuente, 60) || 'catastro'}, ${g.areaHa} ha, referencial)` }];
     campo.actualizado = ahora();
     return campo;
   });
