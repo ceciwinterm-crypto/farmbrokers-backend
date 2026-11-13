@@ -1976,7 +1976,7 @@ function geoDeArchivo(buf, nombre) {
   return g;
 }
 const esPlano = (a) => a.tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre || '');
-function esKmzArchivo(a) { return !!a && (a.tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre || '')) && !/pdf|image/i.test(a.mime || ''); }
+function esKmzArchivo(a) { return !!a && !a.generado && (a.tipo === 'kmz' || /\.(kmz|kml)$/i.test(a.nombre || '')) && !/pdf|image/i.test(a.mime || ''); }
 function puntoEnAnillo([x, y], a) {
   let dentro = false;
   for (let i = 0, j = a.length - 1; i < a.length; j = i++) { const [xi, yi] = a[i], [xj, yj] = a[j]; if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) dentro = !dentro; }
@@ -2006,6 +2006,24 @@ function recalcularGeo(campo) {
   const g = { fuente: 'kmz', anillos, bbox, areaHa, centro: { lat: (bbox[1] + bbox[3]) / 2, lng: (bbox[0] + bbox[2]) / 2 }, fecha: ahora(), archivo: meta[meta.length - 1].archivo, partes: partesG };
   aplicarGeo(campo, g);
   return g;
+}
+// KMZ descargable del plano que vino de una tasación o del catastro (queda en "Archivos y plano" para que cualquiera del equipo lo baje)
+function guardarKmzDeGeo(campo, autor, origen) {
+  if (!campo.geo || !(campo.geo.anillos || []).length) return null;
+  const titulo = tituloCampo(campo);
+  const pol = campo.geo.anillos.map((r) => `<Polygon><outerBoundaryIs><LinearRing><coordinates>${r.map(([x, y]) => `${x},${y},0`).join(' ')}</coordinates></LinearRing></outerBoundaryIs></Polygon>`).join('');
+  const kml = `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>${escXml(titulo)}</name>`
+    + `<Style id="predio"><LineStyle><color>ff5ad6ff</color><width>3</width></LineStyle><PolyStyle><color>335ad6ff</color></PolyStyle></Style>`
+    + `<Placemark><name>${escXml(titulo)}</name><description>${escXml(`Plano ${origen}, referencial. ${campo.geo.areaHa} ha. Farm Brokers Chile.`)}</description><styleUrl>#predio</styleUrl><MultiGeometry>${pol}</MultiGeometry></Placemark></Document></kml>`;
+  const buf = zipUno('doc.kml', Buffer.from(kml, 'utf8'));
+  const nombre = `${titulo.replace(/[\\/:*?"<>|]/g, '').slice(0, 80)} (plano ${origen}).kmz`;
+  // reemplaza el KMZ generado antes (no los que subió el equipo)
+  for (const a of (campo.archivos || []).filter((x) => x.generado)) { try { fs.unlinkSync(path.join(ARCHIVOS, campo.id, a.id)); } catch (e) {} }
+  const a = { id: crypto.randomBytes(8).toString('hex'), tipo: 'kmz', nombre, mime: 'application/vnd.google-earth.kmz', tamano: buf.length, fecha: ahora(), origen: 'equipo', autor, generado: true };
+  fs.mkdirSync(path.join(ARCHIVOS, campo.id), { recursive: true });
+  fs.writeFileSync(path.join(ARCHIVOS, campo.id, a.id), buf);
+  campo.archivos = [...(campo.archivos || []).filter((x) => !x.generado), a];
+  return a;
 }
 function aplicarGeo(campo, g) {
   campo.geo = g;
@@ -4436,7 +4454,7 @@ function campoDesdeTasacion(db, reg, tid, autor, campoId = '') {
       historial: [{ fecha: ahora(), autor, texto: 'Registrada desde la plataforma de tasaciones' }], envios: [], creado: ahora(), actualizado: ahora() };
     db.tasaciones.push(tas);
   }
-  if (geoTas && !(campo.geo && campo.geo.fuente === 'kmz')) { aplicarGeo(campo, geoTas); if (existia) completados.push('plano del predio'); }
+  if (geoTas && !(campo.geo && campo.geo.fuente === 'kmz')) { aplicarGeo(campo, geoTas); guardarKmzDeGeo(campo, autor, 'de la tasación'); if (existia) completados.push('plano del predio'); }
   if (Object.values(infoTas).some((v) => v && v !== infoTas.numero)) { campo.tasacionInfo = infoTas; if (existia) completados.push('antecedentes de la tasación'); }
   registrar(db, autor, `${existia ? 'Actualizó' : 'Creó'} el campo ${campo.nombre} desde la tasación ${t.numero || reg.nombre || ''}`, { col: 'campos', id: campo.id });
   return { campo, tasacion: tas, existia, completados };
@@ -4478,6 +4496,20 @@ router.post('/campos/:id/importar-tasacion/:tid', async (req, res) => {
   });
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
 });
+// Campos que ya tenían plano (de tasación o catastro) sin archivo KMZ: lo genera y lo deja en sus archivos
+router.post('/campos/:id/guardar-kmz', async (req, res) => {
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    if (!campo.geo) return { error: 'Este campo todavía no tiene plano.' };
+    const a = guardarKmzDeGeo(campo, autor, campo.geo.fuente === 'tasacion' ? 'de la tasación' : campo.geo.fuente === 'sii' ? 'del catastro' : 'del CRM');
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Guardó el KMZ del plano en los archivos (${a.nombre})` }];
+    return { campo, archivo: a };
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
 // Plano del SII (polígono del rol) como KMZ del campo, cuando no hay tasación
 router.post('/campos/:id/geo-sii', async (req, res) => {
   const b = req.body || {}, autor = usuarioDe(req);
@@ -4488,6 +4520,7 @@ router.post('/campos/:id/geo-sii', async (req, res) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
     if (campo.geo && campo.geo.fuente === 'kmz' && !b.reemplazar) return { error: 'El campo ya tiene un KMZ subido. No lo reemplacé.' };
     aplicarGeo(campo, g);
+    guardarKmzDeGeo(campo, autor, `del rol ${txt(b.rol, 40)}`);
     campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Trajo el plano del rol ${txt(b.rol, 40)} (${txt(b.fuente, 60) || 'catastro'}, ${g.areaHa} ha, referencial)` }];
     campo.actualizado = ahora();
     return campo;
