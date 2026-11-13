@@ -4452,6 +4452,50 @@ router.post('/plataforma/tasaciones/:id/campo', async (req, res) => {
   res.json(await modificar((db) => campoDesdeTasacion(db, reg, tid, autor)));
 });
 
+// ── Desde la ficha del campo: buscar por rol en las tasaciones de la plataforma y traer sus datos (plantaciones, suelos, aguas, plano/KMZ)
+const normRol = (r) => { const m = String(r || '').match(/(\d+)\s*[-–/ ]\s*(\d+)/); return m ? `${Number(m[1])}-${Number(m[2])}` : ''; };
+const rolesDe = (t) => String(t || '').split(/[,;y]+/).map(normRol).filter(Boolean);
+router.get('/campos/:id/tasaciones-rol', (req, res) => {
+  const campo = leer().campos.find((x) => x.id === req.params.id);
+  const buscados = rolesDe(req.query.rol || (campo && campo.rol));
+  if (!buscados.length) return res.status(400).json({ error: 'Escribe el rol con la forma manzana-predio, por ejemplo 123-45.' });
+  const comuna = norm(req.query.comuna || (campo && campo.sector) || '');
+  const lista = listarTasacionesPlataforma().filter((t) => t.roles.some((r) => buscados.includes(normRol(r))))
+    .map((t) => ({ ...t, mismaComuna: !comuna || !t.comuna || norm(t.comuna) === comuna }))
+    .sort((a, b) => (b.mismaComuna - a.mismaComuna) || String(b.guardado).localeCompare(String(a.guardado)));
+  res.json({ tasaciones: lista.slice(0, 10), roles: buscados });
+});
+router.post('/campos/:id/importar-tasacion/:tid', async (req, res) => {
+  const tid = req.params.tid;
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(tid)) return res.status(400).json({ error: 'Tasación no válida.' });
+  let reg;
+  try { reg = JSON.parse(fs.readFileSync(path.join(DIR_TAS_PLATAFORMA, `${tid}.json`), 'utf8')); }
+  catch (e) { return res.status(404).json({ error: 'No se encontró esa tasación en la plataforma.' }); }
+  const autor = usuarioDe(req);
+  const r = await modificar((db) => {
+    if (!db.campos.find((x) => x.id === req.params.id)) return null;
+    return campoDesdeTasacion(db, reg, tid, autor, req.params.id);
+  });
+  r ? res.json(r) : res.status(404).json({ error: 'No se encontró el campo.' });
+});
+// Plano del SII (polígono del rol) como KMZ del campo, cuando no hay tasación
+router.post('/campos/:id/geo-sii', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req);
+  let g = null;
+  try { g = armarGeo(anillosDeGeoJSON(b.geometry), 'sii'); } catch (e) { g = null; }
+  if (!g) return res.status(400).json({ error: 'El plano del SII no trae un polígono válido.' });
+  const r = await modificar((db) => {
+    const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
+    if (campo.geo && campo.geo.fuente === 'kmz' && !b.reemplazar) return { error: 'El campo ya tiene un KMZ subido. No lo reemplacé.' };
+    aplicarGeo(campo, g);
+    campo.historial = [...(campo.historial || []), { fecha: ahora(), autor, texto: `Trajo el plano del rol ${txt(b.rol, 40)} desde el SII (${g.areaHa} ha, referencial)` }];
+    campo.actualizado = ahora();
+    return campo;
+  });
+  if (!r) return res.status(404).json({ error: 'No se encontró el campo.' });
+  if (r.error) return res.status(409).json(r);
+  res.json(r);
+});
 // Botón "Crear en CRM" de la plataforma: recibe los datos del formulario abierto (aunque no esté guardado)
 router.post('/plataforma/campo', async (req, res) => {
   const b = req.body || {};
