@@ -956,7 +956,7 @@ function auditar(db, autor, accion, ref, detalle) {
 }
 function registrar(db, autor, texto, ref) {
   db.actividad.unshift({ fecha: ahora(), autor, texto, ref });
-  if (db.actividad.length > 500) db.actividad.length = 500;
+  if (db.actividad.length > 2000) db.actividad.length = 2000; // unos meses de historia, para filtrar por fecha
   auditar(db, autor, texto, ref);
 }
 function notificar(db, para, texto, ref, de, opciones = {}) {
@@ -996,7 +996,7 @@ router.get('/', (req, res) => {
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
     zonas: todasLasZonas(), cultivos: todosLosCultivos(), cultivosFrutales: Object.keys(cultivosExtra).filter((k) => cultivosExtra[k].frutal), regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), empresa: empresaDe(), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
-    actividad: db.actividad.slice(0, 300), pendientesExternos: pendientesExternos(db), matches: calcularMatches(db),
+    actividad: db.actividad, pendientesExternos: pendientesExternos(db), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500).map((o) => (o.firma || o.vence ? o : { ...o, vence: venceDe(o) })), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
     esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, sesion: req.usuario || null, cuentas: auth.hayUsuarios(), miembros: miembrosEquipo(db), brochures: (db.brochures || []).slice(-500).map(({ token, clienteId, campos, fecha, autor, vistas }) => ({ token, clienteId, campos, fecha, autor, vistas })), ofertas: (db.ofertas || []).slice(-300) });
