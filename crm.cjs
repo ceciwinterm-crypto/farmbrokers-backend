@@ -878,6 +878,40 @@ function importarHojas(hojas) {
 }
 
 // ───────────────────────── Almacenamiento ─────────────────────────
+// ── Pendientes con externos: mandatos, órdenes de visita y planos enviados a clientes o propietarios que aún no responden.
+// A los 7 días (o la fecha que se elija al posponer) pasan a "recordar".
+const SEGUIMIENTO_DIAS = 7;
+function pendientesExternos(db) {
+  const seg = db.seguimientos || {}, hoy = Date.now(), out = [];
+  const cerrado = (c) => /vendid|descart|perdid|retirad|arrendado/i.test(String(c.etapa || ''));
+  const agregar = (it) => {
+    const s2 = seg[it.clave] || {};
+    if (s2.cerrado) return;
+    const recordar = s2.recordar || new Date(new Date(it.desde).getTime() + SEGUIMIENTO_DIAS * 864e5).toISOString();
+    out.push({ ...it, dias: Math.floor((hoy - new Date(it.desde).getTime()) / 864e5), recordar, toca: hoy >= new Date(recordar).getTime(), pospuesto: !!s2.recordar });
+  };
+  for (const c of db.campos) {
+    if (cerrado(c)) continue;
+    const cap = c.captacion;
+    if (cap && !cap.firma && ['enviado', 'en_progreso', 'completado'].includes(cap.estado)) {
+      const para = (cap.datos && nombreVendedor(cap.datos)) || c.propietario || 'el propietario';
+      agregar({ clave: `mandato:${c.id}:${cap.token}`, tipo: 'mandato', campoId: c.id, campo: c.nombre, para, desde: cap.actualizado || cap.creado, por: cap.creadoPor || '',
+        que: cap.estado === 'completado' ? 'Mandato enviado, falta la firma del propietario' : 'Link del mandato enviado, el propietario no completa sus datos' });
+    }
+    for (const sh of c.compartidos || []) {
+      if (!sh.activo || sh.aceptacion) continue;
+      agregar({ clave: `plano:${c.id}:${sh.token}`, tipo: 'plano', campoId: c.id, campo: c.nombre, clienteId: sh.clienteId || '', para: sh.destinatario, desde: sh.creado, por: sh.creadoPor || '',
+        que: new Date(sh.vence).getTime() < hoy ? 'Plano con acuerdo de confidencialidad: no lo aceptó y el link venció' : 'Plano con acuerdo de confidencialidad enviado, no lo ha aceptado' });
+    }
+  }
+  for (const o of db.ordenes || []) {
+    if (o.firma || o.estado !== 'pendiente') continue;
+    const c = db.campos.find((x) => x.id === o.campoId); if (c && cerrado(c)) continue;
+    agregar({ clave: `orden:${o.id}`, tipo: 'orden', campoId: o.campoId, campo: c ? c.nombre : (o.datos && o.datos.propiedad) || '', clienteId: o.clienteId, para: (o.datos && (o.datos.clienteNombre || o.datos.empresa)) || '', desde: o.creado, por: o.autor || '',
+      que: vencioOrden(o) ? 'Orden de visita sin firmar: el link venció' : 'Orden de visita enviada, falta la firma del cliente' });
+  }
+  return out.sort((a, b) => (b.toca - a.toca) || a.desde.localeCompare(b.desde));
+}
 function vacio() { return { campos: [], clientes: [], tasaciones: [], actividad: [] }; }
 function leer() {
   try { const d = JSON.parse(fs.readFileSync(FILE, 'utf8')); tiposExtra = d.tiposExtra || {}; cultivosExtra = d.cultivosExtra || {}; zonasExtra = d.zonasExtra || {}; aliasNombres = (d.config && d.config.alias) || {}; nombresCfg = [...((d.config && d.config.miembros) || []), ...((d.config && d.config.admins) || []), ...Object.values(aliasNombres)]; empresaCfg = (d.config && d.config.empresa) || null; perfilesActuales = Array.isArray(d.perfiles) ? d.perfiles : PERFILES_BASE; (d.campos || []).forEach(normalizarCampo); (d.clientes || []).forEach((c) => { if (!Array.isArray(c.busquedas) || !Array.isArray(c.contactos) || !c.clase) Object.assign(c, limpiar('clientes', {}, c)); }); return { ...vacio(), ...d }; }
@@ -962,7 +996,7 @@ router.get('/', (req, res) => {
   }
   res.json({ version: VERSION, etapas: ETAPAS, checklist: CHECKLIST, activas: CAMPO_ACTIVAS, ofrecibles: CAMPO_OFRECIBLES,
     zonas: todasLasZonas(), cultivos: todosLosCultivos(), cultivosFrutales: Object.keys(cultivosExtra).filter((k) => cultivosExtra[k].frutal), regiones: REGIONES, tipos: todosLosTipos(), estilo: estiloDe(db), syncEnCurso: !!sincronizando, fichasBase: FICHAS_URL, wpConfigurado: !!(process.env.WP_USER && process.env.WP_APP_PASSWORD), acuerdo: textoAcuerdo(db), empresa: empresaDe(), alias: aliasNombres, perfiles: perfilesDe(db), corredores: corredoresDe(db), equipo: personasEquipo(db), campos: db.campos, clientes: db.clientes, tasaciones: db.tasaciones, sync: db.sync || null,
-    actividad: db.actividad.slice(0, 150), matches: calcularMatches(db),
+    actividad: db.actividad.slice(0, 300), pendientesExternos: pendientesExternos(db), matches: calcularMatches(db),
     correo: { configurado: correoConfigurado(), remitente: remitenteCorreo(), log: esAdmin(req) ? (db.correosLog || []).slice(-30).reverse() : [] }, avisosCorreo: (db.config && db.config.avisosCorreo) || {}, tareas: db.tareas || [], ordenes: (db.ordenes || []).slice(-500).map((o) => (o.firma || o.vence ? o : { ...o, vence: venceDe(o) })), notificaciones: (db.notificaciones || []).filter((n) => n.para === yo).slice(-80).reverse(),
     solicitudes: (db.solicitudes || []).filter((x) => x.estado === 'pendiente' || Date.now() - new Date(x.fecha).getTime() < 30 * 864e5).slice(-100).reverse(),
     esAdmin: esAdmin(req), adminConfigurada: !!ADMIN_KEY, admins: adminsDe(db), contactos: (db.config && db.config.contactos) || {}, sesion: req.usuario || null, cuentas: auth.hayUsuarios(), miembros: miembrosEquipo(db), brochures: (db.brochures || []).slice(-500).map(({ token, clienteId, campos, fecha, autor, vistas }) => ({ token, clienteId, campos, fecha, autor, vistas })), ofertas: (db.ofertas || []).slice(-300) });
@@ -3137,6 +3171,24 @@ router.post('/tareas/:id/comentario', async (req, res) => {
   r ? res.json(r) : res.status(404).json({ error: 'No se encontró la tarea.' });
 });
 // Quitar acciones de la agenda (atrasadas, sin acción o ya hechas): se borra la próxima acción del registro y su tarea
+// Seguimiento de lo enviado a externos: "ya respondió" (sale de la lista) o "recordarme en N días"
+router.post('/seguimiento', async (req, res) => {
+  const b = req.body || {}, autor = usuarioDe(req), clave = txt(b.clave, 200);
+  if (!clave) return res.status(400).json({ error: 'Falta el pendiente.' });
+  const r = await modificar((db) => {
+    const it = pendientesExternos(db).find((x) => x.clave === clave);
+    db.seguimientos = { ...(db.seguimientos || {}) };
+    if (b.accion === 'respondio') {
+      db.seguimientos[clave] = { cerrado: ahora(), por: autor };
+      if (it) { const c = db.campos.find((x) => x.id === it.campoId); if (c) c.historial = [...(c.historial || []), { fecha: ahora(), autor, texto: `Cerró el seguimiento: ${it.que.toLowerCase()} (${it.para})` }]; }
+    } else {
+      const dias = Math.max(1, Math.min(60, Math.round(Number(b.dias) || SEGUIMIENTO_DIAS)));
+      db.seguimientos[clave] = { ...(db.seguimientos[clave] || {}), recordar: new Date(Date.now() + dias * 864e5).toISOString(), por: autor };
+    }
+    return { pendientesExternos: pendientesExternos(db) };
+  });
+  res.json(r);
+});
 router.post('/acciones/quitar', async (req, res) => {
   const autor = usuarioDe(req), hecha = !!(req.body || {}).hecha;
   const lista = (Array.isArray((req.body || {}).items) ? req.body.items : []).filter((x) => x && ['campos', 'clientes', 'tasaciones'].includes(x.col)).slice(0, 500);
