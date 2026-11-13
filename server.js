@@ -1063,7 +1063,11 @@ const manejadorSuelos = async (req, res) => {
 
     // 2) Poligono del predio por rol + comuna
     const rolLimpio = String(rol).trim();
-    const where = encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + normU(comuna) + "%'");
+    // El rol se escribe con o sin ceros a la izquierda (00158-00419 = 158-419): se buscan ambas formas
+    const mRol = rolLimpio.match(/^0*(\d+)\s*[-–/ ]\s*0*(\d+)$/);
+    const formasRol = [...new Set([rolLimpio, mRol ? mRol[1] + '-' + mRol[2] : '', mRol ? mRol[1].padStart(5, '0') + '-' + mRol[2].padStart(5, '0') : ''].filter(Boolean))];
+    const rolWhere = 'rol IN (' + formasRol.map(r => "'" + r.replace(/'/g, '') + "'").join(',') + ')';
+    const where = encodeURIComponent(rolWhere + " AND UPPER(desccomu) LIKE '%" + normU(comuna) + "%'");
     const urlPredio = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
       '/query?where=' + where + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
     const rp = await fetch(urlPredio);
@@ -1081,7 +1085,7 @@ const manejadorSuelos = async (req, res) => {
       ])].filter(v => v && v !== base);
       for (const v of variantes) {
         const urlV = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
-          '/query?where=' + encodeURIComponent("rol='" + rolLimpio + "' AND UPPER(desccomu) LIKE '%" + v + "%'") +
+          '/query?where=' + encodeURIComponent(rolWhere + " AND UPPER(desccomu) LIKE '%" + v + "%'") +
           '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
         const rv = await fetch(urlV);
         const gv = await rv.json();
@@ -1097,7 +1101,7 @@ const manejadorSuelos = async (req, res) => {
     if (!gj.features || !gj.features.length) {
       // reintento sin filtro de comuna
       const url2 = CIREN_BASE + '/IDEMINAGRI/PROPIEDADES_RURALES/MapServer/' + capa.id +
-        "/query?where=" + encodeURIComponent("rol='" + rolLimpio + "'") + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+        "/query?where=" + encodeURIComponent(rolWhere) + '&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
       const rp2 = await fetch(url2);
       const gj2 = await rp2.json();
       debug.push({ paso:'predio-sin-comuna', status: rp2.status, features: (gj2.features||[]).length });
