@@ -2376,7 +2376,7 @@ router.post('/campos/:id/compartir', async (req, res) => {
   const r = await modificar((db) => {
     const campo = db.campos.find((x) => x.id === req.params.id); if (!campo) return null;
     const pls = planosCampo(campo);
-    const ultFicha = (campo.fichasPdf || []).slice(-1)[0];
+    const ultFicha = (campo.fichasPdf || []).find((f) => f.token === b.ficha) || (campo.fichasPdf || []).slice(-1)[0]; // la ficha recién generada para este envío, o la última
     const conFicha = !!b.conFicha && !!ultFicha;
     if (!campo.geo && !pls.length && !conFicha) return { error: 'Este campo no tiene ficha PDF, KMZ ni planos. Genera la ficha o sube el KMZ o los planos primero.' };
     const conKmz = !!campo.geo && b.kmz !== false;
